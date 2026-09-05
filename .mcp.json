@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "pix": {
+      "type": "stdio",
+      "command": "src\\PixMcp\\bin\\x64\\Release\\net10.0-windows10.0.26100.0\\PixMcp.exe",
+      "args": []
+    }
+  }
+}

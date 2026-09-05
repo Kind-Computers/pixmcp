@@ -1,0 +1,12 @@
+bin/
+obj/
+*.user
+*.suo
+.vs/
+TestResults/
+*.wpix*
+*.dxdmp*
+*.pdb
+__pycache__/
+*.py[cod]
+.claude/settings.local.json

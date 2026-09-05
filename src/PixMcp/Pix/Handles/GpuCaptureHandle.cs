@@ -1,0 +1,329 @@
+using System.Runtime.InteropServices;
+using Microsoft.PIX;
+using Microsoft.PIX.Extension;
+using Microsoft.PIX.Extension.DeviceConnection;
+using Microsoft.PIX.Extension.GpuCapture;
+using Microsoft.PIX.Extension.GpuCapture.Analysis;
+using ModelContextProtocol;
+using ConnDesc = Microsoft.PIX.Extension.DeviceConnection.PIX_CONNECTION_DESC;
+
+namespace PixMcp.Pix.Handles;
+
+/// <summary>A compact managed copy of PIX_EVENT_INFO (the PIX struct holds unmanaged string pointers).</summary>
+public readonly record struct EventRecord(uint Index, uint GpuId, uint ParentIndex, string Name, string ApiCallData, uint CommandListId, uint Color)
+{
+    public static EventRecord From(uint index, PIX_EVENT_INFO e)
+        => new(index, e.GpuId, e.ParentIndex, Interop.A(e.Name), Interop.A(e.ApiCallData), e.CommandListId, e.Color);
+
+    public object ToDto(int queueIndex) => new
+    {
+        queueIndex,
+        index = Index,
+        gpuId = GpuId == uint.MaxValue ? (uint?)null : GpuId,
+        parentIndex = ParentIndex == uint.MaxValue ? (uint?)null : ParentIndex,
+        name = Name,
+        apiCallData = string.IsNullOrEmpty(ApiCallData) ? null : ApiCallData,
+        commandListId = CommandListId,
+        color = Color == 0 ? null : $"0x{Color:X8}",
+    };
+}
+
+public sealed class QueueEntry
+{
+    public required int Index { get; init; }
+    public required IPixGpuCaptureQueueInfo Info { get; init; }
+    public required uint Id { get; init; }
+    public required string Name { get; init; }
+    public required PIX_QUEUE_TYPE Type { get; init; }
+    public required uint AdapterId { get; init; }
+    public required string AdapterName { get; init; }
+    public required uint EventCount { get; init; }
+    public EventRecord[]? Cache { get; set; }
+
+    public object ToDto() => new
+    {
+        queueIndex = Index,
+        id = Id,
+        name = Name,
+        type = Type,
+        adapterId = AdapterId,
+        adapterName = AdapterName,
+        eventCount = EventCount,
+    };
+}
+
+public sealed record EventTimingRow(int QueueIndex, uint Index, uint GpuId, string Name, ulong TopStart, ulong TopDuration, ulong EopStart, ulong EopDuration);
+
+public sealed record CounterInfo(uint Id, string Name, string Description, string DataType, string[] Groups)
+{
+    public PIX_FORMAT_SPECIFIER_TYPE FormatSpecifier { get; init; }
+}
+
+public sealed record ExperimentInfo(Guid Guid, string Name, string Category, string HelpText, PIX_EXPERIMENT_SOURCE Source);
+
+public sealed class GpuCaptureHandle : PixHandle
+{
+    public const ulong TimingNone = ulong.MaxValue;
+
+    public GpuCaptureHandle(string path, IPixGpuCaptureDocument document) : base(path)
+    {
+        Document = document;
+        Queues = LoadQueues(document);
+    }
+
+    public override string Kind => "gpu";
+    public IPixGpuCaptureDocument Document { get; private set; }
+    public IReadOnlyList<QueueEntry> Queues { get; }
+
+    // Analysis session state
+    public IPixGpuCaptureAnalysis? Analysis { get; private set; }
+    public bool AnalysisConnected { get; private set; }
+    public bool AnalysisStarted { get; private set; }
+    public List<(ulong Id, string Name)>? Adapters { get; private set; }
+    public ulong? SelectedAdapter { get; set; }
+    public uint? SelectedPowerState { get; set; }
+    public PIX_ANALYSIS_FLAGS? SelectedFlags { get; set; }
+    public DateTimeOffset? AnalysisStartedAt { get; private set; }
+
+    // Caches of expensive results
+    public IPixGpuCaptureTiming? Timing { get; set; }
+    public Dictionary<int, EventTimingRow[]> TimingRowsByQueue { get; } = new();
+    public IPixGpuCaptureCounters? Counters { get; set; }
+    public List<CounterInfo>? CounterList { get; set; }
+    public Dictionary<string, IPixGpuCaptureCounterData> CollectedCounters { get; } = new();
+    public IPixGpuCaptureDrPix? DrPix { get; set; }
+    public List<ExperimentInfo>? Experiments { get; set; }
+
+    private static List<QueueEntry> LoadQueues(IPixGpuCaptureDocument document)
+    {
+        var list = new List<QueueEntry>();
+        IPixCollection queues = document.GetQueues();
+        ulong count = queues.GetCount();
+        for (ulong i = 0; i < count; i++)
+        {
+            IPixGpuCaptureQueueInfo info = queues.Get<IPixGpuCaptureQueueInfo>(i);
+            list.Add(new QueueEntry
+            {
+                Index = (int)i,
+                Info = info,
+                Id = info.GetId(),
+                Name = Interop.W(info.GetName()),
+                Type = info.GetType(),
+                AdapterId = info.GetAdapterId(),
+                AdapterName = Interop.W(info.GetAdapterName()),
+                EventCount = info.GetEventCount(),
+            });
+        }
+        return list;
+    }
+
+    public QueueEntry Queue(int queueIndex)
+    {
+        if (queueIndex < 0 || queueIndex >= Queues.Count)
+        {
+            throw new McpException($"queueIndex {queueIndex} is out of range; the capture has {Queues.Count} queue(s) (0..{Queues.Count - 1}).");
+        }
+        return Queues[queueIndex];
+    }
+
+    /// <summary>Fetches the live PIX_EVENT_INFO for an event (needed when passing events back into PIX).</summary>
+    public PIX_EVENT_INFO EventInfo(int queueIndex, uint eventIndex)
+    {
+        QueueEntry queue = Queue(queueIndex);
+        if (eventIndex >= queue.EventCount)
+        {
+            throw new McpException($"eventIndex {eventIndex} is out of range; queue {queueIndex} has {queue.EventCount} event(s).");
+        }
+        return PixApiExtensionsGpuCapture.GetEvent(queue.Info, eventIndex);
+    }
+
+    public EventRecord Event(int queueIndex, uint eventIndex)
+    {
+        QueueEntry queue = Queue(queueIndex);
+        if (queue.Cache is not null && eventIndex < queue.Cache.Length)
+        {
+            return queue.Cache[eventIndex];
+        }
+        return EventRecord.From(eventIndex, EventInfo(queueIndex, eventIndex));
+    }
+
+    /// <summary>Materializes every event of a queue once (needed for filtering/sorting); cached afterwards.</summary>
+    public EventRecord[] AllEvents(int queueIndex)
+    {
+        QueueEntry queue = Queue(queueIndex);
+        if (queue.Cache is null)
+        {
+            var records = new EventRecord[queue.EventCount];
+            for (uint i = 0; i < queue.EventCount; i++)
+            {
+                records[i] = EventRecord.From(i, PixApiExtensionsGpuCapture.GetEvent(queue.Info, i));
+            }
+            queue.Cache = records;
+        }
+        return queue.Cache;
+    }
+
+    /// <summary>Finds the event with the given GPU id (searching all queues).</summary>
+    public (int queueIndex, EventRecord record)? FindByGpuId(uint gpuId)
+    {
+        foreach (QueueEntry queue in Queues)
+        {
+            foreach (EventRecord record in AllEvents(queue.Index))
+            {
+                if (record.GpuId == gpuId)
+                {
+                    return (queue.Index, record);
+                }
+            }
+        }
+        return null;
+    }
+
+    public IPixGpuCaptureAnalysis GetAnalysis() => Analysis ??= Document.GetAnalysis();
+
+    /// <summary>Connects the analysis session to the local PIX device (no replay yet).</summary>
+    public IPixGpuCaptureAnalysis EnsureConnected(Job? job)
+    {
+        IPixGpuCaptureAnalysis analysis = GetAnalysis();
+        if (!AnalysisConnected)
+        {
+            job?.AddMessage("Connecting analysis to the local GPU...");
+            PixApiExtensionsGpuCaptureAnalysis.Connect(analysis, ConnDesc.CreateLocal(), job?.PixToken!);
+            AnalysisConnected = true;
+        }
+
+        if (Adapters is null)
+        {
+            try { Adapters = LoadAdapters(analysis); }
+            catch (Exception ex) { job?.AddMessage("Adapter enumeration unavailable: " + PixErrors.Describe(ex)); Adapters = new(); }
+        }
+        return analysis;
+    }
+
+    /// <summary>Connects to the local GPU and starts analysis if not already running. Progress goes to <paramref name="job"/> when given.</summary>
+    public void EnsureAnalysisStarted(Job? job)
+    {
+        if (AnalysisStarted)
+        {
+            return;
+        }
+
+        IPixGpuCaptureAnalysis analysis = EnsureConnected(job);
+
+        job?.AddMessage("Starting analysis (replaying the capture on the GPU; Windows Developer Mode required)...");
+        bool customized = SelectedAdapter.HasValue || SelectedPowerState.HasValue || SelectedFlags.HasValue;
+        if (job is not null || customized)
+        {
+            var parameters = new PIX_ANALYSIS_PARAMS
+            {
+                Adapter = SelectedAdapter ?? (Adapters.Count > 0 ? Adapters[0].Id : 0),
+                PowerState = SelectedPowerState ?? 0,
+                Flags = SelectedFlags ?? PIX_ANALYSIS_FLAGS.PIX_ANALYSIS_FLAG_NONE,
+            };
+            try
+            {
+                PixApiExtensionsGpuCaptureAnalysis.StartAnalysis(analysis, parameters, job?.Sink!, job?.PixToken!);
+            }
+            catch (COMException ex) when (!customized)
+            {
+                job?.AddMessage($"StartAnalysis with explicit parameters failed ({PixErrors.Hex(ex.HResult)}); retrying with defaults.");
+                PixApiExtensionsGpuCaptureAnalysis.StartAnalysis(analysis);
+            }
+        }
+        else
+        {
+            PixApiExtensionsGpuCaptureAnalysis.StartAnalysis(analysis);
+        }
+
+        AnalysisStarted = true;
+        AnalysisStartedAt = DateTimeOffset.UtcNow;
+        job?.AddMessage("Analysis started.");
+    }
+
+    private static List<(ulong, string)> LoadAdapters(IPixGpuCaptureAnalysis analysis)
+    {
+        var list = new List<(ulong, string)>();
+        IPixAdapters adapters = PixApiExtensionsGpuCaptureAnalysis.GetAdapters(analysis);
+        ulong count = adapters.GetCount();
+        for (ulong i = 0; i < count; i++)
+        {
+            PIX_ADAPTER adapter = PixApiExtensionsDeviceConnectionResults.GetAdapter(adapters, i);
+            list.Add((adapter.Id, Interop.W(adapter.Name)));
+        }
+        return list;
+    }
+
+    public List<object> PowerStates(ulong adapterId)
+    {
+        var list = new List<object>();
+        IPixGpuCaptureAnalysis analysis = GetAnalysis();
+        var adapter = new PIX_ADAPTER { Id = adapterId };
+        IPixPowerStates states = PixApiExtensionsGpuCaptureAnalysis.GetPowerStates(analysis, adapter);
+        ulong count = states.GetCount();
+        for (ulong i = 0; i < count; i++)
+        {
+            PIX_POWER_STATE state = PixApiExtensionsDeviceConnectionResults.GetPowerState(states, i);
+            list.Add(new { id = state.Id, name = Interop.W(state.Name), description = Interop.WOrNull(state.Description) });
+        }
+        return list;
+    }
+
+    public void StopAnalysis(List<string> warnings)
+    {
+        if (Analysis is not null && AnalysisStarted)
+        {
+            try { Analysis.StopAnalysis(); }
+            catch (Exception ex) { warnings.Add("StopAnalysis: " + PixErrors.Describe(ex)); }
+        }
+        if (Analysis is not null && AnalysisConnected)
+        {
+            try { Analysis.Disconnect(); }
+            catch (Exception ex) { warnings.Add("Disconnect: " + PixErrors.Describe(ex)); }
+        }
+        AnalysisStarted = false;
+        AnalysisConnected = false;
+        Timing = null;
+        TimingRowsByQueue.Clear();
+        Counters = null;
+        CounterList = null;
+        CollectedCounters.Clear();
+        DrPix = null;
+        Experiments = null;
+        Analysis = null;
+    }
+
+    public object AnalysisStatus() => new
+    {
+        handle = Id,
+        connected = AnalysisConnected,
+        started = AnalysisStarted,
+        startedAt = AnalysisStartedAt,
+        adapters = Adapters?.Select(a => new { id = a.Id, name = a.Name }).ToArray(),
+        selectedAdapter = SelectedAdapter,
+        selectedPowerState = SelectedPowerState,
+        flags = SelectedFlags,
+        timingCollected = Timing is not null,
+        countersCollected = CollectedCounters.Keys.ToArray(),
+    };
+
+    public override object Summary() => new
+    {
+        handle = Id,
+        kind = Kind,
+        path = Path,
+        openedAt = OpenedAt,
+        queues = Queues.Select(q => q.ToDto()).ToArray(),
+        totalEvents = Queues.Sum(q => (long)q.EventCount),
+        analysisStarted = AnalysisStarted,
+    };
+
+    public override void Close(List<string> warnings)
+    {
+        StopAnalysis(warnings);
+        foreach (QueueEntry queue in Queues)
+        {
+            queue.Cache = null;
+        }
+        Document = null!;
+    }
+}

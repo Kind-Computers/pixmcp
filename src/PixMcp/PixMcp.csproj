@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>PixMcp</RootNamespace>
+    <AssemblyName>PixMcp</AssemblyName>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PixMcpRequiresPix>true</PixMcpRequiresPix>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="PixMcp.Tests" />
+  </ItemGroup>
+
+  <!-- PixApiCsExt.experimental.dll is loaded in place from the PIX install (see Pix/PixDiscovery.cs);
+       it must not be copied next to the exe because pixapi.dll and its ~100 MB of native
+       dependencies have to sit beside it. -->
+  <ItemGroup>
+    <Reference Include="PixApiCsExt.experimental">
+      <HintPath>$(PixApiBinDir)\PixApiCsExt.experimental.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
