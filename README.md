@@ -127,13 +127,13 @@ flags, call `pix_gpu_analysis_stop` first.
 | GPU capture | `pix_gpu_open`, `pix_gpu_info`, `pix_gpu_queues`, `pix_gpu_events`, `pix_gpu_event`, `pix_gpu_api_objects`, `pix_gpu_screenshot` |
 | Analysis (replay) | `pix_gpu_analysis_start`, `pix_gpu_analysis_status`, `pix_gpu_analysis_adapters`, `pix_gpu_analysis_stop` |
 | Timing and counters | `pix_gpu_timing_collect`, `pix_gpu_timing_events`, `pix_gpu_timing_tree`, `pix_gpu_counters_list`, `pix_gpu_counters_start`, `pix_gpu_counters_collect`, `pix_gpu_occupancy`, `pix_gpu_hf_counters` |
-| Pipeline and shaders | `pix_gpu_pipeline_state`, `pix_gpu_shader_code` |
-| Resources | `pix_gpu_resources`, `pix_gpu_resource`, `pix_gpu_event_resources` |
+| Pipeline and shaders | `pix_gpu_pipeline_state`, `pix_gpu_shader_code`, `pix_gpu_shader_profile` (experimental) |
+| Resources | `pix_gpu_resources`, `pix_gpu_resource`, `pix_gpu_event_resources`, `pix_gpu_heap` |
 | Dr. PIX | `pix_gpu_drpix_experiments`, `pix_gpu_drpix_run` |
 | Timing captures | `pix_timing_open`, `pix_timing_resolve_symbols`, `pix_timing_save` |
-| Device (live) | `pix_device_connect`, `pix_device_info`, `pix_device_processes`, `pix_device_counters`, `pix_device_launch`, `pix_device_attach`, `pix_device_take_gpu_capture`, `pix_device_timing_capture_start`, `pix_device_timing_capture_stop`, `pix_device_detach` |
+| Device (live) | `pix_device_connect`, `pix_device_info`, `pix_device_processes`, `pix_device_packaged_apps`, `pix_device_counters`, `pix_device_d3d_settings`, `pix_device_d3d_settings_set`, `pix_device_launch`, `pix_device_attach`, `pix_device_take_gpu_capture`, `pix_device_timing_capture_start`, `pix_device_timing_capture_stop`, `pix_device_detach` |
 | Capture files | `pix_capture_format`, `pix_capture_upgrade` |
-| DirectX dump files | `pix_dump_open`, `pix_dump_info`, `pix_dump_queues`, `pix_dump_events`, `pix_dump_page_faults`, `pix_dump_breadcrumbs`, `pix_dump_resources`, `pix_dump_gpu_state`, `pix_dump_blobs`, `pix_dump_journal`, `pix_dump_shader_waves` |
+| DirectX dump files | `pix_dump_open`, `pix_dump_info`, `pix_dump_queues`, `pix_dump_events`, `pix_dump_page_faults`, `pix_dump_breadcrumbs`, `pix_dump_resources`, `pix_dump_gpu_state`, `pix_dump_blobs`, `pix_dump_journal`, `pix_dump_shader_waves`, `pix_dump_shader_wave`, `pix_dump_shader_eval` |
 
 Paged enumeration tools take `offset`/`limit` (default 100, max 1000) and return `total`,
 `count`, `items`, `nextOffset` and an optional `extra` object (for example the counter groups of
@@ -164,6 +164,20 @@ Use `nodeIndex` to select one command list and `offset` to navigate its operatio
 `bindingLimit` (default 32) to retrieve bindings beyond the initial page. Each view reports
 its binding total and continuation offset. A view index is relative to the resource's views
 or the event's views, respectively.
+
+`pix_device_d3d_settings` / `pix_device_d3d_settings_set` read and change the debug layer, DRED
+and device options PIX applies to processes it launches. To turn a GPU hang into a dump file for
+the `pix_dump_*` tools: set `dred AUTO_BREADCRUMBS FORCED_ON`, `dred PAGE_FAULTS FORCED_ON` and
+`device RETAIN_DUMP_FILE true`, then `pix_device_launch` the app with
+`flags: ["GPU_CAPTURE_ENABLE_DRED_LOGGING"]` (the test app's `--hang` option provokes a timeout).
+`pix_device_packaged_apps` lists UWP/MSIX apps that `pix_device_launch` can start by
+`packageFullName`. The PIX API of this build has no system-monitor counter *collection* (the
+descriptor struct is a placeholder), so `pix_device_counters` only lists counters.
+
+`pix_gpu_heap` shows a heap's description and the placed resources on it; `pix_gpu_shader_profile`
+(experimental) replays an event range under PIX's shader profiler and reports the hottest ISA
+instructions per shader with stall reasons; `pix_dump_shader_wave` and `pix_dump_shader_eval` read
+variables, call stacks and per-lane expression values of a hung wave from a dump.
 
 `pix_gpu_timing_tree` rolls the measured end-of-pipe time of every draw/dispatch up its parent
 markers: each node reports `selfEopNs`, `inclusiveEopNs`, `percentOfQueue`, `timedDescendants`
@@ -237,8 +251,11 @@ scripts/smoke.py        Dependency-free stdio MCP client; scripts/scenarios/*.js
   integration tests (and `PIX_TEST_ANALYSIS=1` to include a GPU replay). Building anything needs a
   PIX Preview install, so `.github/workflows/ci.yml` runs only the Python harness tests on hosted
   runners and the full build/test/smoke job on a self-hosted runner labelled `pix`, on demand.
-- `tests\D3D12TestApp\build.cmd` builds a tiny D3D12 triangle app (needs Visual Studio 2022 C++
-  tools) that is a convenient capture target.
+- `tests\D3D12TestApp\build.cmd` builds a tiny D3D12 app (needs Visual Studio 2022 C++ tools)
+  that is a convenient capture target: three triangles (one indexed, textured through a descriptor
+  table) with nested markers on the graphics queue plus a compute dispatch on an async compute
+  queue every frame. `--frames N` limits the run; `--hang [--hang-after N]` submits a
+  never-terminating dispatch to provoke a GPU timeout.
 - `scripts\smoke.py` is a dependency-free stdio MCP client; `scripts\scenarios\*.json` are
   scripted tool sequences, e.g.
 
@@ -250,7 +267,10 @@ scripts/smoke.py        Dependency-free stdio MCP client; scripts/scenarios/*.js
   replays it for timing, and inspects the first draw. `take-capture` only produces a capture file
   (its path is in the `pix_device_take_gpu_capture` result); `open-capture` and `analysis-pending`
   take that path in `PIX_TEST_CAPTURE` and exercise, respectively, the basic inspection flow and the
-  `pending`/`pix_job_wait`/retry flow of the analysis-dependent tools.
+  `pending`/`pix_job_wait`/retry flow of the analysis-dependent tools; `inspect-extras` covers the
+  compute queue, gpuId lookup, timing tree and inline screenshot. `provoke-hang` changes the DRED
+  settings, launches the test app with `--hang` (this **resets the GPU**, other GPU applications
+  lose their device for a moment) and restores the settings; run it only to test the dump tools.
   Requests time out after 660 seconds by default; use `--timeout <seconds>` to change this.
   Protocol errors, tool errors, failed/cancelled jobs, unresolved result references, and failed
   assertions produce a nonzero exit code. A scenario step may include expected result fields:
@@ -259,12 +279,18 @@ scripts/smoke.py        Dependency-free stdio MCP client; scripts/scenarios/*.js
 ## Status
 
 Verified on PIX 2606.18-preview with an NVIDIA RTX 4070 Ti: capture taking, event/resource
-queries, screenshot export, analysis, per-event timing, hardware counters, pipeline state and
-root signature decoding, HLSL source retrieval, bound resources/views, Dr. PIX experiments,
-system-wide timing captures, and the device tools. Occupancy and high-frequency counters report
-`unavailable` on this hardware. The DirectX dump (`pix_dump_*`) tools compile against the
+queries, screenshot export, analysis (including the `pending`/job flow), per-event timing and the
+timing tree, hardware counters, pipeline state and root signature decoding, HLSL source retrieval,
+bound resources/views, Dr. PIX experiments, system-wide timing captures, the device tools including
+D3D settings, packaged apps and process/counter listings. Occupancy and high-frequency counters
+report `unavailable` on this hardware, and `pix_gpu_shader_profile` fails with PIX error
+`0x8ABC0007` (the profiler is not supported for this GPU/driver by this PIX build).
+`pix_gpu_heap` compiles but has not been exercised: the test app only creates committed resources,
+so its captures contain no heap objects. The DirectX dump (`pix_dump_*`) tools compile against the
 experimental API and follow the official DXDumpFileParser sample but have not been run against a
-real `.dxdmp_preview` file yet (one is only produced by a GPU hang/TDR).
+real `.dxdmp_preview` file yet: `scripts\scenarios\provoke-hang.json` enables DRED through
+`pix_device_d3d_settings_set` and runs the test app with `--hang`, which does reset the GPU (event
+log `nvlddmkm 153`), but no dump file was produced on this machine.
 
 ## License
 

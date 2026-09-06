@@ -174,23 +174,29 @@ public static class DeviceTools
             }, new { groups = groups.Select(kv => new { id = kv.Key, name = kv.Value }).ToArray() });
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_device_launch"), Description("Launches a Win32 executable under PIX, by default hooked for GPU capture. Returns the process id. Give the app a few seconds to create its D3D12 device before taking a capture.")]
+    [McpServerTool(Name = "pix_device_launch"), Description("Launches a Win32 executable (exePath) or an installed packaged app (packageFullName + applicationId from pix_device_packaged_apps) under PIX, by default hooked for GPU capture. Returns the process id. Give the app a few seconds to create its D3D12 device before taking a capture. D3D settings from pix_device_d3d_settings_set apply to the launched process.")]
     public static Task<string> Launch(
         PixSession session,
         [Description("Device handle")] string handle,
-        [Description("Path to the .exe to launch.")] string exePath,
-        [Description("Command line arguments.")] string? arguments = null,
-        [Description("Working directory (default: the exe's directory).")] string? workingDirectory = null,
+        [Description("Path to the .exe to launch (omit when launching a packaged app).")] string? exePath = null,
+        [Description("Command line arguments (Win32 only).")] string? arguments = null,
+        [Description("Working directory (default: the exe's directory; Win32 only).")] string? workingDirectory = null,
         [Description("Launch under GPU capture (default true).")] bool underGpuCapture = true,
-        [Description("Additional launch flags, e.g. GPU_CAPTURE_DISABLE_HUD, GPU_CAPTURE_ENABLE_DRED_LOGGING, SUSPENDED.")] string[]? flags = null,
+        [Description("Additional launch flags, e.g. GPU_CAPTURE_DISABLE_HUD, GPU_CAPTURE_ENABLE_DRED_LOGGING, SUSPENDED, TERMINATE_RUNNING_PACKAGE.")] string[]? flags = null,
+        [Description("Package full name of a packaged (UWP/MSIX) app to launch instead of an exe.")] string? packageFullName = null,
+        [Description("Application id within the package (default: the first one PIX reports for the package).")] string? applicationId = null,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_launch", () =>
         {
             ConnectionHandle h = session.Get<ConnectionHandle>(handle);
-            string exe = Tools.RequireFile(exePath, "Executable");
+            bool packaged = !string.IsNullOrWhiteSpace(packageFullName);
+            if (!packaged && string.IsNullOrWhiteSpace(exePath))
+            {
+                throw new McpException("Specify exePath (Win32 executable) or packageFullName (packaged app).");
+            }
             var desc = new LaunchDesc
             {
-                launchMode = PIX_APPLICATION_LAUNCH_MODE.PIX_APPLICATION_LAUNCH_MODE_WIN32_EXECUTABLE,
+                launchMode = packaged ? PIX_APPLICATION_LAUNCH_MODE.PIX_APPLICATION_LAUNCH_MODE_PACKAGED_APP : PIX_APPLICATION_LAUNCH_MODE.PIX_APPLICATION_LAUNCH_MODE_WIN32_EXECUTABLE,
                 launchFlags = underGpuCapture ? PIX_APPLICATION_LAUNCH_FLAGS.PIX_APPLICATION_LAUNCH_FLAG_UNDER_GPU_CAPTURE : 0,
             };
             if (flags is not null)
@@ -200,9 +206,21 @@ public static class DeviceTools
                     desc.launchFlags |= Tools.ParseEnum<PIX_APPLICATION_LAUNCH_FLAGS>(f);
                 }
             }
-            desc.launchInfo.win32.exePath = exe;
-            desc.launchInfo.win32.commandLineArgs = arguments ?? string.Empty;
-            desc.launchInfo.win32.initialWorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory) ? (Path.GetDirectoryName(exe) ?? string.Empty) : Path.GetFullPath(workingDirectory);
+            string target;
+            if (packaged)
+            {
+                desc.launchInfo.packagedApp.packageFullName = packageFullName!;
+                desc.launchInfo.packagedApp.applicationId = string.IsNullOrWhiteSpace(applicationId) ? FirstApplicationId(h, packageFullName!) : applicationId;
+                target = packageFullName! + "!" + desc.launchInfo.packagedApp.applicationId;
+            }
+            else
+            {
+                string exe = Tools.RequireFile(exePath!, "Executable");
+                desc.launchInfo.win32.exePath = exe;
+                desc.launchInfo.win32.commandLineArgs = arguments ?? string.Empty;
+                desc.launchInfo.win32.initialWorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory) ? (Path.GetDirectoryName(exe) ?? string.Empty) : Path.GetFullPath(workingDirectory);
+                target = exe;
+            }
 
             IPixLaunchProcessResults results = PixApiExtensionsDeviceConnection.LaunchProcess<IPixLaunchProcessResults>(h.Connection, ref desc);
             uint pid = results.GetProcessId();
@@ -212,7 +230,7 @@ public static class DeviceTools
             {
                 h.AddProcess(pid);
             }
-            h.Note("launched", new { pid, exe, unsupportedReason = reason });
+            h.Note("launched", new { pid, target, unsupportedReason = reason });
             return new
             {
                 processId = pid,
@@ -225,7 +243,48 @@ public static class DeviceTools
             };
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_device_attach"), Description("Attaches PIX to a running process (by pid) for GPU capture.")]
+    private static string FirstApplicationId(ConnectionHandle h, string packageFullName)
+    {
+        IPixGetInstalledPackagedAppsResults apps = PixApiExtensionsDeviceConnection.GetInstalledPackagedApps<IPixGetInstalledPackagedAppsResults>(h.Connection);
+        ulong count = apps.GetNumInstalledPackagedApps();
+        for (ulong i = 0; i < count; i++)
+        {
+            IPixPackagedAppInfo app = PixApiExtensionsDeviceConnectionResults.GetInstalledPackagedAppInfo<IPixPackagedAppInfo>(apps, i);
+            if (Interop.W(app.GetPackageFullName()).Equals(packageFullName, StringComparison.OrdinalIgnoreCase))
+            {
+                return Interop.W(app.GetApplicationId());
+            }
+        }
+        throw new McpException($"No installed packaged app has package full name '{packageFullName}'. List them with pix_device_packaged_apps.");
+    }
+
+    [McpServerTool(Name = "pix_device_packaged_apps", ReadOnly = true), Description("Pages the installed packaged (UWP/MSIX) apps PIX can launch: package full name, application id, friendly name, architecture and any reason PIX cannot capture them. Pass packageFullName (and applicationId) to pix_device_launch.")]
+    public static Task<string> PackagedApps(
+        PixSession session,
+        [Description("Device handle")] string handle,
+        [Description("Only apps whose friendly name or package name contains this text (case-insensitive).")] string? nameContains = null,
+        [Description("First app (default 0).")] int offset = 0,
+        [Description("Maximum apps (default 100, max 1000).")] int limit = Paging.DefaultLimit,
+        CancellationToken cancellationToken = default)
+        => Tools.Run(session, "pix_device_packaged_apps", () =>
+        {
+            ConnectionHandle h = session.Get<ConnectionHandle>(handle);
+            (int o, int l) = Paging.Normalize(offset, limit);
+            IPixGetInstalledPackagedAppsResults apps = PixApiExtensionsDeviceConnection.GetInstalledPackagedApps<IPixGetInstalledPackagedAppsResults>(h.Connection);
+            IEnumerable<IPixPackagedAppInfo> matching = Enumerable.Range(0, (int)Math.Min(apps.GetNumInstalledPackagedApps(), int.MaxValue))
+                .Select(i => PixApiExtensionsDeviceConnectionResults.GetInstalledPackagedAppInfo<IPixPackagedAppInfo>(apps, (ulong)i))
+                .Where(a => Tools.Contains(Interop.W(a.GetFriendlyName()), nameContains) || Tools.Contains(Interop.W(a.GetPackageFullName()), nameContains));
+            return Paging.Collect(matching, o, l, a => new
+            {
+                packageFullName = Interop.W(a.GetPackageFullName()),
+                applicationId = Interop.W(a.GetApplicationId()),
+                friendlyName = Interop.WOrNull(a.GetFriendlyName()),
+                architecture = a.GetArchitecture(),
+                unsupportedReason = a.GetUnsupportedReason(),
+            });
+        }, cancellationToken);
+
+    [McpServerTool(Name = "pix_device_attach"), Description("Attaches PIX to a running process (by pid, see pix_device_processes) for GPU capture.")]
     public static Task<string> Attach(
         PixSession session,
         [Description("Device handle")] string handle,

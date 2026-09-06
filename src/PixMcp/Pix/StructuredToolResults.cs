@@ -70,10 +70,10 @@ internal static class StructuredToolResults
     {
         "pix_gpu_analysis_start" or "pix_gpu_timing_collect" or "pix_gpu_counters_start"
             or "pix_gpu_drpix_run" or "pix_timing_resolve_symbols" or "pix_device_take_gpu_capture"
-            or "pix_device_timing_capture_stop" or "pix_capture_upgrade" or "pix_job_status" or "pix_job_wait" or "pix_job_cancel" => JobSchema,
+            or "pix_device_timing_capture_stop" or "pix_capture_upgrade" or "pix_gpu_shader_profile" or "pix_job_status" or "pix_job_wait" or "pix_job_cancel" => JobSchema,
         "pix_jobs" => JobsSchema,
         "pix_gpu_events" => EventPageSchema,
-        "pix_gpu_api_objects" or "pix_gpu_resources" or "pix_device_processes" or "pix_device_counters"
+        "pix_gpu_api_objects" or "pix_gpu_resources" or "pix_device_processes" or "pix_device_counters" or "pix_device_packaged_apps"
             or "pix_dump_events" or "pix_dump_resources" or "pix_dump_shader_waves" or "pix_dump_journal" or "pix_dump_page_faults" => PageSchema,
         "pix_gpu_timing_events" or "pix_gpu_counters_collect" or "pix_gpu_counters_list" => PageOrPendingSchema,
         "pix_gpu_pipeline_state" or "pix_gpu_shader_code" or "pix_gpu_event_resources" or "pix_gpu_timing_tree"

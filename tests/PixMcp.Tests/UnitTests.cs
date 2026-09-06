@@ -182,7 +182,34 @@ public class PngTests
     public void ReportsUnsupportedFormats()
     {
         Assert.True(Png.IsSupported(DXGI_FORMAT.DXGI_FORMAT_R8G8B8A8_UNORM_SRGB));
-        Assert.False(Png.IsSupported(DXGI_FORMAT.DXGI_FORMAT_R16G16B16A16_FLOAT));
+        Assert.True(Png.IsSupported(DXGI_FORMAT.DXGI_FORMAT_R16G16B16A16_FLOAT));
+        Assert.True(Png.IsToneMapped(DXGI_FORMAT.DXGI_FORMAT_R11G11B10_FLOAT));
+        Assert.False(Png.IsToneMapped(DXGI_FORMAT.DXGI_FORMAT_B8G8R8A8_UNORM));
+        Assert.False(Png.IsSupported(DXGI_FORMAT.DXGI_FORMAT_D32_FLOAT));
+        Assert.Equal(8, Png.BytesPerPixel(DXGI_FORMAT.DXGI_FORMAT_R16G16B16A16_FLOAT));
+    }
+
+    [Fact]
+    public void ToneMapsHdrPixelsToSrgb()
+    {
+        // Linear 0.5 encodes to sRGB 188; 0 and >= 1 clamp; NaN is treated as black.
+        Assert.Equal(188, Png.ToSrgb8(0.5f));
+        Assert.Equal(0, Png.ToSrgb8(0f));
+        Assert.Equal(255, Png.ToSrgb8(4f));
+        Assert.Equal(0, Png.ToSrgb8(float.NaN));
+        // R11G11B10: 11-bit float 0x3C0 = 1.0 (exponent 15, mantissa 0); 10-bit 0x1E0 = 1.0.
+        Assert.Equal(1f, Png.Float11(0x3C0));
+        Assert.Equal(1f, Png.Float10(0x1E0));
+        Assert.Equal(0.5f, Png.Float11(0x380));
+
+        // One R16G16B16A16_FLOAT pixel: (0.5, 1.0, 0.0, 1.0) => sRGB (188, 255, 0, 255) inside a valid PNG.
+        var pixels = new byte[8];
+        BinaryPrimitives.WriteUInt16LittleEndian(pixels.AsSpan(0), BitConverter.HalfToUInt16Bits((Half)0.5f));
+        BinaryPrimitives.WriteUInt16LittleEndian(pixels.AsSpan(2), BitConverter.HalfToUInt16Bits((Half)1f));
+        BinaryPrimitives.WriteUInt16LittleEndian(pixels.AsSpan(6), BitConverter.HalfToUInt16Bits((Half)1f));
+        byte[] png = Png.Encode(pixels, 1, 1, 8, DXGI_FORMAT.DXGI_FORMAT_R16G16B16A16_FLOAT);
+        Assert.Equal("IHDR", System.Text.Encoding.ASCII.GetString(png, 12, 4));
+        Assert.Throws<ArgumentException>(() => Png.Encode(pixels, 2, 1, 8, DXGI_FORMAT.DXGI_FORMAT_R16G16B16A16_FLOAT));
     }
 }
 

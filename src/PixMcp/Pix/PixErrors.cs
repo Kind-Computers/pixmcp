@@ -25,6 +25,9 @@ public static class PixErrors
     /// <summary>True for the HRESULTs PIX uses to report an interrupted (cancelled) operation.</summary>
     public static bool IsCancellationHResult(int hresult) => hresult is E_ABORT or E_OPERATION_ABORTED;
 
+    /// <summary>PIX reports its own failures with facility 0xABC (0x8ABC0000..0x8ABCFFFF).</summary>
+    public static bool IsPixFacility(int hresult) => ((uint)hresult & 0xFFFF0000) == 0x8ABC0000;
+
     /// <summary>Human-readable description with HRESULT and, where relevant, remediation.</summary>
     public static string Describe(Exception ex)
     {
@@ -44,6 +47,10 @@ public static class PixErrors
         else if (hr == E_NOT_VALID_STATE)
         {
             text += " (E_NOT_VALID_STATE: the object is not in a state that supports this call, e.g. pipeline state not bound for this event, or analysis not started.)";
+        }
+        else if (IsPixFacility(hr.Value))
+        {
+            text += " (PIX-specific error: PIX declined the operation; for analysis features such as shader profiling, occupancy or high-frequency counters this usually means the GPU, driver or PIX build does not support it.)";
         }
         return text;
     }

@@ -1,0 +1,14 @@
+[
+ ["pix_device_connect", {}],
+ ["pix_device_d3d_settings", {"handle": "$pix_device_connect.handle"}],
+ ["pix_device_d3d_settings_set", {"handle": "$pix_device_connect.handle", "category": "dred", "setting": "AUTO_BREADCRUMBS", "value": "FORCED_ON"}, {"changed": true}],
+ ["pix_device_d3d_settings_set", {"handle": "$pix_device_connect.handle", "category": "dred", "setting": "PAGE_FAULTS", "value": "FORCE_ON"}, {"changed": true}],
+ ["pix_device_d3d_settings_set", {"handle": "$pix_device_connect.handle", "category": "device", "setting": "RETAIN_DUMP_FILE", "value": "true"}, {"changed": true, "result.value": true}],
+ ["pix_device_launch", {"handle": "$pix_device_connect.handle", "exePath": "tests/D3D12TestApp/bin/D3D12TestApp.exe", "arguments": "--hang --hang-after 20", "flags": ["GPU_CAPTURE_ENABLE_DRED_LOGGING"]}, {"capturable": true}],
+ ["sleep", {"seconds": 30}],
+ ["pix_device_info", {"handle": "$pix_device_connect.handle"}],
+ ["pix_device_detach", {"handle": "$pix_device_connect.handle", "terminate": true}],
+ ["pix_device_d3d_settings_set", {"handle": "$pix_device_connect.handle", "category": "dred", "setting": "AUTO_BREADCRUMBS", "value": "SYSTEM_CONTROLLED"}, {"changed": true}],
+ ["pix_device_d3d_settings_set", {"handle": "$pix_device_connect.handle", "category": "dred", "setting": "PAGE_FAULTS", "value": "APP_CONTROLLED"}, {"changed": true}],
+ ["pix_close_all", {}]
+]

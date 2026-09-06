@@ -256,7 +256,7 @@ public static class GpuCaptureTools
             return Paging.Page(page, total, o, l);
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_gpu_screenshot", Idempotent = true), Description("The screenshot embedded in the GPU capture as PNG: written to outPath (default <capture>.screenshot.png next to the capture) and/or returned inline as image content. With inline=true and no outPath nothing is written to disk. Only 8-bit RGBA/BGRA and R10G10B10A2 swapchain formats are supported.")]
+    [McpServerTool(Name = "pix_gpu_screenshot", Idempotent = true), Description("The screenshot embedded in the GPU capture as PNG: written to outPath (default <capture>.screenshot.png next to the capture) and/or returned inline as image content. With inline=true and no outPath nothing is written to disk. 8/10-bit UNORM swapchains are copied; HDR swapchains (R16G16B16A16_FLOAT/UNORM, R11G11B10_FLOAT) are tone-mapped to sRGB (toneMapped: true).")]
     public static async Task<CallToolResult> Screenshot(
         PixSession session,
         [Description("GPU capture handle")] string handle,
@@ -290,6 +290,7 @@ public static class GpuCaptureTools
                     width = info.Width,
                     height = info.Height,
                     format = info.Format,
+                    toneMapped = Png.IsToneMapped(info.Format) ? true : (bool?)null,
                     pngBytes = encoded.Length,
                 });
                 return (result, inline && encoded.Length < 4 * 1024 * 1024 ? encoded : null);

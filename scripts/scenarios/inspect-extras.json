@@ -1,0 +1,11 @@
+[
+ ["pix_gpu_open", {"path": "$env.PIX_TEST_CAPTURE"}],
+ ["pix_gpu_queues", {"handle": "$pix_gpu_open.handle"}],
+ ["pix_gpu_events", {"handle": "$pix_gpu_open.handle", "kind": "dispatch", "limit": 3}, {"total": 1}],
+ ["pix_gpu_events", {"handle": "$pix_gpu_open.handle", "kind": "draw", "limit": 1}, {"total": 3}],
+ ["pix_gpu_event", {"handle": "$pix_gpu_open.handle", "gpuId": "$last.items.0.gpuId"}, {"event.index": "$pix_gpu_events.items.0.index", "parentsTruncated": false}],
+ ["pix_gpu_event_resources", {"handle": "$pix_gpu_open.handle", "queueIndex": "$pix_gpu_events.items.0.queueIndex", "eventIndex": "$pix_gpu_events.items.0.index", "waitSeconds": 120}],
+ ["pix_gpu_timing_tree", {"handle": "$pix_gpu_open.handle", "queueIndex": 0, "depth": 2, "limit": 4}, {"queueIndex": 0}],
+ ["pix_gpu_screenshot", {"handle": "$pix_gpu_open.handle", "inline": true}],
+ ["pix_close_all", {}]
+]
