@@ -15,7 +15,7 @@ namespace PixMcp.Tools;
 public static class DeviceTools
 {
     [McpServerTool(Name = "pix_device_connect"), Description("Opens a connection to the local PIX device (this PC) for launching/attaching to D3D12 apps, taking GPU/timing captures and reading system monitor counters. Returns a device handle.")]
-    public static Task<string> Connect(PixSession session)
+    public static Task<string> Connect(PixSession session, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_connect", () =>
         {
             ConnectionHandle? handle = null;
@@ -33,11 +33,11 @@ public static class DeviceTools
             notifications.OnNotifyGpuCaptureTargetProcessesStatus = statuses => h.Note("targetProcessesStatus",
                 statuses.Select(s => new { processId = s.ProcessId, name = Interop.W(s.ProcessName), unsupportedReason = s.UnsupportedReason }).ToArray());
             return DeviceInfo(h);
-        });
+        }, cancellationToken);
 
     [McpServerTool(Name = "pix_device_info", ReadOnly = true), Description("Device connection details: system/GPU info strings, adapters and power states, launched processes and recent notifications.")]
-    public static Task<string> Info(PixSession session, [Description("Device handle")] string handle)
-        => Tools.Run(session, "pix_device_info", () => DeviceInfo(session.Get<ConnectionHandle>(handle)));
+    public static Task<string> Info(PixSession session, [Description("Device handle")] string handle, CancellationToken cancellationToken = default)
+        => Tools.Run(session, "pix_device_info", () => DeviceInfo(session.Get<ConnectionHandle>(handle)), cancellationToken);
 
     private static object DeviceInfo(ConnectionHandle h)
     {
@@ -98,14 +98,15 @@ public static class DeviceTools
         }
         catch (Exception ex) { adapters = PixErrors.Unavailable("adapters", ex); }
 
-        return new { handle = h.Id, metrics, adapters, launchedProcessIds = h.LaunchedProcessIds, timingCaptureInProgress = h.TimingCaptureInProgress, recentEvents = h.RecentEvents() };
+        return new { handle = h.Id, metrics, adapters, launchedProcessIds = h.ProcessIds, timingCaptureInProgress = h.TimingCaptureInProgress, recentEvents = h.RecentEvents() };
     }
 
-    [McpServerTool(Name = "pix_device_processes"), Description("Lists running processes PIX can see, with whether they use D3D12 and any reason they are unsupported for capture.")]
+    [McpServerTool(Name = "pix_device_processes", ReadOnly = true), Description("Lists running processes PIX can see, with whether they use D3D12 and any reason they are unsupported for capture.")]
     public static Task<string> Processes(
         PixSession session,
         [Description("Device handle")] string handle,
-        [Description("Only processes whose exe name contains this text.")] string? nameContains = null)
+        [Description("Only processes whose exe name contains this text.")] string? nameContains = null,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_processes", () =>
         {
             ConnectionHandle h = session.Get<ConnectionHandle>(handle);
@@ -132,13 +133,14 @@ public static class DeviceTools
                 });
             }
             return list;
-        });
+        }, cancellationToken);
 
-    [McpServerTool(Name = "pix_device_counters"), Description("Lists the system monitor counters (CPU, GPU, memory, ...) PIX can collect on this machine, with units and ranges.")]
+    [McpServerTool(Name = "pix_device_counters", ReadOnly = true), Description("Lists the system monitor counters (CPU, GPU, memory, ...) PIX can collect on this machine, with units and ranges.")]
     public static Task<string> Counters(
         PixSession session,
         [Description("Device handle")] string handle,
-        [Description("Only visible, non-internal counters (default true).")] bool visibleOnly = true)
+        [Description("Only visible, non-internal counters (default true).")] bool visibleOnly = true,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_counters", () =>
         {
             ConnectionHandle h = session.Get<ConnectionHandle>(handle);
@@ -174,7 +176,7 @@ public static class DeviceTools
                 });
             }
             return new { groups = groups.Select(kv => new { id = kv.Key, name = kv.Value }).ToArray(), counters };
-        });
+        }, cancellationToken);
 
     [McpServerTool(Name = "pix_device_launch"), Description("Launches a Win32 executable under PIX, by default hooked for GPU capture. Returns the process id. Give the app a few seconds to create its D3D12 device before taking a capture.")]
     public static Task<string> Launch(
@@ -184,7 +186,8 @@ public static class DeviceTools
         [Description("Command line arguments.")] string? arguments = null,
         [Description("Working directory (default: the exe's directory).")] string? workingDirectory = null,
         [Description("Launch under GPU capture (default true).")] bool underGpuCapture = true,
-        [Description("Additional launch flags, e.g. GPU_CAPTURE_DISABLE_HUD, GPU_CAPTURE_ENABLE_DRED_LOGGING, SUSPENDED.")] string[]? flags = null)
+        [Description("Additional launch flags, e.g. GPU_CAPTURE_DISABLE_HUD, GPU_CAPTURE_ENABLE_DRED_LOGGING, SUSPENDED.")] string[]? flags = null,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_launch", () =>
         {
             ConnectionHandle h = session.Get<ConnectionHandle>(handle);
@@ -208,34 +211,56 @@ public static class DeviceTools
             IPixLaunchProcessResults results = PixApiExtensionsDeviceConnection.LaunchProcess<IPixLaunchProcessResults>(h.Connection, ref desc);
             uint pid = results.GetProcessId();
             PIX_PROCESS_UNSUPPORTED_REASON reason = results.GetUnsupportedReason();
-            h.LaunchedProcessIds.Add(pid);
-            h.Note("launched", new { pid, exe });
+            bool capturable = IsCapturable(reason) && pid != 0;
+            if (capturable)
+            {
+                h.AddProcess(pid);
+            }
+            h.Note("launched", new { pid, exe, unsupportedReason = reason });
             return new
             {
                 processId = pid,
                 processName = Interop.WOrNull(results.GetProcessName()),
                 unsupportedReason = reason,
+                capturable,
                 note = reason == PIX_PROCESS_UNSUPPORTED_REASON.PIX_PROCESS_UNSUPPORTED_REASON_NOT_USING_D3D12
                     ? "NOT_USING_D3D12 is normal right after launch; the app has not created its D3D12 device yet."
-                    : null,
+                    : capturable ? null : $"PIX cannot capture this process ({Json.EnumName(reason)}); it was not recorded as a capture target.",
             };
-        });
+        }, cancellationToken);
 
     [McpServerTool(Name = "pix_device_attach"), Description("Attaches PIX to a running process (by pid) for GPU capture.")]
     public static Task<string> Attach(
         PixSession session,
         [Description("Device handle")] string handle,
         [Description("Process id")] uint processId,
-        [Description("Attach for GPU capture (default true).")] bool forGpuCapture = true)
+        [Description("Attach for GPU capture (default true).")] bool forGpuCapture = true,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_attach", () =>
         {
             ConnectionHandle h = session.Get<ConnectionHandle>(handle);
             var desc = new PIX_ATTACH_TO_PROCESS_DESC { ProcessId = processId, ForGpuCapture = forGpuCapture };
             IPixAttachToProcessResults results = PixApiExtensionsDeviceConnection.AttachToProcess<IPixAttachToProcessResults>(h.Connection, ref desc);
-            h.LaunchedProcessIds.Add(processId);
-            h.Note("attached", new { processId });
-            return new { processId, processName = Interop.WOrNull(results.GetProcessName()), unsupportedReason = results.GetUnsupportedReason() };
-        });
+            PIX_PROCESS_UNSUPPORTED_REASON reason = results.GetUnsupportedReason();
+            bool capturable = IsCapturable(reason);
+            if (capturable)
+            {
+                h.AddProcess(processId);
+            }
+            h.Note("attached", new { processId, unsupportedReason = reason });
+            return new
+            {
+                processId,
+                processName = Interop.WOrNull(results.GetProcessName()),
+                unsupportedReason = reason,
+                capturable,
+                note = capturable ? null : $"PIX cannot capture this process ({Json.EnumName(reason)}); it was not recorded as a capture target.",
+            };
+        }, cancellationToken);
+
+    /// <summary>NOT_USING_D3D12 is transient (the device is created later); the other reasons are permanent.</summary>
+    internal static bool IsCapturable(PIX_PROCESS_UNSUPPORTED_REASON reason)
+        => reason is PIX_PROCESS_UNSUPPORTED_REASON.PIX_PROCESS_UNSUPPORTED_REASON_NONE or PIX_PROCESS_UNSUPPORTED_REASON.PIX_PROCESS_UNSUPPORTED_REASON_NOT_USING_D3D12;
 
     [McpServerTool(Name = "pix_device_take_gpu_capture"), Description("Takes a GPU capture of a process launched/attached through this connection and (by default) opens it as a GPU capture handle. Blocks until the app presents the captured frame(s); returns a job.")]
     public static async Task<string> TakeGpuCapture(
@@ -246,7 +271,7 @@ public static class DeviceTools
         [Description("Seconds to wait before triggering the capture, to let the app initialise (default 3).")] double delaySeconds = 3,
         [Description("Number of frames to capture (default 1).")] uint frameCount = 1,
         [Description("Open the resulting .wpix as a GPU capture handle (default true).")] bool open = true,
-        [Description("Seconds to wait inline for completion (default 0 = return job immediately).")] double waitSeconds = 0,
+        [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
         CancellationToken cancellationToken = default)
     {
         try
@@ -331,7 +356,8 @@ public static class DeviceTools
         [Description("Capture GPU memory usage (default false).")] bool gpuMemoryUsage = false,
         [Description("Capture file I/O events (default false).")] bool fileIo = false,
         [Description("Maximum capture file size in MB (default 1024).")] uint maxFileSizeMb = 1024,
-        [Description("Automatic capture duration in seconds (0 = until stopped).")] uint durationSeconds = 0)
+        [Description("Automatic capture duration in seconds (0 = until stopped).")] uint durationSeconds = 0,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_timing_capture_start", () =>
         {
             ConnectionHandle h = session.Get<ConnectionHandle>(handle);
@@ -365,16 +391,18 @@ public static class DeviceTools
             h.TimingCaptureInProgress = full;
             h.Note("timingCaptureStarted", new { path = full });
             return new { started = true, path = full };
-        });
+        }, cancellationToken);
 
-    [McpServerTool(Name = "pix_device_timing_capture_stop"), Description("Stops the in-progress timing capture and optionally opens the resulting file as a timing capture handle.")]
+    [McpServerTool(Name = "pix_device_timing_capture_stop"), Description("Stops the in-progress timing capture and optionally opens the resulting file as a timing capture handle. PIX finalises the file asynchronously, so this runs as a job (waited for inline by default).")]
     public static Task<string> TimingCaptureStop(
         PixSession session,
+        JobManager jobs,
         [Description("Device handle")] string handle,
-        [Description("Open the capture as a timing handle after stopping (default true).")] bool open = true)
-        => Tools.Run(session, "pix_device_timing_capture_stop", () =>
+        [Description("Open the capture as a timing handle after stopping (default true).")] bool open = true,
+        [Description("Seconds to wait inline for the job (default 30 = normally returns the result directly; 0 = return the job).")] double waitSeconds = 30,
+        CancellationToken cancellationToken = default)
+        => Tools.RunJob(jobs, "pix_device_timing_capture_stop", () => jobs.StartForHandle<ConnectionHandle>("timing-capture-stop", $"Stop timing capture on {handle}", handle, (j, h) =>
         {
-            ConnectionHandle h = session.Get<ConnectionHandle>(handle);
             string? path = h.TimingCaptureInProgress;
             h.Connection.StopTimingCapture();
             h.TimingCaptureInProgress = null;
@@ -385,27 +413,39 @@ public static class DeviceTools
             {
                 try
                 {
-                    // The file is finalised asynchronously; give it a moment.
-                    for (int i = 0; i < 20 && !File.Exists(path); i++) Thread.Sleep(500);
+                    j.AddMessage("Waiting for PIX to finalise " + path);
+                    WaitForFile(path, TimeSpan.FromSeconds(10), j.Cancellation.Token);
                     IPixTimingCaptureDocument document = session.Factory.OpenTimingCaptureDocument<IPixTimingCaptureDocument>(path);
                     timing = session.Register(new TimingCaptureHandle(path, document)).Summary();
                 }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception ex) { openError = PixErrors.Describe(ex); }
             }
             return new { stopped = true, path, timingCapture = timing, openError };
-        });
+        }), waitSeconds, cancellationToken);
 
-    [McpServerTool(Name = "pix_device_detach"), Description("Detaches PIX from all target processes of this connection (optionally terminating them).")]
+    /// <summary>Polls for a file PIX writes asynchronously; returns when it exists or the timeout elapses (the caller then reports the open error).</summary>
+    internal static void WaitForFile(string path, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        DateTime deadline = DateTime.UtcNow + timeout;
+        while (!File.Exists(path) && DateTime.UtcNow < deadline)
+        {
+            Task.Delay(250, cancellationToken).GetAwaiter().GetResult();
+        }
+    }
+
+    [McpServerTool(Name = "pix_device_detach", Destructive = true), Description("Detaches PIX from all target processes of this connection (optionally terminating them). Closing the device handle also detaches without terminating.")]
     public static Task<string> Detach(
         PixSession session,
         [Description("Device handle")] string handle,
-        [Description("Terminate the target processes (default false).")] bool terminate = false)
+        [Description("Terminate the target processes (default false).")] bool terminate = false,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_detach", () =>
         {
             ConnectionHandle h = session.Get<ConnectionHandle>(handle);
             h.Connection.DetachFromAllProcesses(terminate);
             h.Note("detached", new { terminate });
-            h.LaunchedProcessIds.Clear();
+            h.ClearProcesses();
             return new { detached = true, terminated = terminate };
-        });
+        }, cancellationToken);
 }

@@ -13,7 +13,10 @@ namespace PixMcp.Pix;
 public static class PixDiscovery
 {
     public const string MarkerDll = "PixApiCsExt.experimental.dll";
+    /// <summary>Installs are accepted when their YYMM.DD date is after this (matches the pix-samples resolver). 2606.18-preview is the build the server has been verified against.</summary>
     public const string MinPreviewDate = "2606.15";
+    public const string VerifiedVersion = "2606.18-preview";
+    public static string Requirement => $"a PIX Preview build newer than {MinPreviewDate} ({VerifiedVersion} or later; retail PIX builds do not ship the API)";
 
     public static string? InstallDir { get; private set; }
     public static string? Source { get; private set; }
@@ -83,7 +86,7 @@ public static class PixDiscovery
         string previewRoot = Path.Combine(programFiles, "Microsoft PIX Preview");
         if (!Directory.Exists(previewRoot))
         {
-            error ??= $"No PIX Preview install found under '{previewRoot}' and PIX_DIR is not set. Install PIX Preview 2606.18 or newer from https://devblogs.microsoft.com/pix/download/.";
+            error ??= $"No PIX Preview install found under '{previewRoot}' and PIX_DIR is not set. Install {Requirement} from https://devblogs.microsoft.com/pix/download/.";
             return null;
         }
 

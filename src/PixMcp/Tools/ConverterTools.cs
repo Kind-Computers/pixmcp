@@ -11,7 +11,7 @@ namespace PixMcp.Tools;
 public static class ConverterTools
 {
     [McpServerTool(Name = "pix_capture_format", ReadOnly = true), Description("Detects the on-disk format of a GPU capture file: NO_FILE, INVALID_OR_CORRUPT, PRE2026 (needs upgrade) or 2026 (current).")]
-    public static Task<string> Format(PixSession session, [Description("Path to a .wpix file.")] string path)
+    public static Task<string> Format(PixSession session, [Description("Path to a .wpix file.")] string path, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_capture_format", () =>
         {
             string full = Path.GetFullPath(path);
@@ -24,7 +24,7 @@ public static class ConverterTools
                 isCurrent = format == PIX_GPU_CAPTURE_FILE_FORMAT.PIX_GPU_CAPTURE_FILE_FORMAT_CURRENT,
                 needsUpgrade = format == PIX_GPU_CAPTURE_FILE_FORMAT.PIX_GPU_CAPTURE_FILE_FORMAT_PRE2026,
             };
-        });
+        }, cancellationToken);
 
     [McpServerTool(Name = "pix_capture_upgrade"), Description("Upgrades an older (pre-2026) GPU capture file to the current format, writing a new file. Returns a job with progress.")]
     public static async Task<string> Upgrade(
@@ -32,7 +32,7 @@ public static class ConverterTools
         JobManager jobs,
         [Description("Path to the source .wpix file.")] string path,
         [Description("Output path (default: <name>_upgraded.wpix next to the source).")] string? outPath = null,
-        [Description("Seconds to wait inline for completion (default 0).")] double waitSeconds = 0,
+        [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
         CancellationToken cancellationToken = default)
     {
         try
@@ -56,7 +56,16 @@ public static class ConverterTools
                 j.ThrowIfCancellationRequested();
                 _IPixCaptureFileConverter_Extensions.UpgradeGpuCaptureFile(converter, full, target, j.Sink);
                 PIX_GPU_CAPTURE_FILE_FORMAT result = _IPixCaptureFileConverter_Extensions.GetGpuCaptureFileFormat(converter, target);
-                return new { source = full, sourceFormat = source, path = target, format = result, upgraded = true };
+                bool upgraded = result is PIX_GPU_CAPTURE_FILE_FORMAT.PIX_GPU_CAPTURE_FILE_FORMAT_CURRENT or PIX_GPU_CAPTURE_FILE_FORMAT.PIX_GPU_CAPTURE_FILE_FORMAT_2026;
+                return new
+                {
+                    source = full,
+                    sourceFormat = source,
+                    path = target,
+                    format = result,
+                    upgraded,
+                    warning = upgraded ? null : $"The converter returned but the output file reports format {Json.EnumName(result)} instead of the current format.",
+                };
             });
             return Json.Serialize(await jobs.WaitOrStatus(job, waitSeconds, cancellationToken).ConfigureAwait(false));
         }

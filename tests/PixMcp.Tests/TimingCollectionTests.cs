@@ -78,7 +78,7 @@ public sealed class TimingCollectionTests
         Assert.False(collected);
     }
 
-    private static EventTimingRow Row(int queue) => new(queue, 0, 1, "Draw", 0, 1, 0, 1);
+    private static EventTimingRow Row(int queue) => new(queue, 0, 1, "Draw", "DrawInstanced", 0, 1, 0, 1);
     private static QueueEntry Queue(int index) => new()
     {
         Index = index, Id = (uint)index, Info = null!, Name = $"Queue {index}", Type = default,

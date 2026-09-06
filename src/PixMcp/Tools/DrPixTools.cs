@@ -13,14 +13,18 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class DrPixTools
 {
-    [McpServerTool(Name = "pix_gpu_drpix_experiments"), Description("Lists the Dr. PIX experiments available for this capture (guid, name, category, help text, source). Starts analysis if needed.")]
-    public static Task<string> Experiments(PixSession session, [Description("GPU capture handle")] string handle)
-        => Tools.Run(session, "pix_gpu_drpix_experiments", () =>
+    [McpServerTool(Name = "pix_gpu_drpix_experiments", ReadOnly = true), Description("Lists the Dr. PIX experiments available for this capture (guid, name, category, help text, source); pass names or guids to pix_gpu_drpix_run. Needs GPU analysis: started automatically as a job (see waitSeconds).")]
+    public static Task<string> Experiments(
+        PixSession session,
+        JobManager jobs,
+        [Description("GPU capture handle")] string handle,
+        [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        CancellationToken cancellationToken = default)
+        => Tools.RunWhenReady(session, jobs, "pix_gpu_drpix_experiments", handle, GpuCaptureHandle.AnalysisPreparation(handle), h =>
         {
-            GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
             List<ExperimentInfo> experiments = LoadExperiments(h, null);
             return experiments.Select(e => new { guid = e.Guid, name = e.Name, category = e.Category, helpText = e.HelpText, source = e.Source }).ToArray();
-        });
+        }, waitSeconds, cancellationToken);
 
     private static unsafe List<ExperimentInfo> LoadExperiments(GpuCaptureHandle h, Job? job)
     {
@@ -42,7 +46,7 @@ public static class DrPixTools
         return list;
     }
 
-    [McpServerTool(Name = "pix_gpu_drpix_run"), Description("Runs Dr. PIX experiments (all by default) over a GPU event range and returns their metrics and messages. This replays the capture repeatedly and can take minutes; returns a job.")]
+    [McpServerTool(Name = "pix_gpu_drpix_run"), Description("Runs Dr. PIX experiments (all by default) over a GPU event range and returns their metrics and messages. This replays the capture repeatedly and can take minutes; returns a job. Result gpuIds can be mapped back to events with pix_gpu_events(gpuIdMin, gpuIdMax).")]
     public static async Task<string> Run(
         PixSession session,
         JobManager jobs,
@@ -50,7 +54,7 @@ public static class DrPixTools
         [Description("Experiment guids or (case-insensitive) names to run; omit for all.")] string[]? experiments = null,
         [Description("First GPU event id of the range (default: first GPU event in the capture).")] uint? firstEventGpuId = null,
         [Description("Last GPU event id of the range (default: last GPU event in the capture).")] uint? lastEventGpuId = null,
-        [Description("Seconds to wait inline for completion (default 0 = return job immediately).")] double waitSeconds = 0,
+        [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
         CancellationToken cancellationToken = default)
     {
         try

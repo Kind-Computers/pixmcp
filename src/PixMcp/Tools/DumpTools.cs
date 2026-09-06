@@ -18,7 +18,7 @@ namespace PixMcp.Tools;
 public static class DumpTools
 {
     [McpServerTool(Name = "pix_dump_open"), Description("Opens a DirectX dump file (.dxdmp_preview, written when a GPU hang/TDR occurs) and returns a handle plus metadata: device error, error bucket, PIX's brief and detailed summaries, application, adapter, OS, CPU and memory info, and the queue list.")]
-    public static Task<string> Open(PixSession session, [Description("Path to the .dxdmp_preview / .dxdmp file.")] string path)
+    public static Task<string> Open(PixSession session, [Description("Path to the .dxdmp_preview / .dxdmp file.")] string path, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_open", () =>
         {
             string full = Tools.RequireFile(path, "Dump file");
@@ -26,15 +26,15 @@ public static class DumpTools
             DumpHandle handle = session.Register(new DumpHandle(full, document));
             handle.Metadata = Metadata(handle);
             return new { handle = handle.Id, path = full, metadata = handle.Metadata, queues = QueueList(handle) };
-        });
+        }, cancellationToken);
 
     [McpServerTool(Name = "pix_dump_info", ReadOnly = true), Description("Metadata and queue summary for an open dump file.")]
-    public static Task<string> Info(PixSession session, [Description("Dump handle")] string handle)
+    public static Task<string> Info(PixSession session, [Description("Dump handle")] string handle, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_info", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
             return new { handle = h.Id, path = h.Path, metadata = h.Metadata ??= Metadata(h), queues = QueueList(h) };
-        });
+        }, cancellationToken);
 
     private static object Metadata(DumpHandle h)
     {
@@ -196,7 +196,7 @@ public static class DumpTools
         }).ToArray();
 
     [McpServerTool(Name = "pix_dump_queues", ReadOnly = true), Description("Queues in the dump with their status at dump time, hardware status fields (severity/values) and page fault counts.")]
-    public static Task<string> DumpQueues(PixSession session, [Description("Dump handle")] string handle)
+    public static Task<string> DumpQueues(PixSession session, [Description("Dump handle")] string handle, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_queues", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
@@ -234,7 +234,7 @@ public static class DumpTools
                     rootEventCount = eventCount,
                 };
             }).ToArray();
-        });
+        }, cancellationToken);
 
     private static string EventName(IPixPostmortemEvent evt)
     {
@@ -357,7 +357,8 @@ public static class DumpTools
         [Description("Maximum child depth to expand (default 3).")] int maxDepth = 3,
         [Description("Maximum total events to expand including children (default 500).")] int maxEvents = 500,
         [Description("Include correlated shaders/resources (default true).")] bool includeCorrelations = true,
-        [Description("Only include root events with this status: IN_PROGRESS, POSSIBLY_COMPLETED, COMPLETED, NOT_STARTED.")] string? status = null)
+        [Description("Only include root events with this status: IN_PROGRESS, POSSIBLY_COMPLETED, COMPLETED, NOT_STARTED.")] string? status = null,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_events", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
@@ -391,10 +392,10 @@ public static class DumpTools
                 total++;
             }
             return Paging.Page(page, total, o, l);
-        });
+        }, cancellationToken);
 
     [McpServerTool(Name = "pix_dump_page_faults", ReadOnly = true), Description("GPU page faults recorded in the dump: faulting virtual address, type, access, timestamp, queue, and the resource allocation/free events around that address. Also includes DRED page fault data when present.")]
-    public static Task<string> PageFaults(PixSession session, [Description("Dump handle")] string handle)
+    public static Task<string> PageFaults(PixSession session, [Description("Dump handle")] string handle, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_page_faults", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
@@ -461,14 +462,15 @@ public static class DumpTools
             catch { }
 
             return new { pageFaults = faults, dred };
-        });
+        }, cancellationToken);
 
     [McpServerTool(Name = "pix_dump_breadcrumbs", ReadOnly = true), Description("DRED auto-breadcrumb nodes from the dump: per command list, the recorded operations and how many completed, plus context strings. Shows where each command list was when the GPU hung.")]
     public static Task<string> Breadcrumbs(PixSession session,
         [Description("Dump handle")] string handle,
         [Description("Maximum ops to list per node (default 200, max 5000).")] int maxOps = 200,
         [Description("Node index to include; omit for all nodes.")] int? nodeIndex = null,
-        [Description("First operation index. Omit to show the operations around the completion boundary; use 0 for the beginning.")] int? offset = null)
+        [Description("First operation index. Omit to show the operations around the completion boundary; use 0 for the beginning.")] int? offset = null,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_breadcrumbs", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
@@ -502,7 +504,7 @@ public static class DumpTools
                     };
                 }).ToArray(),
             };
-        });
+        }, cancellationToken);
 
     internal static (int Offset, int Count, int? NextOffset) BreadcrumbWindow(int total, long completed, int maxOps, int? offset)
     {
@@ -521,7 +523,8 @@ public static class DumpTools
         [Description("First item (default 0).")] int offset = 0,
         [Description("Maximum items (default 100).")] int limit = Paging.DefaultLimit,
         [Description("Only resources whose name contains this text.")] string? nameContains = null,
-        [Description("Include per-resource lifetime events (default false).")] bool includeEvents = false)
+        [Description("Include per-resource lifetime events (default false).")] bool includeEvents = false,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_resources", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
@@ -570,14 +573,15 @@ public static class DumpTools
                 total++;
             }
             return Paging.Page(page, total, o, l);
-        });
+        }, cancellationToken);
 
     [McpServerTool(Name = "pix_dump_gpu_state", ReadOnly = true), Description("GPU state tables captured at dump time (engine/queue registers, hardware status), as named tables with columns and (nested) rows.")]
     public static Task<string> GpuState(
         PixSession session,
         [Description("Dump handle")] string handle,
         [Description("Table index to expand; omit to list tables with row counts only.")] int? tableIndex = null,
-        [Description("Maximum rows to return including nested rows (default 500).")] int maxRows = 500)
+        [Description("Maximum rows to return including nested rows (default 500).")] int maxRows = 500,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_gpu_state", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
@@ -624,7 +628,7 @@ public static class DumpTools
                 }
             }
             return new { tableIndex, name = Interop.W(table.GetName()), description = Interop.WOrNull(table.GetDescription()), columns, rows };
-        });
+        }, cancellationToken);
 
     private static string[] Columns(IPixGpuStateTable table)
     {
@@ -678,7 +682,8 @@ public static class DumpTools
         PixSession session,
         [Description("Dump handle")] string handle,
         [Description("Blob index to read; omit to list only.")] int? blobIndex = null,
-        [Description("Maximum bytes to return (default 65536).")] int maxBytes = 65536)
+        [Description("Maximum bytes to return (default 65536).")] int maxBytes = 65536,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_blobs", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
@@ -706,10 +711,10 @@ public static class DumpTools
                 blobs = list.Select((b, i) => new { blobIndex = i, metadata = Interop.Hex(b.GetMetadata()), sizeBytes = b.GetSizeBytes() }).ToArray(),
                 data,
             };
-        });
+        }, cancellationToken);
 
     [McpServerTool(Name = "pix_dump_journal", ReadOnly = true), Description("D3D runtime journal entries recorded before the device removal (error codes, thread ids, messages).")]
-    public static Task<string> Journal(PixSession session, [Description("Dump handle")] string handle, [Description("Maximum entries (default 200).")] int limit = 200)
+    public static Task<string> Journal(PixSession session, [Description("Dump handle")] string handle, [Description("Maximum entries (default 200).")] int limit = 200, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_journal", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
@@ -724,7 +729,7 @@ public static class DumpTools
                 entries = Interop.Items<IPixD3DJournalEntry>(entries).Take(Math.Clamp(limit, 1, 5000))
                     .Select(e => new { code = Interop.Hex(e.GetCode()), threadId = e.GetThreadID(), tickCount = e.GetTickCount(), message = Interop.WOrNull(e.GetErrorMessage()) }).ToArray(),
             };
-        });
+        }, cancellationToken);
 
     [McpServerTool(Name = "pix_dump_shader_waves", ReadOnly = true), Description("Shader debugging data captured at the hang: in-flight shader waves with stage, status, coordinates, instruction pointer, exceptions hit, offending source locations, and optionally lanes.")]
     public static Task<string> ShaderWaves(
@@ -733,7 +738,8 @@ public static class DumpTools
         [Description("First wave (default 0).")] int offset = 0,
         [Description("Maximum waves (default 50).")] int limit = 50,
         [Description("Include per-lane status and shader parameters (default false).")] bool includeLanes = false,
-        [Description("Include offending code locations (default true).")] bool includeOffendingLocations = true)
+        [Description("Include offending code locations (default true).")] bool includeOffendingLocations = true,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_shader_waves", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
@@ -759,7 +765,7 @@ public static class DumpTools
                 total++;
             }
             return Paging.Page(page, total, o, l);
-        });
+        }, cancellationToken);
 
     private static object WaveDto(IPixShaderWave wave, bool includeLanes, bool includeOffending)
     {

@@ -10,42 +10,55 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class SessionTools
 {
-    [McpServerTool(Name = "pix_info", ReadOnly = true), Description("Reports the PIX install being used, whether the PIX API loaded, Windows Developer Mode state, open handles and jobs. Call this first if anything fails.")]
-    public static Task<string> Info(
+    // pix_info and pix_handles deliberately stay off the PIX worker thread (except for the optional
+    // factory probe): they are the diagnostics an agent reaches for when calls stall, so they must
+    // answer even while a replay occupies the worker. Everything they read is immutable or a
+    // thread-safe snapshot.
+    [McpServerTool(Name = "pix_info", ReadOnly = true), Description("Reports the PIX install being used, whether the PIX API loaded, Windows Developer Mode state, open handles, jobs, and whether the single PIX worker thread is busy (queued calls wait behind the running job). Call this first if anything fails or stalls.")]
+    public static async Task<string> Info(
         PixSession session,
         JobManager jobs,
-        [Description("When true, also creates the PIX factory to verify the native API loads.")] bool probe = false)
-        => Tools.Run(session, "pix_info", () =>
+        [Description("When true, also creates the PIX factory to verify the native API loads (runs on the PIX thread).")] bool probe = false,
+        CancellationToken cancellationToken = default)
+    {
+        string? probeError = null;
+        if (probe)
         {
-            string? probeError = null;
-            if (probe)
+            try { await session.Run(() => session.Factory, cancellationToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { probeError = PixErrors.Describe(ex); }
+        }
+        Job? running = jobs.Running;
+        return Json.Serialize(new
+        {
+            pix = new
             {
-                try { _ = session.Factory; }
-                catch (Exception ex) { probeError = PixErrors.Describe(ex); }
-            }
-            return new
+                installDir = PixDiscovery.InstallDir,
+                version = PixDiscovery.Version,
+                discoveredVia = PixDiscovery.Source,
+                discoveryError = PixDiscovery.Error,
+                apiLoaded = session.FactoryCreated,
+                probeError,
+            },
+            developerModeEnabled = DeveloperModeEnabled(),
+            process = new
             {
-                pix = new
-                {
-                    installDir = PixDiscovery.InstallDir,
-                    version = PixDiscovery.Version,
-                    discoveredVia = PixDiscovery.Source,
-                    discoveryError = PixDiscovery.Error,
-                    apiLoaded = session.FactoryCreated,
-                    probeError,
-                },
-                developerModeEnabled = DeveloperModeEnabled(),
-                process = new
-                {
-                    pid = Environment.ProcessId,
-                    is64Bit = Environment.Is64BitProcess,
-                    runtime = RuntimeInformation.FrameworkDescription,
-                    os = RuntimeInformation.OSDescription,
-                },
-                handles = session.Handles.Select(h => h.Summary()).ToArray(),
-                jobs = jobs.All.Select(j => j.ToDto(includeResult: false)).ToArray(),
-            };
+                pid = Environment.ProcessId,
+                is64Bit = Environment.Is64BitProcess,
+                runtime = RuntimeInformation.FrameworkDescription,
+                os = RuntimeInformation.OSDescription,
+                version = ServerHost.Version,
+            },
+            worker = new
+            {
+                busy = running is not null || session.Worker.PendingCount > 0,
+                runningJob = running?.Id,
+                queuedCalls = session.Worker.PendingCount,
+            },
+            handles = session.Handles.Select(h => h.Summary()).ToArray(),
+            jobs = jobs.All.Select(j => j.ToDto(includeResult: false)).ToArray(),
         });
+    }
 
     private static bool? DeveloperModeEnabled()
     {
@@ -60,19 +73,18 @@ public static class SessionTools
         }
     }
 
-    [McpServerTool(Name = "pix_handles", ReadOnly = true), Description("Lists open handles (GPU captures, timing captures, dump files, device connections) with their summaries.")]
-    public static Task<string> Handles(PixSession session)
-        => Tools.Run(session, "pix_handles", () => session.Handles.Select(h => h.Summary()).ToArray());
+    [McpServerTool(Name = "pix_handles", ReadOnly = true), Description("Lists open handles (GPU captures, timing captures, dump files, device connections) with their summaries. Answers even while the PIX thread is busy.")]
+    public static string Handles(PixSession session) => Json.Serialize(session.Handles.Select(h => h.Summary()).ToArray());
 
-    [McpServerTool(Name = "pix_close"), Description("Closes a handle: stops any running analysis, disconnects, and releases the document.")]
-    public static Task<string> Close(PixSession session, [Description("Handle id, e.g. gpu-1")] string handle)
-        => Tools.Run(session, "pix_close", () => session.Close(handle));
+    [McpServerTool(Name = "pix_close", Destructive = true), Description("Closes a handle: stops any running analysis, disconnects, and releases the document. Collected timing/counter data for the handle is discarded.")]
+    public static Task<string> Close(PixSession session, [Description("Handle id, e.g. gpu-1")] string handle, CancellationToken cancellationToken = default)
+        => Tools.Run(session, "pix_close", () => session.Close(handle), cancellationToken);
 
-    [McpServerTool(Name = "pix_close_all"), Description("Closes every open handle.")]
-    public static Task<string> CloseAll(PixSession session)
-        => Tools.Run(session, "pix_close_all", () => session.CloseAll());
+    [McpServerTool(Name = "pix_close_all", Destructive = true), Description("Closes every open handle.")]
+    public static Task<string> CloseAll(PixSession session, CancellationToken cancellationToken = default)
+        => Tools.Run(session, "pix_close_all", () => session.CloseAll(), cancellationToken);
 
-    [McpServerTool(Name = "pix_jobs", ReadOnly = true), Description("Lists background jobs (analysis start, Dr. PIX runs, symbol resolution, captures) and their status.")]
+    [McpServerTool(Name = "pix_jobs", ReadOnly = true), Description("Lists background jobs (analysis start, timing/counter collection, Dr. PIX runs, symbol resolution, captures) and their status. Only the most recent finished jobs are retained.")]
     public static string Jobs(JobManager jobs) => Json.Serialize(jobs.All.Select(j => j.ToDto(includeResult: false)).ToArray());
 
     [McpServerTool(Name = "pix_job_status", ReadOnly = true), Description("Returns a job's status, progress, recent status messages, and its result once finished.")]
@@ -82,18 +94,18 @@ public static class SessionTools
         return Json.Serialize(job.ToDto(includeResult: true));
     }
 
-    [McpServerTool(Name = "pix_job_wait"), Description("Blocks until a job finishes or the timeout elapses, then returns its status and result.")]
+    [McpServerTool(Name = "pix_job_wait", ReadOnly = true), Description("Blocks until a job finishes or the timeout elapses, then returns its status and result.")]
     public static async Task<string> JobWait(
         JobManager jobs,
         [Description("Job id, e.g. job-1")] string jobId,
-        [Description("Maximum seconds to wait (default 120).")] double timeoutSeconds = 120,
+        [Description("Maximum seconds to wait (default 120, max 3600).")] double timeoutSeconds = 120,
         CancellationToken cancellationToken = default)
     {
         Job job = jobs.Get(jobId);
         return Json.Serialize(await jobs.WaitOrStatus(job, Math.Clamp(timeoutSeconds, 0, 3600), cancellationToken).ConfigureAwait(false));
     }
 
-    [McpServerTool(Name = "pix_job_cancel"), Description("Requests cancellation of a running job (best effort; PIX honours it at its next checkpoint).")]
+    [McpServerTool(Name = "pix_job_cancel"), Description("Requests cancellation of a running job (best effort; PIX honours it at its next checkpoint, and work that completes first stays succeeded).")]
     public static string JobCancel(JobManager jobs, [Description("Job id")] string jobId)
     {
         Job job = jobs.Get(jobId);
@@ -106,6 +118,6 @@ public static class SessionTools
     }
 
     [McpServerTool(Name = "pix_log", ReadOnly = true), Description("Returns recent PIX engine log messages (warnings/errors reported by PIX itself). Useful when a call fails without a clear reason.")]
-    public static string Log(PixSession session, [Description("Number of most recent entries (default 50).")] int count = 50)
+    public static string Log(PixSession session, [Description("Number of most recent entries (default 50, max 500).")] int count = 50)
         => Json.Serialize(session.Log.Recent(Math.Clamp(count, 1, 500)));
 }

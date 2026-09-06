@@ -28,19 +28,20 @@ public static class PipelineTools
         return options;
     });
 
-    [McpServerTool(Name = "pix_gpu_pipeline_state"), Description("Program/pipeline state bound at a Draw, Dispatch, DispatchMesh or DispatchRays event: program type, pipeline type, PSO subobjects (blend, rasterizer, depth-stencil, input layout, ...), global root signature and bound shaders. Starts GPU analysis if needed.")]
+    [McpServerTool(Name = "pix_gpu_pipeline_state", ReadOnly = true), Description("Program/pipeline state bound at a Draw, Dispatch, DispatchMesh or DispatchRays event: program type, pipeline type, PSO subobjects (blend, rasterizer, depth-stencil, input layout, ...), global root signature and bound shaders. The event must be a draw/dispatch (other events fail with E_NOT_VALID_STATE). Needs GPU analysis: started automatically as a job (see waitSeconds). For bound resources use pix_gpu_event_resources; for shader code use pix_gpu_shader_code.")]
     public static Task<string> PipelineState(
         PixSession session,
+        JobManager jobs,
         [Description("GPU capture handle")] string handle,
         [Description("Queue index")] int queueIndex,
         [Description("Event index of a draw/dispatch event")] uint eventIndex,
         [Description("Include decoded PSO subobject details (default true).")] bool includeSubobjects = true,
         [Description("Include the global root signature parameters (default true).")] bool includeRootSignature = true,
-        [Description("Include the bound shaders (default true).")] bool includeShaders = true)
-        => Tools.Run(session, "pix_gpu_pipeline_state", () =>
+        [Description("Include the bound shaders (default true).")] bool includeShaders = true,
+        [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        CancellationToken cancellationToken = default)
+        => Tools.RunWhenReady(session, jobs, "pix_gpu_pipeline_state", handle, GpuCaptureHandle.AnalysisPreparation(handle), h =>
         {
-            GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
-            h.EnsureAnalysisStarted(null);
             EventRecord record = h.Event(queueIndex, eventIndex);
             PIX_EVENT_INFO info = h.EventInfo(queueIndex, eventIndex);
 
@@ -125,7 +126,7 @@ public static class PipelineTools
                 genericPipeline = generic,
                 raytracingPipeline = raytracing,
             };
-        });
+        }, waitSeconds, cancellationToken);
 
     private static object? SubobjectDetail(D3D12_STATE_SUBOBJECT subobject)
     {
@@ -271,20 +272,21 @@ public static class PipelineTools
         };
     }
 
-    [McpServerTool(Name = "pix_gpu_shader_code"), Description("Returns shader source/IL/ISA for a shader bound at an event (see pix_gpu_pipeline_state for shader indices). Code is split into nodes (files/functions); pick a node or get the first one.")]
+    [McpServerTool(Name = "pix_gpu_shader_code", ReadOnly = true), Description("Returns shader source/IL/ISA for a shader bound at a draw/dispatch event (see pix_gpu_pipeline_state for shader indices). Code is split into nodes (files/functions); pick a node or get the first one. Output is capped by maxChars (truncated: true when cut). Needs GPU analysis: started automatically as a job (see waitSeconds).")]
     public static Task<string> ShaderCode(
         PixSession session,
+        JobManager jobs,
         [Description("GPU capture handle")] string handle,
         [Description("Queue index")] int queueIndex,
         [Description("Event index of a draw/dispatch event")] uint eventIndex,
         [Description("Shader index within the event's shader list")] int shaderIndex,
         [Description("HLSL, IL (DXIL disassembly) or ISA (default HLSL).")] string codeType = "HLSL",
         [Description("Node index to return code for (default: first node). Use -1 to list nodes only.")] int nodeIndex = 0,
-        [Description("Maximum characters of code to return (default 30000).")] int maxChars = 30000)
-        => Tools.Run(session, "pix_gpu_shader_code", () =>
+        [Description("Maximum characters of code to return (default 30000).")] int maxChars = 30000,
+        [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        CancellationToken cancellationToken = default)
+        => Tools.RunWhenReady(session, jobs, "pix_gpu_shader_code", handle, GpuCaptureHandle.AnalysisPreparation(handle), h =>
         {
-            GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
-            h.EnsureAnalysisStarted(null);
             PIX_EVENT_INFO info = h.EventInfo(queueIndex, eventIndex);
             IPixProgramState programState = PixApiExtensionsGpuCapture.GetProgramState(h.Document, ref info);
             IPixGpuProgram program = PixApiExtensionsGpuCaptureResources.GetGpuProgram<IPixGpuProgram>(programState);
@@ -337,5 +339,5 @@ public static class PipelineTools
                 code,
                 truncated,
             };
-        });
+        }, waitSeconds, cancellationToken);
 }

@@ -77,29 +77,36 @@ public sealed class ConnectionHandle : PixHandle
     public override string Kind => "device";
     public IPixConnectionDocument Connection { get; private set; }
     public DelegateConnectionNotifications Notifications { get; }
-    public List<object> Events { get; } = new();
-    public List<uint> LaunchedProcessIds { get; } = new();
+    // Mutated on the PIX thread and by PIX notification callbacks; read by pix_handles/pix_info
+    // off the worker, so every access goes through the lock.
+    private readonly List<object> _events = new();
+    private readonly List<uint> _processIds = new();
     public string? TimingCaptureInProgress { get; set; }
 
     public void Note(string kind, object? detail = null)
     {
-        lock (Events)
+        lock (_events)
         {
-            Events.Add(new { time = DateTimeOffset.UtcNow, kind, detail });
-            if (Events.Count > 200)
+            _events.Add(new { time = DateTimeOffset.UtcNow, kind, detail });
+            if (_events.Count > 200)
             {
-                Events.RemoveAt(0);
+                _events.RemoveAt(0);
             }
         }
     }
 
     public object[] RecentEvents()
     {
-        lock (Events)
+        lock (_events)
         {
-            return Events.TakeLast(30).ToArray();
+            return _events.TakeLast(30).ToArray();
         }
     }
+
+    public void AddProcess(uint processId) { lock (_events) _processIds.Add(processId); }
+    public void ClearProcesses() { lock (_events) _processIds.Clear(); }
+    /// <summary>Snapshot of the process ids launched or attached through this connection.</summary>
+    public uint[] ProcessIds { get { lock (_events) return _processIds.ToArray(); } }
 
     public override object Summary() => new
     {
@@ -107,7 +114,7 @@ public sealed class ConnectionHandle : PixHandle
         kind = Kind,
         path = Path,
         openedAt = OpenedAt,
-        launchedProcessIds = LaunchedProcessIds,
+        launchedProcessIds = ProcessIds,
         timingCaptureInProgress = TimingCaptureInProgress,
         recentEvents = RecentEvents(),
     };

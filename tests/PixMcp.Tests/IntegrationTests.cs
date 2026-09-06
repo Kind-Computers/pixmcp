@@ -72,7 +72,7 @@ public class IntegrationTests : IDisposable
         JsonElement started = Parse(await AnalysisTools.Start(_session, _jobs, handle, waitSeconds: 600));
         Assert.Equal("succeeded", started.GetProperty("status").GetString());
 
-        JsonElement timing = Parse(await CountersTools.TimingEvents(_session, handle, limit: 5));
+        JsonElement timing = Parse(await CountersTools.TimingEvents(_session, _jobs, handle, limit: 5, waitSeconds: 600));
         AssertPage(timing, 5);
         ulong[] durations = timing.GetProperty("items").EnumerateArray()
             .Select(row => row.GetProperty("eopDurationNs").GetUInt64()).ToArray();
@@ -90,7 +90,7 @@ public class IntegrationTests : IDisposable
         JsonElement opened = Parse(await GpuCaptureTools.Open(_session, CapturePath!));
         string handle = opened.GetProperty("handle").GetString()!;
 
-        JsonElement counters = Parse(await CountersTools.CountersList(_session, handle)).GetProperty("counters");
+        JsonElement counters = Parse(await CountersTools.CountersList(_session, _jobs, handle, waitSeconds: 600)).GetProperty("counters");
         Skip.If(counters.GetArrayLength() == 0, "No hardware counters available on this GPU");
         uint counterId = counters[0].GetProperty("id").GetUInt32();
 
@@ -101,7 +101,7 @@ public class IntegrationTests : IDisposable
             Assert.Equal("succeeded", started.GetProperty("status").GetString());
         }
 
-        JsonElement collected = Parse(await CountersTools.CountersCollect(_session, handle, new[] { counterId }, limit: 5));
+        JsonElement collected = Parse(await CountersTools.CountersCollect(_session, _jobs, handle, new[] { counterId }, limit: 5, waitSeconds: 600));
         Assert.Equal(counterId, collected.GetProperty("extra").GetProperty("counters")[0].GetProperty("id").GetUInt32());
         Assert.True(Parse(await AnalysisTools.Status(_session, handle)).GetProperty("started").GetBoolean());
         await SessionTools.Close(_session, handle);
@@ -116,7 +116,7 @@ public class IntegrationTests : IDisposable
         JsonElement opened = Parse(await GpuCaptureTools.Open(_session, CapturePath!));
         string handle = opened.GetProperty("handle").GetString()!;
 
-        JsonElement experiments = Parse(await DrPixTools.Experiments(_session, handle));
+        JsonElement experiments = Parse(await DrPixTools.Experiments(_session, _jobs, handle, waitSeconds: 600));
         JsonElement experiment = experiments.EnumerateArray()
             .FirstOrDefault(e => e.GetProperty("name").GetString() == "1x1 Viewport");
         Skip.If(experiment.ValueKind == JsonValueKind.Undefined, "The 1x1 Viewport experiment is unavailable on this GPU");

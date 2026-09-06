@@ -6,7 +6,7 @@ using PixMcp.Pix;
 if (PixDiscovery.InstallDir is null || !string.IsNullOrEmpty(PixDiscovery.Error))
 {
     Console.Error.WriteLine("pixmcp: " + (PixDiscovery.Error ?? "No compatible PIX Preview installation found.") +
-        " Install PIX Preview 2606.18 or newer, or set PIX_DIR to its installation directory.");
+        $" Install {PixDiscovery.Requirement}, or set PIX_DIR to its installation directory.");
     return 1;
 }
 

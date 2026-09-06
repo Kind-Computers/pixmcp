@@ -17,29 +17,38 @@ public static class CountersTools
 {
     // ---- Per-event GPU timing ----
 
-    [McpServerTool(Name = "pix_gpu_timing_collect"), Description("Collects per-event GPU timing (top-of-pipe and end-of-pipe start/duration in ns) for the whole capture by replaying it. Returns a job; the result is a summary with the slowest events per queue. Starts analysis if needed.")]
-    public static async Task<string> TimingCollect(
+    [McpServerTool(Name = "pix_gpu_timing_collect", Idempotent = true), Description("Collects per-event GPU timing (top-of-pipe and end-of-pipe start/duration in ns) for the whole capture by replaying it. Returns a job; the result is a summary with the slowest events per queue. Starts analysis if needed. pix_gpu_timing_events does this implicitly; call this first on big captures so the wait is visible.")]
+    public static Task<string> TimingCollect(
         PixSession session,
         JobManager jobs,
         [Description("GPU capture handle")] string handle,
-        [Description("Seconds to wait inline for completion (default 0 = return job immediately).")] double waitSeconds = 0,
+        [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
         CancellationToken cancellationToken = default)
-    {
-        try
+        => Tools.RunJob(jobs, "pix_gpu_timing_collect", () =>
         {
-            Job job = jobs.Start("timing", $"Collect GPU timing for {handle}", j =>
+            Job job = jobs.StartForHandle<GpuCaptureHandle>("timing", $"Collect GPU timing for {handle}", handle, (j, h) =>
             {
-                GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
                 CollectTiming(h, j);
                 return TimingSummary(h);
             });
-            return Json.Serialize(await jobs.WaitOrStatus(job, waitSeconds, cancellationToken).ConfigureAwait(false));
-        }
-        catch (Exception ex)
-        {
-            throw PixErrors.ToMcp(ex, "pix_gpu_timing_collect");
-        }
+            Tools.RegisterPreparation(session, handle, TimingPreparation(handle).Key, job);
+            return job;
+        }, waitSeconds, cancellationToken);
+
+    /// <summary>Preparation for tools that need per-event timing rows.</summary>
+    internal static Preparation<GpuCaptureHandle> TimingPreparation(string handle)
+        => new("timing", "timing", $"Collect GPU timing for {handle}", h => h.Timing is not null, (h, job) => CollectTiming(h, job));
+
+    /// <summary>Preparation for tools that need one counter set decoded for one queue.</summary>
+    internal static Preparation<GpuCaptureHandle> CounterSetPreparation(string handle, uint[] ids, int queueIndex)
+    {
+        string key = CounterSetKey(ids);
+        return new("counters:" + key, "counters", $"Collect GPU counters [{key}] for {handle}",
+            h => h.CounterCollections.TryGetValue(key, out CounterCollectionCache? cache) && cache.RowsByQueue.ContainsKey(queueIndex),
+            (h, job) => CounterRows(CollectCounterSet(h, ids, job), h.Queue(queueIndex), job.Cancellation.Token));
     }
+
+    private static string CounterSetKey(uint[] ids) => string.Join(",", ids);
 
     private static void CollectTiming(GpuCaptureHandle h, Job? job)
     {
@@ -70,7 +79,7 @@ public static class CountersTools
                 continue;
             }
             PIX_EVENT_TIMING t = PixApiExtensionsGpuCaptureTiming.GetEventData(timing, info);
-            rows.Add(new EventTimingRow(queue.Index, i, info.GpuId, Interop.A(info.Name), t.TopStart, t.TopDuration, t.EopStart, t.EopDuration));
+            rows.Add(new EventTimingRow(queue.Index, i, info.GpuId, Interop.A(info.Name), Interop.A(info.ApiCallData), t.TopStart, t.TopDuration, t.EopStart, t.EopDuration));
         }
         return rows.ToArray();
     }
@@ -115,9 +124,10 @@ public static class CountersTools
         return new { handle = h.Id, queues };
     }
 
-    [McpServerTool(Name = "pix_gpu_timing_events"), Description("Per-event GPU timing rows, sortable by duration so 'the N slowest draws' is one call. Collects timing first if needed (can take a while on large captures; use pix_gpu_timing_collect to do that as a job).")]
+    [McpServerTool(Name = "pix_gpu_timing_events", ReadOnly = true), Description("Per-event GPU timing rows, sortable by duration so 'the N slowest draws' is one call. Timing is collected first if needed, as a job (see waitSeconds; pix_gpu_timing_collect runs the same job explicitly).")]
     public static Task<string> TimingEvents(
         PixSession session,
+        JobManager jobs,
         [Description("GPU capture handle")] string handle,
         [Description("Queue index; omit for all queues.")] int? queueIndex = null,
         [Description("First item (default 0).")] int offset = 0,
@@ -126,11 +136,11 @@ public static class CountersTools
         [Description("Sort descending (default true).")] bool descending = true,
         [Description("Only events with EOP duration >= this many nanoseconds.")] ulong minDurationNs = 0,
         [Description("Only events whose name contains this text.")] string? nameContains = null,
-        [Description(Tools.KindDescription)] string? kind = null)
-        => Tools.Run(session, "pix_gpu_timing_events", () =>
+        [Description(Tools.KindDescription)] string? kind = null,
+        [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        CancellationToken cancellationToken = default)
+        => Tools.RunWhenReady(session, jobs, "pix_gpu_timing_events", handle, TimingPreparation(handle), h =>
         {
-            GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
-            CollectTiming(h, null);
             (int o, int l) = Paging.Normalize(offset, limit);
 
             IEnumerable<EventTimingRow> rows = queueIndex.HasValue
@@ -140,7 +150,7 @@ public static class CountersTools
             rows = rows.Where(r => r.EopDuration != GpuCaptureHandle.TimingNone && r.EopDuration >= minDurationNs && Tools.Contains(r.Name, nameContains));
             if (!string.IsNullOrEmpty(kind))
             {
-                rows = rows.Where(r => Tools.MatchesKind(new EventRecord(r.Index, r.GpuId, uint.MaxValue, r.Name, string.Empty, 0, 0), kind));
+                rows = rows.Where(r => Tools.MatchesKind(new EventRecord(r.Index, r.GpuId, uint.MaxValue, r.Name, r.ApiCallData, 0, 0), kind));
             }
 
             Func<EventTimingRow, ulong> key = sortBy.ToLowerInvariant() switch
@@ -154,19 +164,23 @@ public static class CountersTools
             EventTimingRow[] sorted = (descending ? rows.OrderByDescending(key) : rows.OrderBy(key)).ToArray();
             var page = sorted.Skip(o).Take(l).Select(TimingRowDto).ToList();
             return Paging.Page(page, sorted.Length, o, l);
-        });
+        }, waitSeconds, cancellationToken);
 
     // ---- GPU hardware counters ----
 
-    [McpServerTool(Name = "pix_gpu_counters_list"), Description("Lists the GPU hardware counters and counter groups available for this capture on the local GPU (id, name, description, data type). Starts analysis if needed.")]
-    public static Task<string> CountersList(PixSession session, [Description("GPU capture handle")] string handle)
-        => Tools.Run(session, "pix_gpu_counters_list", () =>
+    [McpServerTool(Name = "pix_gpu_counters_list", ReadOnly = true), Description("Lists the GPU hardware counters and counter groups available for this capture on the local GPU (id, name, description, data type); pass ids to pix_gpu_counters_start / pix_gpu_counters_collect. Needs GPU analysis: started automatically as a job (see waitSeconds). For sampled-over-time counters see pix_gpu_hf_counters; for occupancy see pix_gpu_occupancy.")]
+    public static Task<string> CountersList(
+        PixSession session,
+        JobManager jobs,
+        [Description("GPU capture handle")] string handle,
+        [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        CancellationToken cancellationToken = default)
+        => Tools.RunWhenReady(session, jobs, "pix_gpu_counters_list", handle, GpuCaptureHandle.AnalysisPreparation(handle), h =>
         {
-            GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
             List<CounterInfo> counters = LoadCounters(h);
             var groups = counters.SelectMany(c => c.Groups).Distinct().OrderBy(g => g).ToArray();
             return new { count = counters.Count, groups, counters = counters.Select(c => new { id = c.Id, name = c.Name, description = c.Description, dataType = c.DataType, groups = c.Groups }).ToArray() };
-        });
+        }, waitSeconds, cancellationToken);
 
     private static List<CounterInfo> LoadCounters(GpuCaptureHandle h, Job? job = null)
     {
@@ -216,21 +230,19 @@ public static class CountersTools
         return result;
     }
 
-    [McpServerTool(Name = "pix_gpu_counters_start"), Description("Collects GPU hardware counters and materializes per-event results for every queue as a job. Poll pix_job_status, then page the cached rows with pix_gpu_counters_collect. Each distinct counter set replays the capture once per analysis session.")]
-    public static async Task<string> CountersStart(
+    [McpServerTool(Name = "pix_gpu_counters_start", Idempotent = true), Description("Collects GPU hardware counters and materializes per-event results for every queue as a job. Poll pix_job_status, then page the cached rows with pix_gpu_counters_collect (which joins this job if it is still running). Each distinct counter set replays the capture once per analysis session.")]
+    public static Task<string> CountersStart(
         PixSession session,
         JobManager jobs,
         [Description("GPU capture handle")] string handle,
         [Description("Counter ids from pix_gpu_counters_list.")] uint[] counterIds,
-        [Description("Seconds to wait inline for completion (default 0 = return job immediately).")] double waitSeconds = 0,
+        [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
         CancellationToken cancellationToken = default)
-    {
-        try
+        => Tools.RunJob(jobs, "pix_gpu_counters_start", () =>
         {
             uint[] ids = NormalizeCounterIds(counterIds);
-            Job job = jobs.Start("counters", $"Collect GPU counters for {handle}", j =>
+            Job job = jobs.StartForHandle<GpuCaptureHandle>("counters", $"Collect GPU counters [{CounterSetKey(ids)}] for {handle}", handle, (j, h) =>
             {
-                GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
                 CounterCollectionCache cache = CollectCounterSet(h, ids, j);
                 var queues = new List<object>();
                 foreach (QueueEntry queue in h.Queues)
@@ -241,10 +253,9 @@ public static class CountersTools
                 }
                 return new { handle = h.Id, counters = CounterMetadata(cache), queues };
             });
-            return Json.Serialize(await jobs.WaitOrStatus(job, waitSeconds, cancellationToken).ConfigureAwait(false));
-        }
-        catch (Exception ex) { throw PixErrors.ToMcp(ex, "pix_gpu_counters_start"); }
-    }
+            Tools.RegisterPreparation(session, handle, "counters:" + CounterSetKey(ids), job);
+            return job;
+        }, waitSeconds, cancellationToken);
 
     internal static uint[] NormalizeCounterIds(uint[]? counterIds)
     {
@@ -258,7 +269,7 @@ public static class CountersTools
 
     private static CounterCollectionCache CollectCounterSet(GpuCaptureHandle h, uint[] ids, Job? job)
     {
-        string key = string.Join(",", ids);
+        string key = CounterSetKey(ids);
         if (h.CounterCollections.TryGetValue(key, out CounterCollectionCache? cached)) return cached;
         job?.Cancellation.Token.ThrowIfCancellationRequested();
         var known = LoadCounters(h, job).ToDictionary(c => c.Id);
@@ -310,9 +321,10 @@ public static class CountersTools
             return rows.ToArray();
         });
 
-    [McpServerTool(Name = "pix_gpu_counters_collect"), Description("Pages per-event GPU hardware counter values. Reuses decoded results; on a cache miss it collects synchronously. For large captures use pix_gpu_counters_start first to collect as a job.")]
+    [McpServerTool(Name = "pix_gpu_counters_collect", ReadOnly = true), Description("Pages per-event GPU hardware counter values for one queue. Reuses decoded results; a counter set not collected yet is collected as a job first (see waitSeconds), the same job pix_gpu_counters_start runs explicitly.")]
     public static Task<string> CountersCollect(
         PixSession session,
+        JobManager jobs,
         [Description("GPU capture handle")] string handle,
         [Description("Counter ids to collect (from pix_gpu_counters_list). Keep the set small; each set replays the capture.")] uint[] counterIds,
         [Description("Queue index (default 0).")] int queueIndex = 0,
@@ -320,15 +332,17 @@ public static class CountersTools
         [Description("Maximum events (default 100).")] int limit = Paging.DefaultLimit,
         [Description(Tools.KindDescription)] string? kind = null,
         [Description("Only events whose name contains this text.")] string? nameContains = null,
-        [Description("Skip events that have no data for any requested counter (default true).")] bool onlyEventsWithData = true)
-        => Tools.Run(session, "pix_gpu_counters_collect", () =>
+        [Description("Skip events that have no data for any requested counter (default true).")] bool onlyEventsWithData = true,
+        [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        uint[] ids = NormalizeCounterIds(counterIds);
+        // Validate the filter before an expensive replay, even if the queue is empty.
+        Tools.MatchesKind(default(EventRecord) with { Name = string.Empty, ApiCallData = string.Empty }, kind);
+        return Tools.RunWhenReady(session, jobs, "pix_gpu_counters_collect", handle, CounterSetPreparation(handle, ids, queueIndex), h =>
         {
-            uint[] ids = NormalizeCounterIds(counterIds);
-            GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
             (int o, int l) = Paging.Normalize(offset, limit);
             QueueEntry queue = h.Queue(queueIndex);
-            // Validate the filter before an expensive replay, even if the queue is empty.
-            Tools.MatchesKind(default(EventRecord) with { Name = string.Empty, ApiCallData = string.Empty }, kind);
             CounterCollectionCache cache = CollectCounterSet(h, ids, null);
             var page = new List<object>();
             long total = 0;
@@ -345,19 +359,21 @@ public static class CountersTools
                 total++;
             }
             return Paging.Page(page, total, o, l, new { counters = CounterMetadata(cache) });
-        });
+        }, waitSeconds, cancellationToken);
+    }
 
     // ---- Occupancy and high-frequency counters (optional per hardware) ----
 
-    [McpServerTool(Name = "pix_gpu_occupancy"), Description("GPU occupancy over the capture (per occupancy type and shader stage), downsampled. Unavailable on some hardware; returns an 'unavailable' marker instead of failing.")]
+    [McpServerTool(Name = "pix_gpu_occupancy", ReadOnly = true), Description("GPU occupancy over the capture (per occupancy type and shader stage), downsampled to maxPoints. Unavailable on some hardware; returns an 'unavailable' marker instead of failing. Needs GPU analysis: started automatically as a job (see waitSeconds).")]
     public static Task<string> Occupancy(
         PixSession session,
+        JobManager jobs,
         [Description("GPU capture handle")] string handle,
-        [Description("Maximum sample points per series (default 200).")] int maxPoints = 200)
-        => Tools.Run(session, "pix_gpu_occupancy", () =>
+        [Description("Maximum sample points per series (default 200, max 5000).")] int maxPoints = 200,
+        [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        CancellationToken cancellationToken = default)
+        => Tools.RunWhenReady(session, jobs, "pix_gpu_occupancy", handle, GpuCaptureHandle.AnalysisPreparation(handle), h =>
         {
-            GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
-            h.EnsureAnalysisStarted(null);
             try
             {
                 return OccupancyCore(h.GetAnalysis(), Math.Clamp(maxPoints, 2, 5000));
@@ -366,7 +382,7 @@ public static class CountersTools
             {
                 return PixErrors.Unavailable("occupancy", ex);
             }
-        });
+        }, waitSeconds, cancellationToken);
 
     private static unsafe object OccupancyCore(IPixGpuCaptureAnalysis analysis, int maxPoints)
     {
@@ -428,17 +444,18 @@ public static class CountersTools
         };
     }
 
-    [McpServerTool(Name = "pix_gpu_hf_counters"), Description("High-frequency GPU counters: lists counters/groups/sets and, when a set is chosen, collects and returns downsampled samples. Unavailable on some hardware.")]
+    [McpServerTool(Name = "pix_gpu_hf_counters", ReadOnly = true), Description("High-frequency (sampled over time) GPU counters: lists counters/groups/sets and, when a set is chosen, collects and returns samples downsampled to maxSamples. Unavailable on some hardware. Per-event counter values come from pix_gpu_counters_collect instead. Needs GPU analysis: started automatically as a job (see waitSeconds).")]
     public static Task<string> HighFrequencyCounters(
         PixSession session,
+        JobManager jobs,
         [Description("GPU capture handle")] string handle,
         [Description("Counter set index to collect (omit to only list).")] int? setIndex = null,
-        [Description("Maximum samples per counter (default 200).")] int maxSamples = 200)
-        => Tools.Run(session, "pix_gpu_hf_counters", () =>
+        [Description("Maximum samples per counter (default 200, max 5000).")] int maxSamples = 200,
+        [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        CancellationToken cancellationToken = default)
+        => Tools.RunWhenReady(session, jobs, "pix_gpu_hf_counters", handle, GpuCaptureHandle.AnalysisPreparation(handle), h =>
         {
             if (setIndex < 0) throw new McpException("setIndex must be nonnegative.");
-            GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
-            h.EnsureAnalysisStarted(null);
             try
             {
                 return HfCore(h, setIndex, Math.Clamp(maxSamples, 2, 5000));
@@ -448,7 +465,7 @@ public static class CountersTools
             {
                 return PixErrors.Unavailable("highFrequencyCounters", ex);
             }
-        });
+        }, waitSeconds, cancellationToken);
 
     private static unsafe object HfCore(GpuCaptureHandle h, int? setIndex, int maxSamples)
     {

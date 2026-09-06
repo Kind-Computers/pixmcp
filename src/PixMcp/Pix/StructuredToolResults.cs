@@ -17,6 +17,11 @@ internal static class StructuredToolResults
     private static readonly JsonElement EventPageSchema = CreateEventPageSchema();
     private static readonly JsonElement ArraySchema = ArrayEnvelope(new JsonObject());
     private static readonly JsonElement JobsSchema = ArrayEnvelope(JsonNode.Parse(JobSchema.GetRawText())!);
+    private static readonly JsonElement PendingSchema = CreatePendingSchema();
+    /// <summary>Tools that may answer with a page, or with a pending marker while their prerequisite job runs.</summary>
+    private static readonly JsonElement PageOrPendingSchema = AnyOf(PageSchema, PendingSchema);
+    private static readonly JsonElement ObjectOrPendingSchema = AnyOf(ObjectSchema, PendingSchema);
+    private static readonly JsonElement ArrayOrPendingSchema = AnyOf(ArraySchema, PendingSchema);
 
     public static void Configure(IMcpRequestFilterBuilder filters)
     {
@@ -65,14 +70,36 @@ internal static class StructuredToolResults
     {
         "pix_gpu_analysis_start" or "pix_gpu_timing_collect" or "pix_gpu_counters_start"
             or "pix_gpu_drpix_run" or "pix_timing_resolve_symbols" or "pix_device_take_gpu_capture"
-            or "pix_capture_upgrade" or "pix_job_status" or "pix_job_wait" or "pix_job_cancel" => JobSchema,
+            or "pix_device_timing_capture_stop" or "pix_capture_upgrade" or "pix_job_status" or "pix_job_wait" or "pix_job_cancel" => JobSchema,
         "pix_jobs" => JobsSchema,
         "pix_gpu_events" => EventPageSchema,
-        "pix_gpu_api_objects" or "pix_gpu_resources" or "pix_gpu_timing_events" or "pix_gpu_counters_collect" => PageSchema,
+        "pix_gpu_api_objects" or "pix_gpu_resources" => PageSchema,
+        "pix_gpu_timing_events" or "pix_gpu_counters_collect" => PageOrPendingSchema,
+        "pix_gpu_pipeline_state" or "pix_gpu_shader_code" or "pix_gpu_event_resources" or "pix_gpu_counters_list"
+            or "pix_gpu_occupancy" or "pix_gpu_hf_counters" => ObjectOrPendingSchema,
+        "pix_gpu_drpix_experiments" => ArrayOrPendingSchema,
         "pix_handles" or "pix_close_all" or "pix_log" or "pix_gpu_queues" or "pix_dump_queues"
-            or "pix_device_processes" or "pix_gpu_drpix_experiments" => ArraySchema,
+            or "pix_device_processes" => ArraySchema,
         _ => ObjectSchema,
     };
+
+    /// <summary>True when the tool reports a still-running prerequisite job instead of its data (see <see cref="PendingDto"/>).</summary>
+    internal static bool IsPending(JsonElement structured)
+        => structured.ValueKind == JsonValueKind.Object && structured.TryGetProperty("pending", out JsonElement pending) && pending.ValueKind == JsonValueKind.True;
+
+    private static JsonElement CreatePendingSchema()
+    {
+        JsonElement schema = Export<PendingDto>();
+        JsonNode node = JsonNode.Parse(schema.GetRawText())!;
+        node["properties"]!["job"] = JsonNode.Parse(JobSchema.GetRawText());
+        return JsonSerializer.SerializeToElement(node);
+    }
+
+    private static JsonElement AnyOf(params JsonElement[] alternatives) => JsonSerializer.SerializeToElement(new JsonObject
+    {
+        ["type"] = "object",
+        ["anyOf"] = new JsonArray(alternatives.Select(a => JsonNode.Parse(a.GetRawText())).ToArray()),
+    });
 
     private static JsonElement Export<T>(params string[] optionalProperties)
     {

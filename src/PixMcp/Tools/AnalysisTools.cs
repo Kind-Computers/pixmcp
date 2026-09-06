@@ -9,7 +9,7 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class AnalysisTools
 {
-    [McpServerTool(Name = "pix_gpu_analysis_start"), Description("Connects the capture to the local GPU and starts analysis (replay). Required for timing, counters, pipeline state, resources and Dr. PIX; those tools also start it implicitly, but for big captures start it here so the wait is visible. Returns a job; poll pix_job_status or pass waitSeconds.")]
+    [McpServerTool(Name = "pix_gpu_analysis_start", Idempotent = true), Description("Connects the capture to the local GPU and starts analysis (replay). Required for timing, counters, pipeline state, resources and Dr. PIX; those tools also start it implicitly, but for big captures start it here so the wait is visible. Returns a job; poll pix_job_status or pass waitSeconds.")]
     public static async Task<string> Start(
         PixSession session,
         JobManager jobs,
@@ -17,7 +17,7 @@ public static class AnalysisTools
         [Description("Adapter id from pix_gpu_analysis_adapters (default: chosen by PIX).")] ulong? adapterId = null,
         [Description("Power state id from pix_gpu_analysis_adapters (default: chosen by PIX).")] uint? powerStateId = null,
         [Description("Analysis flags, e.g. IGNORE_INCOMPATIBILITIES, USE_SINGLE_COMMAND_QUEUE, ENABLE_DEBUG_LAYER, ENABLE_RECREATE_AT_GPUVA, DISABLE_GPU_PLUGINS.")] string[]? flags = null,
-        [Description("Seconds to wait inline for completion before returning (default 0 = return the job immediately).")] double waitSeconds = 0,
+        [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
         CancellationToken cancellationToken = default)
     {
         try
@@ -33,15 +33,17 @@ public static class AnalysisTools
                 requestedFlags = combined;
             }
             var options = new AnalysisOptions(adapterId, powerStateId, requestedFlags);
-            Job job = jobs.StartForHandle<GpuCaptureHandle>("analysis", $"Start GPU analysis for {handle}", handle, (j, h) =>
+            Preparation<GpuCaptureHandle> preparation = GpuCaptureHandle.AnalysisPreparation(handle);
+            Job job = jobs.StartForHandle<GpuCaptureHandle>(preparation.Kind, preparation.Description, handle, (j, h) =>
             {
-                if (h.ConfigureAnalysis(options))
+                bool alreadyStarted = h.ConfigureAnalysis(options);
+                if (!alreadyStarted)
                 {
-                    return new { alreadyStarted = true, analysis = h.AnalysisStatus() };
+                    h.EnsureAnalysisStarted(j);
                 }
-                h.EnsureAnalysisStarted(j);
-                return h.AnalysisStatus();
+                return new { alreadyStarted, analysis = h.AnalysisStatus() };
             });
+            Tools.RegisterPreparation(session, handle, preparation.Key, job);
             return Json.Serialize(await jobs.WaitOrStatus(job, waitSeconds, cancellationToken).ConfigureAwait(false));
         }
         catch (Exception ex)
@@ -51,11 +53,11 @@ public static class AnalysisTools
     }
 
     [McpServerTool(Name = "pix_gpu_analysis_status", ReadOnly = true), Description("Whether analysis is connected/started for a GPU capture, which adapter is used, and which data has been collected.")]
-    public static Task<string> Status(PixSession session, [Description("GPU capture handle")] string handle)
-        => Tools.Run(session, "pix_gpu_analysis_status", () => session.Get<GpuCaptureHandle>(handle).AnalysisStatus());
+    public static Task<string> Status(PixSession session, [Description("GPU capture handle")] string handle, CancellationToken cancellationToken = default)
+        => Tools.Run(session, "pix_gpu_analysis_status", () => session.Get<GpuCaptureHandle>(handle).AnalysisStatus(), cancellationToken);
 
     [McpServerTool(Name = "pix_gpu_analysis_adapters"), Description("Lists the GPU adapters (and their power states) available for analysing this capture. Connects to the local PIX device if needed.")]
-    public static Task<string> Adapters(PixSession session, [Description("GPU capture handle")] string handle)
+    public static Task<string> Adapters(PixSession session, [Description("GPU capture handle")] string handle, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_gpu_analysis_adapters", () =>
         {
             GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
@@ -69,15 +71,15 @@ public static class AnalysisTools
                 adapters.Add(new { id, name, powerStates });
             }
             return new { adapters, selectedAdapter = h.SelectedAdapter, selectedPowerState = h.SelectedPowerState };
-        });
+        }, cancellationToken);
 
-    [McpServerTool(Name = "pix_gpu_analysis_stop"), Description("Stops analysis and disconnects from the GPU, discarding collected timing/counter data. The capture stays open.")]
-    public static Task<string> Stop(PixSession session, [Description("GPU capture handle")] string handle)
+    [McpServerTool(Name = "pix_gpu_analysis_stop", Destructive = true, Idempotent = true), Description("Stops analysis and disconnects from the GPU, discarding collected timing/counter data. The capture stays open. Required before pix_gpu_analysis_start can use a different adapter, power state or flags.")]
+    public static Task<string> Stop(PixSession session, [Description("GPU capture handle")] string handle, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_gpu_analysis_stop", () =>
         {
             GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
             var warnings = new List<string>();
             h.StopAnalysis(warnings);
             return new { stopped = true, warnings = warnings.Count == 0 ? null : warnings, analysis = h.AnalysisStatus() };
-        });
+        }, cancellationToken);
 }

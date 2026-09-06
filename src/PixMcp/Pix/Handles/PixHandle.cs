@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace PixMcp.Pix.Handles;
 
 public abstract class PixHandle
@@ -11,6 +13,13 @@ public abstract class PixHandle
     public abstract string Kind { get; }
     public string Path { get; }
     public DateTimeOffset OpenedAt { get; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// Background jobs that prepare expensive per-handle state (analysis start, timing collection,
+    /// a counter set), keyed by what they prepare. Query tools reuse a running job instead of
+    /// blocking the PIX thread or queuing a second replay (see Tools.RunWhenReady).
+    /// </summary>
+    internal ConcurrentDictionary<string, Job> PreparationJobs { get; } = new();
 
     /// <summary>Releases PIX objects. Called on the worker thread. Append non-fatal problems to <paramref name="warnings"/>.</summary>
     public abstract void Close(List<string> warnings);

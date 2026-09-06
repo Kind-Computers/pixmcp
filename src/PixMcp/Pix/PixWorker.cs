@@ -20,6 +20,13 @@ public sealed class PixWorker : IDisposable
 
     public bool IsOnWorkerThread => Thread.CurrentThread == _thread;
 
+    /// <summary>Number of work items waiting behind the one currently executing.</summary>
+    public int PendingCount => _queue.Count;
+
+    /// <summary>
+    /// Queues work for the PIX thread. A cancellation requested before the item is dequeued skips it
+    /// entirely (the caller has gone away); once running, PIX calls are not interruptible.
+    /// </summary>
     public Task<T> Run<T>(Func<T> work, CancellationToken cancellationToken = default)
     {
         if (IsOnWorkerThread)
@@ -45,20 +52,23 @@ public sealed class PixWorker : IDisposable
     public Task Run(Action work, CancellationToken cancellationToken = default)
         => Run(() => { work(); return true; }, cancellationToken);
 
-    public T RunSync<T>(Func<T> work) => Run(work).GetAwaiter().GetResult();
-
-    public void RunSync(Action work) => Run(work).GetAwaiter().GetResult();
-
     private void Loop()
     {
         foreach (Action work in _queue.GetConsumingEnumerable())
         {
-            work();
+            // Every queued item completes its own TaskCompletionSource inside a try/catch; this guard
+            // only exists so that a misbehaving item can never take the PIX thread down with it.
+            try { work(); }
+            catch { }
         }
     }
 
     public void Dispose()
     {
         _queue.CompleteAdding();
+        if (!IsOnWorkerThread)
+        {
+            _thread.Join(TimeSpan.FromSeconds(5));
+        }
     }
 }

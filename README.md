@@ -14,10 +14,11 @@ file plus PIX's own engine is the queryable store. The server just keeps open do
 ## Prerequisites
 
 - Windows 11 x64 with a D3D12-capable GPU.
-- **PIX Preview 2606.18 or newer** from https://devblogs.microsoft.com/pix/download/ (retail
-  PIX builds do not ship the API). The server looks in `%ProgramFiles%\Microsoft PIX Preview\<version>`
-  and picks the newest; set `PIX_DIR` to override. An invalid explicit override is an error;
-  the server does not silently select another installation.
+- A **PIX Preview build newer than 2606.15** from https://devblogs.microsoft.com/pix/download/
+  (retail PIX builds do not ship the API; 2606.18-preview is the build the server is verified
+  against). The server looks in `%ProgramFiles%\Microsoft PIX Preview\<version>` and picks the
+  newest; set `PIX_DIR` to override. An invalid explicit override is an error; the server does not
+  silently select another installation.
 - **Windows Developer Mode** enabled (required by PIX for GPU analysis / replay).
 - .NET 10 SDK (to build) and runtime (to run).
 
@@ -55,15 +56,31 @@ Typical conversation flow:
 6. `pix_gpu_drpix_run` – run Dr. PIX experiments over the frame.
 7. `pix_close` when done.
 
-Long operations (analysis start, counter collection, Dr. PIX, symbol resolution, taking captures) return a `jobId`;
-poll `pix_job_status`, block with `pix_job_wait`, or pass `waitSeconds` to the starting tool.
-`pix_job_cancel` requests cancellation; `cancellationRequested: true` does not mean the operation
-was interrupted. Work that completes before cancellation takes effect remains `succeeded` with
-its result. Cancelling during the capture initialization delay prevents capture from starting.
+Long operations (analysis start, timing and counter collection, Dr. PIX, symbol resolution, taking
+and stopping captures, capture upgrades) return a `jobId`; poll `pix_job_status`, block with
+`pix_job_wait`, or pass `waitSeconds` to the starting tool. `pix_job_cancel` requests cancellation;
+`cancellationRequested: true` does not mean the operation was interrupted. Work that completes
+before cancellation takes effect remains `succeeded` with its result. Cancelling during the capture
+initialization delay prevents capture from starting. The most recent 50 finished jobs are kept.
+
+Query tools that need GPU analysis (`pix_gpu_pipeline_state`, `pix_gpu_shader_code`,
+`pix_gpu_event_resources`, `pix_gpu_timing_events`, `pix_gpu_counters_*`, `pix_gpu_occupancy`,
+`pix_gpu_hf_counters`, `pix_gpu_drpix_experiments`) never block the PIX thread on a replay. If
+analysis (or the timing/counter data they need) is not ready they start it as a job, wait up to
+`waitSeconds` (default 60), and either answer or return
+`{ "pending": true, "jobId": "job-3", "retry": "pix_gpu_pipeline_state" }`: wait for the job with
+`pix_job_wait` and repeat the call. Concurrent callers share one job, and an explicit
+`pix_gpu_analysis_start` / `pix_gpu_timing_collect` / `pix_gpu_counters_start` job is joined the
+same way.
+
+All PIX calls run on one thread, so while a job replays the capture every other PIX tool call waits
+behind it; `pix_info`, `pix_handles` and the job tools answer regardless, and `pix_info.worker`
+shows the running job and queue depth. Requests a client abandons (timeout, cancellation) are
+dropped before they reach the PIX thread.
 
 `pix_gpu_analysis_start` always returns a job, including when compatible analysis is already
-running. To change an active analysis's adapter, power state, or flags, call
-`pix_gpu_analysis_stop` first.
+running (`result.alreadyStarted: true`). To change an active analysis's adapter, power state, or
+flags, call `pix_gpu_analysis_stop` first.
 
 ## Tools
 
@@ -112,7 +129,8 @@ remain extensible.
 - **One PIX thread.** Every PIX call runs on a single dedicated worker thread (`PixWorker`);
   the API is nano-COM without apartment marshalling and the analysis session is not
   thread-safe. Tool calls are therefore serialized, and a long job (Dr. PIX run) blocks other
-  PIX calls until it finishes, exactly as the PIX UI would.
+  PIX calls until it finishes, exactly as the PIX UI would. Tools never start a replay inside a
+  request: `Tools.RunWhenReady` turns a missing prerequisite into a job and a `pending` answer.
 - **Handles.** `PixSession` owns the factory and a handle table. A GPU capture handle connects to
   the local GPU and starts analysis on first need; `pix_close` stops analysis and disconnects
   first, which is required for the next open of the same capture to work.
@@ -135,7 +153,10 @@ remain extensible.
   ```
 
   The `capture-and-inspect` scenario launches the test app under PIX, takes a capture, opens it,
-  replays it for timing, and inspects the first draw.
+  replays it for timing, and inspects the first draw. `take-capture` only produces a capture file
+  (its path is in the `pix_device_take_gpu_capture` result); `open-capture` and `analysis-pending`
+  take that path in `PIX_TEST_CAPTURE` and exercise, respectively, the basic inspection flow and the
+  `pending`/`pix_job_wait`/retry flow of the analysis-dependent tools.
   Requests time out after 660 seconds by default; use `--timeout <seconds>` to change this.
   Protocol errors, tool errors, failed/cancelled jobs, unresolved result references, and failed
   assertions produce a nonzero exit code. A scenario step may include expected result fields:

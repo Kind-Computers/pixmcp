@@ -8,6 +8,10 @@ public static class PixErrors
     public const int E_PIX_DEVELOPER_MODE_NOT_ENABLED = unchecked((int)0x8ABC0000);
     public const int E_PIX_FEATURE_REQUIRES_DEVELOPER_MODE = unchecked((int)0x8ABC0001);
     public const int E_NOT_VALID_STATE = unchecked((int)0x8007139F);
+    /// <summary>E_ABORT: PIX reports an operation interrupted by its cancellation token this way.</summary>
+    public const int E_ABORT = unchecked((int)0x80004004);
+    /// <summary>HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED).</summary>
+    public const int E_OPERATION_ABORTED = unchecked((int)0x800704C7);
 
     public static string Hex(int hresult) => $"0x{hresult:X8}";
 
@@ -17,6 +21,9 @@ public static class PixErrors
         ExternalException ext => ext.ErrorCode,
         _ => null,
     };
+
+    /// <summary>True for the HRESULTs PIX uses to report an interrupted (cancelled) operation.</summary>
+    public static bool IsCancellationHResult(int hresult) => hresult is E_ABORT or E_OPERATION_ABORTED;
 
     /// <summary>Human-readable description with HRESULT and, where relevant, remediation.</summary>
     public static string Describe(Exception ex)
@@ -51,11 +58,16 @@ public static class PixErrors
         return new McpException($"{context}: {Describe(ex)}");
     }
 
+    /// <summary>Runs <paramref name="work"/>, converting failures to McpExceptions. Cancellation propagates unchanged so the transport reports it as such.</summary>
     public static async Task<T> Guard<T>(string context, Func<Task<T>> work)
     {
         try
         {
             return await work().ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {

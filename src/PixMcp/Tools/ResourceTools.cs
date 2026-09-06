@@ -21,7 +21,8 @@ public static class ResourceTools
         [Description("Maximum items (default 100).")] int limit = Paging.DefaultLimit,
         [Description("Only resources whose name contains this text.")] string? nameContains = null,
         [Description("Filter by allocation type: COMMITTED, PLACED, RESERVED.")] string? type = null,
-        [Description("Filter by dimension: BUFFER, TEXTURE1D, TEXTURE2D, TEXTURE3D.")] string? dimension = null)
+        [Description("Filter by dimension: BUFFER, TEXTURE1D, TEXTURE2D, TEXTURE3D.")] string? dimension = null,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_gpu_resources", () =>
         {
             GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
@@ -74,9 +75,9 @@ public static class ResourceTools
                 total++;
             }
             return Paging.Page(page, total, o, l);
-        });
+        }, cancellationToken);
 
-    [McpServerTool(Name = "pix_gpu_resource"), Description("Full details for one D3D12 resource (by apiObjectId, index from pix_gpu_resources, or exact name): description, clear value, initial state/layout, castable formats, heap info and the views created on it.")]
+    [McpServerTool(Name = "pix_gpu_resource", ReadOnly = true), Description("Full details for one D3D12 resource: description, clear value, initial state/layout, castable formats, heap info and the views created on it. Identify it by index (from pix_gpu_resources), else by exact name, else by apiObjectId (checked in that order). Use pix_gpu_resources to find candidates and pix_gpu_event_resources for what one draw binds.")]
     public static Task<string> Resource(
         PixSession session,
         [Description("GPU capture handle")] string handle,
@@ -86,14 +87,15 @@ public static class ResourceTools
         [Description("Include views created on the resource (default true; may need analysis).")] bool includeViews = true,
         [Description("Resource-local view index to include; omit for all views.")] uint? viewIndex = null,
         [Description("First binding to return in each included view (default 0).")] int bindingOffset = 0,
-        [Description("Maximum bindings per view (default 32, max 1000).")] int bindingLimit = 32)
+        [Description("Maximum bindings per view (default 32, max 1000).")] int bindingLimit = 32,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_gpu_resource", () =>
         {
             GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
             IPixD3D12Resource resource = FindResource(h, apiObjectId, index, name);
             if (viewIndex.HasValue && !includeViews) throw new McpException("viewIndex requires includeViews=true.");
             return ResourceDto(resource, includeViews, includeDesc: true, viewIndex, bindingOffset, bindingLimit);
-        });
+        }, cancellationToken);
 
     private static IPixD3D12Resource FindResource(GpuCaptureHandle h, string? apiObjectId, uint? index, string? name)
     {
@@ -423,19 +425,20 @@ public static class ResourceTools
         }
     }
 
-    [McpServerTool(Name = "pix_gpu_event_resources"), Description("Resources and views accessed by a draw/dispatch event: every bound view (CBV/SRV/UAV/RTV/DSV/VBV/IBV/samplers) with its description and binding (root parameter, register, space, stage), grouped by resource. Starts GPU analysis if needed.")]
+    [McpServerTool(Name = "pix_gpu_event_resources", ReadOnly = true), Description("Resources and views accessed by a draw/dispatch event: every bound view (CBV/SRV/UAV/RTV/DSV/VBV/IBV/samplers) with its description and binding (root parameter, register, space, stage), grouped by resource. The event must be a draw/dispatch. Needs GPU analysis: started automatically as a job (see waitSeconds). Bindings per view are paged with bindingOffset/bindingLimit.")]
     public static Task<string> EventResources(
         PixSession session,
+        JobManager jobs,
         [Description("GPU capture handle")] string handle,
         [Description("Queue index")] int queueIndex,
         [Description("Event index of a draw/dispatch event")] uint eventIndex,
         [Description("Event-global view index to include; omit for all views.")] uint? viewIndex = null,
         [Description("First binding to return in each included view (default 0).")] int bindingOffset = 0,
-        [Description("Maximum bindings per view (default 32, max 1000).")] int bindingLimit = 32)
-        => Tools.Run(session, "pix_gpu_event_resources", () =>
+        [Description("Maximum bindings per view (default 32, max 1000).")] int bindingLimit = 32,
+        [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        CancellationToken cancellationToken = default)
+        => Tools.RunWhenReady(session, jobs, "pix_gpu_event_resources", handle, GpuCaptureHandle.AnalysisPreparation(handle), h =>
         {
-            GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
-            h.EnsureAnalysisStarted(null);
             EventRecord record = h.Event(queueIndex, eventIndex);
             PIX_EVENT_INFO info = h.EventInfo(queueIndex, eventIndex);
 
@@ -484,5 +487,5 @@ public static class ResourceTools
                 resources = byResource.Values.Select(v => new { resource = v.resource, views = v.views }).ToArray(),
                 otherViews = unattached.Count == 0 ? null : unattached,
             };
-        });
+        }, waitSeconds, cancellationToken);
 }

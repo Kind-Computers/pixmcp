@@ -4,6 +4,7 @@ using Microsoft.PIX.Extension.DeviceConnection;
 using Microsoft.PIX.Extension.GpuCapture;
 using Microsoft.PIX.Extension.GpuCapture.Analysis;
 using ModelContextProtocol;
+using PixMcp.Tools;
 using ConnDesc = Microsoft.PIX.Extension.DeviceConnection.PIX_CONNECTION_DESC;
 
 namespace PixMcp.Pix.Handles;
@@ -43,7 +44,7 @@ public sealed class QueueEntry
     };
 }
 
-public sealed record EventTimingRow(int QueueIndex, uint Index, uint GpuId, string Name, ulong TopStart, ulong TopDuration, ulong EopStart, ulong EopDuration);
+public sealed record EventTimingRow(int QueueIndex, uint Index, uint GpuId, string Name, string ApiCallData, ulong TopStart, ulong TopDuration, ulong EopStart, ulong EopDuration);
 
 public sealed record CounterInfo(uint Id, string Name, string Description, string DataType, string[] Groups)
 {
@@ -322,7 +323,17 @@ public sealed class GpuCaptureHandle : PixHandle
         DrPix = null;
         Experiments = null;
         Analysis = null;
+        // Finished preparation jobs describe state that no longer exists; a running one is on this
+        // same thread's queue and will re-check readiness itself.
+        foreach (KeyValuePair<string, Job> entry in PreparationJobs)
+        {
+            if (entry.Value.IsFinished) PreparationJobs.TryRemove(entry.Key, out _);
+        }
     }
+
+    /// <summary>Preparation shared by every tool that needs GPU analysis (replay) to have started.</summary>
+    internal static Preparation<GpuCaptureHandle> AnalysisPreparation(string handle)
+        => new("analysis", "analysis", $"Start GPU analysis for {handle}", h => h.AnalysisStarted, (h, job) => h.EnsureAnalysisStarted(job));
 
     public object AnalysisStatus() => new
     {

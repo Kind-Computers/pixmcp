@@ -4,12 +4,115 @@ using PixMcp.Pix.Handles;
 
 namespace PixMcp.Tools;
 
+/// <summary>
+/// Expensive per-handle state a query tool depends on (GPU analysis started, timing collected, a
+/// counter set collected). <see cref="Tools.RunWhenReady{T}"/> prepares it in a job instead of
+/// blocking the PIX thread inside the tool call.
+/// </summary>
+/// <param name="Key">Identifies the prepared state so concurrent callers share one job (e.g. "analysis").</param>
+/// <param name="Kind">Job kind shown in pix_jobs.</param>
+/// <param name="Description">Job description shown in pix_jobs.</param>
+/// <param name="IsReady">True when the state exists on the handle (checked on the PIX thread).</param>
+/// <param name="Prepare">Creates the state; runs inside the job on the PIX thread with the job for progress/cancellation.</param>
+internal sealed record Preparation<T>(string Key, string Kind, string Description, Func<T, bool> IsReady, Action<T, Job> Prepare) where T : PixHandle;
+
 /// <summary>Shared plumbing for tool implementations.</summary>
 internal static class Tools
 {
+    /// <summary>Default inline wait for tools that may first have to start analysis or collect data.</summary>
+    public const double DefaultReadyWaitSeconds = 60;
+
+    public const string WaitSecondsDescription = "Seconds to wait inline for the job to finish before returning (default 0 = return the job immediately; poll pix_job_status or block with pix_job_wait).";
+    public const string ReadyWaitDescription = "Seconds to wait if GPU analysis (or the data this tool needs) still has to be prepared first (default 60; 0 = never wait). " +
+                                               "If the wait elapses the result is { pending: true, jobId }: wait for the job with pix_job_wait, then repeat this call unchanged.";
+
     /// <summary>Runs <paramref name="work"/> on the PIX worker thread and serializes the result; PIX errors become McpExceptions.</summary>
-    public static Task<string> Run(PixSession session, string context, Func<object?> work)
-        => PixErrors.Guard(context, async () => Json.Serialize(await session.Run(work).ConfigureAwait(false)));
+    public static Task<string> Run(PixSession session, string context, Func<object?> work, CancellationToken cancellationToken = default)
+        => PixErrors.Guard(context, async () => Json.Serialize(await session.Run(work, cancellationToken).ConfigureAwait(false)));
+
+    /// <summary>Starts a job and returns its status, waiting inline up to <paramref name="waitSeconds"/>; failures to start become McpExceptions.</summary>
+    public static Task<string> RunJob(JobManager jobs, string context, Func<Job> start, double waitSeconds, CancellationToken cancellationToken)
+        => PixErrors.Guard(context, async () => Json.Serialize(await jobs.WaitOrStatus(start(), waitSeconds, cancellationToken).ConfigureAwait(false)));
+
+    /// <summary>
+    /// Runs <paramref name="query"/> on the PIX thread once <paramref name="preparation"/> is satisfied.
+    /// If it is not, the preparation runs as a job (reusing one already running for the same key), the
+    /// call waits up to <paramref name="waitSeconds"/>, and either completes the query or returns a
+    /// <see cref="PendingDto"/> telling the caller which job to wait for before retrying. This keeps a
+    /// multi-minute replay from blocking the request and every other PIX tool call behind it.
+    /// </summary>
+    public static Task<string> RunWhenReady<T>(
+        PixSession session,
+        JobManager jobs,
+        string tool,
+        string handle,
+        Preparation<T> preparation,
+        Func<T, object?> query,
+        double waitSeconds,
+        CancellationToken cancellationToken) where T : PixHandle
+        => PixErrors.Guard(tool, async () =>
+        {
+            (bool ready, object? result, Job? existing) = await session.Run<(bool, object?, Job?)>(() =>
+            {
+                T h = session.Get<T>(handle);
+                if (preparation.IsReady(h))
+                {
+                    return (true, query(h), null);
+                }
+                h.PreparationJobs.TryGetValue(preparation.Key, out Job? running);
+                return (false, null, running);
+            }, cancellationToken).ConfigureAwait(false);
+            if (ready)
+            {
+                return Json.Serialize(result);
+            }
+
+            Job job = existing is { IsFinished: false }
+                ? existing
+                : StartPreparation(session, jobs, handle, preparation);
+
+            if (waitSeconds > 0 && !job.IsFinished)
+            {
+                try { await job.WaitAsync(TimeSpan.FromSeconds(Math.Clamp(waitSeconds, 0, 3600)), cancellationToken).ConfigureAwait(false); }
+                catch (TimeoutException) { }
+            }
+            if (!job.IsFinished)
+            {
+                return Json.Serialize(new PendingDto(true, job.Id, tool,
+                    $"{preparation.Description} is still running as {job.Id}. Wait for it with pix_job_wait, then call {tool} again with the same arguments.",
+                    job.ToDto(includeResult: false)));
+            }
+            if (job.Status != JobStatus.Succeeded)
+            {
+                throw new McpException($"{tool}: {preparation.Description} {job.Status.ToString().ToLowerInvariant()} ({job.Id}): {job.Error ?? "no details"}");
+            }
+
+            return Json.Serialize(await session.Run(() =>
+            {
+                T h = session.Get<T>(handle);
+                if (!preparation.IsReady(h))
+                {
+                    throw new McpException($"{tool}: {preparation.Description} finished but the data is no longer available (analysis was stopped or the handle changed). Retry the call.");
+                }
+                return query(h);
+            }, cancellationToken).ConfigureAwait(false));
+        });
+
+    /// <summary>Starts a preparation job for a handle and registers it so other callers can join it.</summary>
+    public static Job StartPreparation<T>(PixSession session, JobManager jobs, string handle, Preparation<T> preparation) where T : PixHandle
+    {
+        Job job = jobs.StartForHandle<T>(preparation.Kind, preparation.Description, handle, (j, h) =>
+        {
+            preparation.Prepare(h, j);
+            return new { handle = h.Id, prepared = preparation.Key };
+        });
+        RegisterPreparation(session, handle, preparation.Key, job);
+        return job;
+    }
+
+    /// <summary>Records <paramref name="job"/> as the job preparing <paramref name="key"/> for the handle, so query tools wait for it instead of starting another.</summary>
+    public static void RegisterPreparation(PixSession session, string handle, string key, Job job)
+        => session.TryGet<PixHandle>(handle)?.PreparationJobs.AddOrUpdate(key, job, (_, current) => current.IsFinished ? job : current);
 
     public static string RequireFile(string path, string what)
     {
@@ -41,7 +144,7 @@ internal static class Tools
         ["marker"] = new[] { "PIXBeginEvent", "BeginEvent", "PIXSetMarker", "SetMarker" },
     };
 
-    public const string KindDescription = "Optional event kind filter: draw, dispatch, drawOrDispatch, executeIndirect, copy, clear, barrier, present, marker (matched against the event name prefix).";
+    public const string KindDescription = "Optional event kind filter: draw, dispatch, drawOrDispatch, executeIndirect, copy, clear, barrier, present, marker (matched case-insensitively against the start of the event name or API call).";
 
     public static bool MatchesKind(EventRecord e, string? kind)
     {

@@ -98,7 +98,7 @@ public sealed class Job
             _error = PixErrors.Describe(ex);
             // A cancellation request alone does not prove an operation stopped.
             bool cancelled = CancellationRequested && (ex is OperationCanceledException ||
-                ex is ExternalException native && native.ErrorCode is unchecked((int)0x80004004) or unchecked((int)0x800704C7));
+                ex is ExternalException native && PixErrors.IsCancellationHResult(native.ErrorCode));
             Finish(cancelled ? JobStatus.Cancelled : JobStatus.Failed);
         }
     }
@@ -150,6 +150,9 @@ public sealed class Job
 
 public sealed class JobManager
 {
+    /// <summary>Finished jobs kept for pix_job_status; older ones are forgotten so results and native tokens are not retained forever.</summary>
+    public const int MaxFinishedJobs = 50;
+
     private readonly ConcurrentDictionary<string, Job> _jobs = new();
     private readonly PixWorker _worker;
     private readonly PixSession _session;
@@ -164,8 +167,10 @@ public sealed class JobManager
     }
 
     public IReadOnlyCollection<Job> All => _jobs.Values.OrderBy(j => j.CreatedAt).ToArray();
+    /// <summary>The job currently executing on the PIX thread, if any (at most one, since the worker is single-threaded).</summary>
+    public Job? Running => _jobs.Values.FirstOrDefault(j => j.Status == JobStatus.Running);
     public Job Get(string jobId)
-        => _jobs.TryGetValue(jobId, out Job? job) ? job : throw new McpException($"Unknown job '{jobId}'. Known jobs: {string.Join(", ", _jobs.Keys)}");
+        => _jobs.TryGetValue(jobId, out Job? job) ? job : throw new McpException($"Unknown job '{jobId}'. Known jobs: {string.Join(", ", _jobs.Keys.OrderBy(k => k))}");
     public Job StartForHandle<T>(string kind, string description, string handleId, Func<Job, T, object?> work) where T : PixHandle
         => Start(kind, description, job => work(job, _session.Get<T>(handleId)));
 
@@ -174,6 +179,7 @@ public sealed class JobManager
     {
         var job = new Job($"job-{Interlocked.Increment(ref _next)}", kind, description);
         _jobs[job.Id] = job;
+        Prune();
         try
         {
             _ = _worker.Run(() =>
@@ -191,6 +197,19 @@ public sealed class JobManager
         }
         catch (Exception ex) { job.Fail(ex); }
         return job;
+    }
+
+    /// <summary>Forgets the oldest finished jobs beyond <see cref="MaxFinishedJobs"/>; running and queued jobs are never removed.</summary>
+    private void Prune()
+    {
+        Job[] finished = _jobs.Values.Where(j => j.IsFinished).OrderBy(j => j.FinishedAt ?? j.CreatedAt).ThenBy(j => j.CreatedAt).ToArray();
+        for (int i = 0; i < finished.Length - MaxFinishedJobs; i++)
+        {
+            if (_jobs.TryRemove(finished[i].Id, out Job? removed))
+            {
+                removed.Cancellation.Dispose();
+            }
+        }
     }
 
     public void Cancel(Job job) => job.RequestCancellation();

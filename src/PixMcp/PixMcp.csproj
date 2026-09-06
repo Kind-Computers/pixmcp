@@ -10,6 +10,8 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>PixMcp</RootNamespace>
     <AssemblyName>PixMcp</AssemblyName>
+    <!-- Single source of truth for the version reported to MCP clients (ServerHost.Version). -->
+    <Version>0.2.0</Version>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <InvariantGlobalization>true</InvariantGlobalization>
     <PixMcpRequiresPix>true</PixMcpRequiresPix>
