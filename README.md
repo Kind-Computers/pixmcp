@@ -33,7 +33,11 @@ The output is `src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\PixMcp.exe
 assembly is loaded in place from the PIX install (it is never copied next to the exe), so the
 build also fails with a clear message when no compatible PIX Preview is installed.
 At runtime, missing or invalid PIX installations produce an actionable stderr message and
-exit code 1 before the MCP transport starts.
+exit code 1 before the MCP transport starts. `global.json` pins the .NET 10 SDK band.
+
+`scripts\publish.cmd` publishes a single framework-dependent `dist\PixMcp.exe` (about 30 MB; the
+.NET 10 runtime must be installed, PIX is still loaded from its install directory) that can be
+copied anywhere and registered with any MCP client.
 
 ## Use with Claude Code
 
@@ -44,9 +48,40 @@ The repo ships a `.mcp.json` that points at the built exe, so after building you
 claude mcp add pix -- C:\path\to\pixmcp\src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\PixMcp.exe
 ```
 
-For other MCP clients, run the exe as a stdio server (no arguments). Logs go to stderr.
+For other MCP clients, run the exe as a stdio server (no arguments). Logs go to stderr;
+`Logging__LogLevel__Default=Debug` in the environment also shows PIX engine informational messages.
 
-Typical conversation flow:
+### Claude Desktop
+
+Add to `%APPDATA%\Claude\claude_desktop_config.json` (use `dist\PixMcp.exe` from
+`scripts\publish.cmd` or the built exe):
+
+```json
+{
+  "mcpServers": {
+    "pix": {
+      "command": "C:\\path\\to\\pixmcp\\dist\\PixMcp.exe",
+      "env": { "PIX_DIR": "C:\\Program Files\\Microsoft PIX Preview\\2606.18-preview" }
+    }
+  }
+}
+```
+
+The `env` block is only needed when PIX Preview is not installed under `%ProgramFiles%`.
+
+### VS Code
+
+`.vscode/mcp.json` in a workspace (or `code --add-mcp` with the same object):
+
+```json
+{
+  "servers": {
+    "pix": { "type": "stdio", "command": "C:\\path\\to\\pixmcp\\dist\\PixMcp.exe" }
+  }
+}
+```
+
+### Typical conversation flow
 
 1. `pix_info` – confirms which PIX install loaded and that Developer Mode is on.
 2. `pix_gpu_open` – returns a handle (`gpu-1`), file info, application and queue list.
@@ -141,6 +176,43 @@ legacy top-level arrays use `{ "items": [...] }` in structured content. Screensh
 are preserved. Page, job, and event schemas describe stable fields; experimental PIX details
 remain extensible.
 
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---------|---------------|
+| The server exits with code 1 and `pixmcp: No PIX Preview install found` | Install a PIX Preview build newer than 2606.15, or set `PIX_DIR` to its versioned folder (`C:\Program Files\Microsoft PIX Preview\2606.18-preview`). Retail PIX has no API. |
+| `PIX_DIR is set to ... but it does not contain PixApiCsExt.experimental.dll` | `PIX_DIR` must point at the versioned folder, not at `Microsoft PIX Preview`. An explicit bad override is never silently replaced. |
+| A tool fails with `0x8ABC0000` or `0x8ABC0001` | Windows Developer Mode is off. The error text contains the Settings location and a `reg add` command. |
+| A query tool returns `{ "pending": true, "jobId": ... }` | GPU analysis (or timing/counter collection) is still running as that job. `pix_job_wait` on it, then repeat the call unchanged. |
+| Calls seem to hang or time out | `pix_info` (always answers) shows `worker.runningJob` and `worker.queuedCalls`. Wait for or `pix_job_cancel` the running job; abandoned requests are dropped before they run. |
+| `E_NOT_VALID_STATE (0x8007139F)` from pipeline/shader/resource tools | The event is not a draw or dispatch. Find one with `pix_gpu_events(kind: "drawOrDispatch")`. |
+| `unavailable: true` inside a result | The hardware or PIX build does not provide that feature (occupancy and high-frequency counters on many GPUs); `reason` carries PIX's message. The rest of the result is valid. |
+| `the result is N characters, above the ... limit` | Page or filter (`offset`/`limit`, `nameContains`, `max*`), or raise `PIXMCP_MAX_RESULT_BYTES`. |
+| Reopening a capture fails or analysis will not start | Close the previous handle for the same file first (`pix_close`); one analysis session per capture. |
+| A documented tool is missing from the client's tool list | The client runs a stale build. Rebuild; note that `PixMcp.exe` cannot be overwritten while a client has it running. |
+| `pix_gpu_screenshot` reports an unsupported format | Only 8-bit RGBA/BGRA and R10G10B10A2 swapchains are encoded; HDR formats are not yet supported. |
+| Timing capture tools show no CPU samples or events | The PIX API only opens, resolves symbols for and saves timing captures; it has no reader for their contents. Open the saved `.wpix` in PIX for the timeline. |
+
+## Architecture
+
+```
+src/PixMcp/
+  Program.cs            PIX discovery check, then ServerHost (must not touch Microsoft.PIX types)
+  ServerHost.cs         MCP host: stdio transport, tool/resource discovery, structured results filter
+  Pix/PixDiscovery.cs   Finds the PIX Preview install and wires assembly + native DLL resolution
+  Pix/PixWorker.cs      The single PIX thread; every native call is queued here
+  Pix/PixSession.cs     PIX factory plus the handle table (gpu-1, timing-1, dump-1, device-1)
+  Pix/Jobs.cs           Background jobs: progress, cancellation tokens, retention
+  Pix/Handles/          Per-document state: GpuCaptureHandle caches events, analysis, timing, counters
+  Pix/TimingTree.cs     GPU time rolled up the marker hierarchy
+  Pix/StructuredToolResults.cs  structuredContent and outputSchema per tool
+  Tools/Tools.cs        Run (worker + error mapping), RunJob, RunWhenReady (auto-job + pending), Try, paging
+  Tools/*Tools.cs       One static class per area; each [McpServerTool] is a thin wrapper over PIX calls
+tests/PixMcp.Tests/     xUnit: pure unit tests, worker/job lifecycle tests, stdio protocol test, opt-in integration tests
+tests/D3D12TestApp/     Tiny D3D12 app used as a capture target by the smoke scenarios
+scripts/smoke.py        Dependency-free stdio MCP client; scripts/scenarios/*.json are scripted tool sequences
+```
+
 ## Design notes
 
 - **One PIX thread.** Every PIX call runs on a single dedicated worker thread (`PixWorker`);
@@ -155,11 +227,16 @@ remain extensible.
   (`0x8ABC0000`/`0x8ABC0001`) include the fix.
 - **Experimental surface.** `pix_dump_*` and shader source retrieval use the experimental PIX API
   (`Microsoft.PIX.Internal`), which may change between Preview builds.
+- **Timing captures are write-only through the API.** `IPixTimingCaptureDocument` exposes only
+  open, symbol resolution and save; there is no reader for CPU samples, threads or PIX events, so
+  `pix_timing_*` prepares files for the PIX UI rather than querying them.
 
 ## Testing
 
 - `dotnet test` runs unit tests. Set `PIX_TEST_CAPTURE=<path to .wpix>` to also run the
-  integration tests (and `PIX_TEST_ANALYSIS=1` to include a GPU replay).
+  integration tests (and `PIX_TEST_ANALYSIS=1` to include a GPU replay). Building anything needs a
+  PIX Preview install, so `.github/workflows/ci.yml` runs only the Python harness tests on hosted
+  runners and the full build/test/smoke job on a self-hosted runner labelled `pix`, on demand.
 - `tests\D3D12TestApp\build.cmd` builds a tiny D3D12 triangle app (needs Visual Studio 2022 C++
   tools) that is a convenient capture target.
 - `scripts\smoke.py` is a dependency-free stdio MCP client; `scripts\scenarios\*.json` are

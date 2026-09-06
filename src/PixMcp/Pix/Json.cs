@@ -52,8 +52,19 @@ public static class Json
 
     private sealed class TrimmedEnumConverter<T> : JsonConverter<T> where T : struct, Enum
     {
+        /// <summary>Accepts the trimmed names this converter writes as well as full member names.</summary>
         public override T Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-            => Enum.Parse<T>(reader.GetString() ?? string.Empty, ignoreCase: true);
+        {
+            string text = reader.GetString() ?? string.Empty;
+            foreach (T member in Enum.GetValues<T>())
+            {
+                if (member.ToString().Equals(text, StringComparison.OrdinalIgnoreCase) || EnumName(member).Equals(text, StringComparison.OrdinalIgnoreCase))
+                {
+                    return member;
+                }
+            }
+            return Enum.Parse<T>(text, ignoreCase: true);
+        }
 
         public override void Write(Utf8JsonWriter writer, T value, JsonSerializerOptions options)
             => writer.WriteStringValue(EnumName(value));

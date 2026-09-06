@@ -10,3 +10,5 @@ TestResults/
 __pycache__/
 *.py[cod]
 .claude/settings.local.json
+
+dist/

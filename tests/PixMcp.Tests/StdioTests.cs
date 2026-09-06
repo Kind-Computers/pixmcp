@@ -48,9 +48,10 @@ public class StdioTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task ListsToolsAndResourcesHandlesErrorsAndShutsDownCleanly()
     {
+        Skip.If(PixDiscovery.InstallDir is null, "The server only starts with a PIX Preview install; discovery found none.");
         await using var server = new StdioClient(ServerStart());
         JsonElement initialized = await server.Send("initialize", new
         {

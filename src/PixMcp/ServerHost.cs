@@ -25,10 +25,15 @@ internal static class ServerHost
     {
         var builder = Host.CreateApplicationBuilder(args);
 
-        // stdout is the MCP transport; all logging goes to stderr.
+        // stdout is the MCP transport; all logging goes to stderr. The level defaults to Information
+        // but honours the standard configuration, e.g. Logging__LogLevel__Default=Debug in the
+        // environment to also see PIX engine informational messages.
         builder.Logging.ClearProviders();
         builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
-        builder.Logging.SetMinimumLevel(LogLevel.Information);
+        if (builder.Configuration["Logging:LogLevel:Default"] is null)
+        {
+            builder.Logging.SetMinimumLevel(LogLevel.Information);
+        }
 
         builder.Services.AddSingleton<PixWorker>();
         builder.Services.AddSingleton<PixSession>();

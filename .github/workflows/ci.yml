@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  harness:
+    name: Smoke harness and scenarios (no PIX needed)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unit-test the stdio MCP client used by the smoke scenarios
+        run: python -m unittest discover -s scripts -p "test_*.py" -v
+      - name: Validate scenario files
+        run: python -c "import glob, json; [json.load(open(p, encoding='utf-8')) for p in glob.glob('scripts/scenarios/*.json')]; print('scenarios ok')"
+
+  # The server, its unit tests and the smoke scenarios need the PIX Preview API, a D3D12 GPU and
+  # Windows Developer Mode, none of which hosted runners have. Register a self-hosted Windows runner
+  # with PIX Preview (newer than 2606.15) installed and the labels below, then run this job on demand.
+  pix:
+    name: Build, test and smoke (self-hosted runner with PIX Preview)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, windows, pix]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - run: dotnet build pixmcp.sln -c Release
+      - run: dotnet test pixmcp.sln -c Release --no-build
+      - name: Build the D3D12 test app (needs Visual Studio C++ tools)
+        run: cmd /c tests\D3D12TestApp\build.cmd
+      - name: Capture the test app and inspect the capture end to end
+        run: python scripts/smoke.py src/PixMcp/bin/x64/Release/net10.0-windows10.0.26100.0/PixMcp.exe @scripts/scenarios/capture-and-inspect.json
