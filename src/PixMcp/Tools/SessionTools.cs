@@ -79,7 +79,7 @@ public static class SessionTools
     public static string JobStatus(JobManager jobs, [Description("Job id, e.g. job-1")] string jobId)
     {
         Job job = jobs.Get(jobId);
-        return Json.Serialize(job.ToDto(includeResult: job.IsFinished));
+        return Json.Serialize(job.ToDto(includeResult: true));
     }
 
     [McpServerTool(Name = "pix_job_wait"), Description("Blocks until a job finishes or the timeout elapses, then returns its status and result.")]

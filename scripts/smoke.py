@@ -1,32 +1,61 @@
-"""Minimal raw JSON-RPC stdio client for smoke-testing the pixmcp server (no mcp package needed).
+"""Dependency-free JSON-RPC stdio smoke client. Run from the repository root.
 
-Run from the repository root so relative paths in scenarios resolve.
-
-Usage: python mcpclient.py <server exe> <tool> [json-args] ...
- - 'tools' lists tools.
- - String argument values starting with '$' are resolved from earlier results:
-   "$pix_device_launch.processId" or "$last.result.path" (dot path into the JSON result);
-   "$env.NAME" reads an environment variable.
- - 'sleep' with {"seconds": N} pauses.
+Usage: python scripts/smoke.py [--max=6000] [--timeout=660] <server exe> <tool> [json-args] ...
+       python scripts/smoke.py <server exe> @scripts/scenarios/open-capture.json
+ - 'tools' lists tools; 'sleep' with {"seconds": N} pauses.
+ - '$tool.result.path', '$last.items.0.index', and '$env.NAME' resolve earlier results/environment.
+ - Scenario steps are [tool, args] or [tool, args, {"result.path": expected_json_value}].
+   Assertions use dotted paths into that step's result, for example {"status": "succeeded"}.
+ - RPC, tool, failed/cancelled jobs, missing references, and assertion errors exit nonzero.
 """
+import argparse
+from collections import deque
 import json
+import math
 import os
+import queue
 import subprocess
 import sys
 import threading
 import time
 
 
+class SmokeError(RuntimeError):
+    pass
+
+
 class Client:
-    def __init__(self, cmd):
-        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1)
+    def __init__(self, cmd, timeout=660, shutdown_timeout=5):
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be a finite positive number")
+        self.timeout = timeout
+        self.shutdown_timeout = shutdown_timeout
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1)
         self.next_id = 1
-        self.stderr_lines = []
-        threading.Thread(target=self._pump_stderr, daemon=True).start()
+        self.stderr_lines = deque(maxlen=200)
+        self._stdout = queue.Queue()
+        self._closed = False
+        self._threads = [threading.Thread(target=self._pump_stdout, daemon=True),
+                         threading.Thread(target=self._pump_stderr, daemon=True)]
+        for thread in self._threads:
+            thread.start()
+
+    def _pump_stdout(self):
+        try:
+            for line in self.proc.stdout:
+                self._stdout.put(line)
+        except (OSError, UnicodeError, ValueError) as error:
+            self._stdout.put(error)
+        finally:
+            self._stdout.put(None)
 
     def _pump_stderr(self):
-        for line in self.proc.stderr:
-            self.stderr_lines.append(line.rstrip())
+        try:
+            for line in self.proc.stderr:
+                self.stderr_lines.append(line.rstrip())
+        except (OSError, UnicodeError, ValueError) as error:
+            self.stderr_lines.append(str(error))
 
     def send(self, method, params=None, notify=False):
         msg = {"jsonrpc": "2.0", "method": method}
@@ -35,116 +64,229 @@ class Client:
         if not notify:
             msg["id"] = self.next_id
             self.next_id += 1
-        self.proc.stdin.write(json.dumps(msg) + "\n")
-        self.proc.stdin.flush()
+        deadline = time.monotonic() + self.timeout
+        try:
+            self.proc.stdin.write(json.dumps(msg) + "\n")
+            self.proc.stdin.flush()
+        except (OSError, ValueError) as error:
+            raise SmokeError(f"{method}: cannot write to server: {error}") from error
         if notify:
             return None
         while True:
-            line = self.proc.stdout.readline()
-            if not line:
-                raise RuntimeError("server exited: " + "\n".join(self.stderr_lines[-30:]))
-            data = json.loads(line)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SmokeError(f"{method}: response timed out after {self.timeout:g}s")
+            try:
+                line = self._stdout.get(timeout=remaining)
+            except queue.Empty as error:
+                raise SmokeError(f"{method}: response timed out after {self.timeout:g}s") from error
+            if line is None:
+                raise SmokeError(f"{method}: server exited before responding")
+            if isinstance(line, Exception):
+                raise SmokeError(f"{method}: cannot read server output: {line}") from line
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise SmokeError(f"{method}: malformed JSON on stdout: {line[:300].rstrip()}") from error
+            if not isinstance(data, dict) or data.get("jsonrpc") != "2.0":
+                raise SmokeError(f"{method}: invalid JSON-RPC response: {data}")
             if data.get("id") == msg["id"]:
+                if "error" in data:
+                    raise SmokeError(f"{method}: RPC error: {json.dumps(data['error'])}")
+                if "result" not in data:
+                    raise SmokeError(f"{method}: response has neither result nor error")
                 return data
             print("<<", json.dumps(data)[:300], file=sys.stderr)
 
     def call(self, tool, args=None):
-        r = self.send("tools/call", {"name": tool, "arguments": args or {}})
-        if "error" in r:
-            return {"rpcError": r["error"]}
-        result = r["result"]
+        result = self.send("tools/call", {"name": tool, "arguments": args or {}})["result"]
+        if not isinstance(result, dict) or not isinstance(result.get("content"), list):
+            raise SmokeError(f"{tool}: invalid tool result: {result}")
         out = []
-        for c in result.get("content", []):
-            if c.get("type") == "text":
+        for content in result["content"]:
+            if not isinstance(content, dict):
+                raise SmokeError(f"{tool}: invalid content block: {content}")
+            if content.get("type") == "text":
+                if not isinstance(content.get("text"), str):
+                    raise SmokeError(f"{tool}: invalid text content: {content}")
                 try:
-                    out.append(json.loads(c["text"]))
-                except Exception:
-                    out.append(c["text"])
+                    out.append(json.loads(content["text"]))
+                except json.JSONDecodeError:
+                    out.append(content["text"])
             else:
-                out.append({"type": c.get("type"), "mimeType": c.get("mimeType"), "bytes": len(c.get("data", ""))})
+                out.append({"type": content.get("type"), "mimeType": content.get("mimeType"),
+                            "bytes": len(content.get("data", ""))})
         if result.get("isError"):
-            return {"toolError": out}
-        return out[0] if len(out) == 1 else out
+            raise SmokeError(f"{tool}: tool error: {json.dumps(out)}")
+        value = out[0] if len(out) == 1 else out
+        if isinstance(value, dict) and "jobId" in value and value.get("status") in ("failed", "cancelled"):
+            raise SmokeError(f"{tool}: job {value['jobId']} {value['status']}: {value.get('error', '')}")
+        return value
 
     def close(self):
+        if self._closed:
+            return self.proc.returncode
+        self._closed = True
         try:
             self.proc.stdin.close()
-            self.proc.wait(timeout=60)
-        except Exception:
+        except (OSError, ValueError):
+            pass
+        try:
+            self.proc.wait(timeout=self.shutdown_timeout)
+        except subprocess.TimeoutExpired:
             self.proc.kill()
+            self.proc.wait(timeout=self.shutdown_timeout)
+        finally:
+            for thread in self._threads:
+                thread.join(timeout=1)
+            self.proc.stdout.close()
+            self.proc.stderr.close()
+        return self.proc.returncode
+
+
+def lookup(value, path, reference):
+    for part in path.split("."):
+        if isinstance(value, dict) and part in value:
+            value = value[part]
+        elif isinstance(value, list) and part.isascii() and part.isdigit() and int(part) < len(value):
+            value = value[int(part)]
+        else:
+            raise SmokeError(f"Missing reference {reference!r} at {part!r}")
+    return value
 
 
 def resolve(value, results):
     if isinstance(value, str) and value.startswith("$env."):
-        return os.environ.get(value[5:])
+        name = value[5:]
+        if name not in os.environ:
+            raise SmokeError(f"Missing environment variable {name!r}")
+        return os.environ[name]
     if isinstance(value, str) and value.startswith("$"):
-        parts = value[1:].split(".")
-        cur = results.get(parts[0])
-        for p in parts[1:]:
-            if isinstance(cur, list):
-                cur = cur[int(p)]
-            elif isinstance(cur, dict):
-                cur = cur.get(p)
-            else:
-                return None
-        return cur
+        return lookup(results, value[1:], value)
     if isinstance(value, dict):
-        return {k: resolve(v, results) for k, v in value.items()}
+        return {key: resolve(item, results) for key, item in value.items()}
     if isinstance(value, list):
-        return [resolve(v, results) for v in value]
+        return [resolve(item, results) for item in value]
     return value
 
 
-def main():
-    argv = sys.argv[1:]
-    maxchars = 6000
-    if argv and argv[0].startswith("--max="):
-        maxchars = int(argv[0][6:])
-        argv = argv[1:]
-    cmd = [os.path.abspath(argv[0])]
-    c = Client(cmd)
-    init = c.send("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "smoke", "version": "0"}})
-    print("initialize:", json.dumps(init.get("result", init).get("serverInfo")))
-    c.send("notifications/initialized", notify=True)
-    results = {}
-    steps = []
-    if len(argv) > 1 and argv[1].startswith("@"):
-        steps = json.load(open(argv[1][1:], encoding="utf-8"))
+def assert_result(result, expected):
+    for path, wanted in expected.items():
+        actual = lookup(result, path, path)
+        # Canonical JSON distinguishes booleans from numbers, including nested values.
+        if json.dumps(actual, sort_keys=True) != json.dumps(wanted, sort_keys=True):
+            raise SmokeError(f"Assertion {path!r}: expected {json.dumps(wanted)}, got {json.dumps(actual)}")
+
+
+def parse_steps(arguments):
+    if arguments and arguments[0].startswith("@"):
+        if len(arguments) != 1:
+            raise SmokeError("A scenario filename must be the only argument after the server")
+        with open(arguments[0][1:], encoding="utf-8") as scenario:
+            steps = json.load(scenario)
     else:
-        i = 1
-        while i < len(argv):
-            tool = argv[i]
+        steps = []
+        index = 0
+        while index < len(arguments):
+            tool = arguments[index]
+            index += 1
             args = {}
-            if i + 1 < len(argv) and argv[i + 1].startswith("{"):
-                args = json.loads(argv[i + 1])
-                i += 1
-            i += 1
+            if index < len(arguments) and arguments[index].startswith("{"):
+                args = json.loads(arguments[index])
+                index += 1
             steps.append([tool, args])
-    for tool, args in steps:
-        if tool == "tools":
-            r = c.send("tools/list")
-            tools = r["result"]["tools"]
-            print(f"{len(tools)} tools:")
-            for t in tools:
-                print(" -", t["name"], "|", t.get("description", "")[:90])
-            continue
-        if tool == "sleep":
-            time.sleep(float(args.get("seconds", 1)))
-            continue
-        args = resolve(args, results)
-        t0 = time.time()
-        res = c.call(tool, args)
-        results[tool] = res
-        results["last"] = res
-        print(f"== {tool} {json.dumps(args)} ({time.time() - t0:.1f}s)")
-        text = json.dumps(res, indent=1, default=str)
-        print(text if len(text) < maxchars else text[:maxchars] + f"\n... [{len(text)} chars]")
-    c.close()
-    errs = [l for l in c.stderr_lines if "warn" in l.lower() or "error" in l.lower() or "fail" in l.lower()]
-    if errs:
-        print("--- stderr warnings/errors ---")
-        print("\n".join(errs[-30:]))
+    if not isinstance(steps, list):
+        raise SmokeError("A scenario must be a list of steps")
+    for index, step in enumerate(steps, 1):
+        if (not isinstance(step, list) or len(step) not in (2, 3)
+                or not isinstance(step[0], str) or not isinstance(step[1], dict)
+                or (len(step) == 3 and not isinstance(step[2], dict))):
+            raise SmokeError(f"Invalid scenario step {index}: expected [tool, args, optional assertions]")
+    return steps
+
+
+def run_steps(client, steps, maxchars):
+    results = {}
+    for index, step in enumerate(steps, 1):
+        tool, args = step[:2]
+        expected = step[2] if len(step) == 3 else {}
+        try:
+            args = resolve(args, results)
+            started = time.monotonic()
+            if tool == "tools":
+                result = client.send("tools/list")["result"]
+            elif tool == "sleep":
+                seconds = float(args.get("seconds", 1))
+                if not math.isfinite(seconds) or seconds < 0:
+                    raise SmokeError("sleep seconds must be finite and nonnegative")
+                time.sleep(seconds)
+                result = {"seconds": seconds}
+            else:
+                result = client.call(tool, args)
+            assert_result(result, resolve(expected, results))
+            results[tool] = result
+            results["last"] = result
+            print(f"== {tool} {json.dumps(args)} ({time.monotonic() - started:.1f}s)")
+            if tool == "tools":
+                tools = result.get("tools") if isinstance(result, dict) else None
+                if not isinstance(tools, list):
+                    raise SmokeError("tools/list: missing tools array")
+                print(f"{len(tools)} tools:")
+                for item in tools:
+                    print(" -", item["name"], "|", item.get("description", "")[:90])
+                continue
+            text = json.dumps(result, indent=1)
+            print(text if len(text) <= maxchars else text[:maxchars] + f"\n... [{len(text)} chars]")
+        except (SmokeError, ValueError, TypeError) as error:
+            raise SmokeError(f"Step {index} ({tool}): {error}") from error
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--max", type=int, default=6000, dest="maxchars")
+    parser.add_argument("--timeout", type=float, default=660, help="Deadline in seconds for each RPC response")
+    parser.add_argument("server")
+    parser.add_argument("steps", nargs=argparse.REMAINDER)
+    options = parser.parse_args(argv)
+    client = None
+    exit_code = 0
+    try:
+        if options.maxchars <= 0:
+            raise SmokeError("--max must be positive")
+        steps = parse_steps(options.steps)
+        client = Client([os.path.abspath(options.server)], timeout=options.timeout)
+        init = client.send("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                          "clientInfo": {"name": "smoke", "version": "1"}})
+        if not isinstance(init["result"], dict) or "serverInfo" not in init["result"]:
+            raise SmokeError("initialize: missing serverInfo")
+        print("initialize:", json.dumps(init["result"]["serverInfo"]))
+        client.send("notifications/initialized", notify=True)
+        run_steps(client, steps, options.maxchars)
+    except (SmokeError, OSError, ValueError, TypeError) as error:
+        print(f"smoke: {error}", file=sys.stderr)
+        exit_code = 1
+    except KeyboardInterrupt:
+        print("smoke: interrupted", file=sys.stderr)
+        exit_code = 130
+    finally:
+        if client is not None:
+            try:
+                server_exit = client.close()
+                if exit_code == 0 and server_exit != 0:
+                    print(f"smoke: server exited with code {server_exit}", file=sys.stderr)
+                    exit_code = 1
+            except (OSError, subprocess.TimeoutExpired) as error:
+                print(f"smoke: server cleanup failed: {error}", file=sys.stderr)
+                exit_code = 1
+            lines = list(client.stderr_lines)
+            if exit_code:
+                lines = lines[-30:]
+            else:
+                lines = [line for line in lines if any(word in line.lower() for word in ("warn", "error", "fail"))][-30:]
+            if lines:
+                print("--- server stderr ---\n" + "\n".join(lines), file=sys.stderr)
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

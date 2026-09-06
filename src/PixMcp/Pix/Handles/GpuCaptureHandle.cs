@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using Microsoft.PIX;
 using Microsoft.PIX.Extension;
 using Microsoft.PIX.Extension.DeviceConnection;
@@ -15,17 +14,9 @@ public readonly record struct EventRecord(uint Index, uint GpuId, uint ParentInd
     public static EventRecord From(uint index, PIX_EVENT_INFO e)
         => new(index, e.GpuId, e.ParentIndex, Interop.A(e.Name), Interop.A(e.ApiCallData), e.CommandListId, e.Color);
 
-    public object ToDto(int queueIndex) => new
-    {
-        queueIndex,
-        index = Index,
-        gpuId = GpuId == uint.MaxValue ? (uint?)null : GpuId,
-        parentIndex = ParentIndex == uint.MaxValue ? (uint?)null : ParentIndex,
-        name = Name,
-        apiCallData = string.IsNullOrEmpty(ApiCallData) ? null : ApiCallData,
-        commandListId = CommandListId,
-        color = Color == 0 ? null : $"0x{Color:X8}",
-    };
+    public EventDto ToDto(int queueIndex) => new(queueIndex, Index,
+        GpuId == uint.MaxValue ? null : GpuId, ParentIndex == uint.MaxValue ? null : ParentIndex,
+        Name, string.IsNullOrEmpty(ApiCallData) ? null : ApiCallData, CommandListId, Color == 0 ? null : $"0x{Color:X8}");
 }
 
 public sealed class QueueEntry
@@ -61,6 +52,19 @@ public sealed record CounterInfo(uint Id, string Name, string Description, strin
 
 public sealed record ExperimentInfo(Guid Guid, string Name, string Category, string HelpText, PIX_EXPERIMENT_SOURCE Source);
 
+internal readonly record struct AnalysisOptions(ulong? Adapter = null, uint? PowerState = null, PIX_ANALYSIS_FLAGS? Flags = null)
+{
+    internal void ValidateRunningRequest(AnalysisOptions requested)
+    {
+        if (requested.Adapter.HasValue && requested.Adapter != Adapter ||
+            requested.PowerState.HasValue && requested.PowerState != PowerState ||
+            requested.Flags.HasValue && requested.Flags != Flags)
+        {
+            throw new McpException("Analysis is already running with different or SDK-selected settings. Call pix_gpu_analysis_stop before requesting different settings.");
+        }
+    }
+}
+
 public sealed class GpuCaptureHandle : PixHandle
 {
     public const ulong TimingNone = ulong.MaxValue;
@@ -87,10 +91,12 @@ public sealed class GpuCaptureHandle : PixHandle
 
     // Caches of expensive results
     public IPixGpuCaptureTiming? Timing { get; set; }
-    public Dictionary<int, EventTimingRow[]> TimingRowsByQueue { get; } = new();
+    public Dictionary<int, EventTimingRow[]> TimingRowsByQueue { get; internal set; } = new();
     public IPixGpuCaptureCounters? Counters { get; set; }
     public List<CounterInfo>? CounterList { get; set; }
     public Dictionary<string, IPixGpuCaptureCounterData> CollectedCounters { get; } = new();
+    public Dictionary<string, CounterCollectionCache> CounterCollections { get; } = new();
+    public Dictionary<int, HfCollectionCache> HighFrequencyCollections { get; } = new();
     public IPixGpuCaptureDrPix? DrPix { get; set; }
     public List<ExperimentInfo>? Experiments { get; set; }
 
@@ -181,6 +187,19 @@ public sealed class GpuCaptureHandle : PixHandle
 
     public IPixGpuCaptureAnalysis GetAnalysis() => Analysis ??= Document.GetAnalysis();
 
+    internal bool ConfigureAnalysis(AnalysisOptions requested)
+    {
+        if (AnalysisStarted)
+        {
+            new AnalysisOptions(SelectedAdapter, SelectedPowerState, SelectedFlags).ValidateRunningRequest(requested);
+            return true;
+        }
+        SelectedAdapter = requested.Adapter ?? SelectedAdapter;
+        SelectedPowerState = requested.PowerState ?? SelectedPowerState;
+        SelectedFlags = requested.Flags ?? SelectedFlags;
+        return false;
+    }
+
     /// <summary>Connects the analysis session to the local PIX device (no replay yet).</summary>
     public IPixGpuCaptureAnalysis EnsureConnected(Job? job)
     {
@@ -201,43 +220,52 @@ public sealed class GpuCaptureHandle : PixHandle
     }
 
     /// <summary>Connects to the local GPU and starts analysis if not already running. Progress goes to <paramref name="job"/> when given.</summary>
-    public void EnsureAnalysisStarted(Job? job)
+    public unsafe void EnsureAnalysisStarted(Job? job)
     {
         if (AnalysisStarted)
         {
             return;
         }
 
+        job?.ThrowIfCancellationRequested();
         IPixGpuCaptureAnalysis analysis = EnsureConnected(job);
 
         job?.AddMessage("Starting analysis (replaying the capture on the GPU; Windows Developer Mode required)...");
         bool customized = SelectedAdapter.HasValue || SelectedPowerState.HasValue || SelectedFlags.HasValue;
-        if (job is not null || customized)
+        PIX_ANALYSIS_PARAMS? parameters = null;
+        if (customized)
         {
-            var parameters = new PIX_ANALYSIS_PARAMS
+            parameters = new PIX_ANALYSIS_PARAMS
             {
-                Adapter = SelectedAdapter ?? (Adapters.Count > 0 ? Adapters[0].Id : 0),
+                Adapter = SelectedAdapter ?? (Adapters is { Count: > 0 } ? Adapters[0].Id : 0),
                 PowerState = SelectedPowerState ?? 0,
                 Flags = SelectedFlags ?? PIX_ANALYSIS_FLAGS.PIX_ANALYSIS_FLAG_NONE,
             };
-            try
-            {
-                PixApiExtensionsGpuCaptureAnalysis.StartAnalysis(analysis, parameters, job?.Sink!, job?.PixToken!);
-            }
-            catch (COMException ex) when (!customized)
-            {
-                job?.AddMessage($"StartAnalysis with explicit parameters failed ({PixErrors.Hex(ex.HResult)}); retrying with defaults.");
-                PixApiExtensionsGpuCaptureAnalysis.StartAnalysis(analysis);
-            }
         }
-        else
+        InvokeStartAnalysis(parameters, job, (p, notifications, cancellation) =>
         {
-            PixApiExtensionsGpuCaptureAnalysis.StartAnalysis(analysis);
-        }
+            if (p is PIX_ANALYSIS_PARAMS explicitParameters)
+                analysis.StartAnalysis(&explicitParameters, notifications!, cancellation!);
+            else
+                analysis.StartAnalysis(null, notifications!, cancellation!);
+        });
 
+        if (parameters is PIX_ANALYSIS_PARAMS effective)
+        {
+            SelectedAdapter = effective.Adapter;
+            SelectedPowerState = effective.PowerState;
+            SelectedFlags = effective.Flags;
+        }
         AnalysisStarted = true;
         AnalysisStartedAt = DateTimeOffset.UtcNow;
         job?.AddMessage("Analysis started.");
+    }
+
+    internal static void InvokeStartAnalysis(PIX_ANALYSIS_PARAMS? parameters, Job? job,
+        Action<PIX_ANALYSIS_PARAMS?, IPixGpuCaptureAnalysisNotifications?, IPixCancellationToken?> start)
+    {
+        job?.ThrowIfCancellationRequested();
+        start(parameters, job?.Sink, job?.PixToken);
     }
 
     private static List<(ulong, string)> LoadAdapters(IPixGpuCaptureAnalysis analysis)
@@ -281,12 +309,16 @@ public sealed class GpuCaptureHandle : PixHandle
             catch (Exception ex) { warnings.Add("Disconnect: " + PixErrors.Describe(ex)); }
         }
         AnalysisStarted = false;
+        AnalysisStartedAt = null;
         AnalysisConnected = false;
+        Adapters = null;
         Timing = null;
         TimingRowsByQueue.Clear();
         Counters = null;
         CounterList = null;
         CollectedCounters.Clear();
+        CounterCollections.Clear();
+        HighFrequencyCollections.Clear();
         DrPix = null;
         Experiments = null;
         Analysis = null;

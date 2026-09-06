@@ -464,7 +464,11 @@ public static class DumpTools
         });
 
     [McpServerTool(Name = "pix_dump_breadcrumbs", ReadOnly = true), Description("DRED auto-breadcrumb nodes from the dump: per command list, the recorded operations and how many completed, plus context strings. Shows where each command list was when the GPU hung.")]
-    public static Task<string> Breadcrumbs(PixSession session, [Description("Dump handle")] string handle, [Description("Maximum ops to list per node (default 200).")] int maxOps = 200)
+    public static Task<string> Breadcrumbs(PixSession session,
+        [Description("Dump handle")] string handle,
+        [Description("Maximum ops to list per node (default 200, max 5000).")] int maxOps = 200,
+        [Description("Node index to include; omit for all nodes.")] int? nodeIndex = null,
+        [Description("First operation index. Omit to show the operations around the completion boundary; use 0 for the beginning.")] int? offset = null)
         => Tools.Run(session, "pix_dump_breadcrumbs", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
@@ -473,19 +477,42 @@ public static class DumpTools
             {
                 return new { nodes = Array.Empty<object>(), unavailable = ex is null ? null : PixErrors.Describe(ex) };
             }
+            if (nodeIndex.HasValue && (nodeIndex < 0 || nodeIndex >= nodes.Count))
+                throw new McpException($"nodeIndex {nodeIndex} is out of range; there are {nodes.Count} breadcrumb node(s).");
             return new
             {
-                nodes = nodes.Select(n => new
+                nodes = nodes.Select((n, i) => (Node: n, Index: i)).Where(n => !nodeIndex.HasValue || n.Index == nodeIndex.Value).Select(entry =>
                 {
-                    commandList = n.CommandListName,
-                    commandQueue = n.CommandQueueName,
-                    completedCount = n.CompletedCount,
-                    opCount = n.Ops?.Length ?? 0,
-                    ops = n.Ops?.Take(maxOps).Select((op, i) => new { index = i, op, completed = i < n.CompletedCount }).ToArray(),
-                    contexts = n.Contexts?.Select(c => new { breadcrumbIndex = c.BreadcrumbIndex, context = c.ContextString }).ToArray(),
+                    BreadcrumbNodeData n = entry.Node;
+                    int count = n.Ops?.Length ?? 0;
+                    var window = BreadcrumbWindow(count, n.CompletedCount, maxOps, offset);
+                    return new
+                    {
+                        nodeIndex = entry.Index,
+                        commandList = n.CommandListName,
+                        commandQueue = n.CommandQueueName,
+                        completedCount = n.CompletedCount,
+                        opCount = count,
+                        opsOffset = window.Offset,
+                        returnedOps = window.Count,
+                        nextOpsOffset = window.NextOffset,
+                        opsTruncated = window.Count < count,
+                        ops = n.Ops?.Skip(window.Offset).Take(window.Count).Select((op, i) => new { index = window.Offset + i, op, completed = window.Offset + i < n.CompletedCount }).ToArray(),
+                        contexts = n.Contexts?.Select(c => new { breadcrumbIndex = c.BreadcrumbIndex, context = c.ContextString }).ToArray(),
+                    };
                 }).ToArray(),
             };
         });
+
+    internal static (int Offset, int Count, int? NextOffset) BreadcrumbWindow(int total, long completed, int maxOps, int? offset)
+    {
+        int limit = Math.Clamp(maxOps, 1, 5000);
+        int boundary = (int)Math.Clamp(completed, 0, total);
+        int start = offset.HasValue ? Math.Max(0, offset.Value) : Math.Clamp(boundary - limit / 2, 0, Math.Max(0, total - limit));
+        int take = Math.Min(limit, Math.Max(0, total - start));
+        long next = (long)start + take;
+        return (start, take, next < total ? (int)next : null);
+    }
 
     [McpServerTool(Name = "pix_dump_resources", ReadOnly = true), Description("Resources known to the dump: name, GPU virtual address, size, dimensions, attributes, and their lifetime events (create/destroy/map...).")]
     public static Task<string> Resources(

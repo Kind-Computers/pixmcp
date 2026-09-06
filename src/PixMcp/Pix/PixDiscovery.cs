@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
@@ -57,11 +58,17 @@ public static class PixDiscovery
 
     /// <summary>PIX_DIR first, then the newest %ProgramFiles%\Microsoft PIX Preview\&lt;version&gt; that contains the marker DLL.</summary>
     public static string? Find(out string? source, out string? error)
+        => Find(Environment.GetEnvironmentVariable("PIX_DIR"),
+            Environment.GetEnvironmentVariable("ProgramW6432")
+                ?? Environment.GetEnvironmentVariable("ProgramFiles")
+                ?? @"C:\Program Files",
+            out source, out error);
+
+    internal static string? Find(string? pixDir, string programFiles, out string? source, out string? error)
     {
         source = null;
         error = null;
 
-        string? pixDir = Environment.GetEnvironmentVariable("PIX_DIR");
         if (!string.IsNullOrEmpty(pixDir))
         {
             if (File.Exists(Path.Combine(pixDir, MarkerDll)))
@@ -69,12 +76,10 @@ public static class PixDiscovery
                 source = "PIX_DIR";
                 return Path.GetFullPath(pixDir);
             }
-            error = $"PIX_DIR is set to '{pixDir}' but it does not contain {MarkerDll}.";
+            error = $"PIX_DIR is set to '{pixDir}' but it does not contain {MarkerDll}. Correct PIX_DIR or unset it to discover an installed PIX Preview.";
+            return null;
         }
 
-        string programFiles = Environment.GetEnvironmentVariable("ProgramW6432")
-            ?? Environment.GetEnvironmentVariable("ProgramFiles")
-            ?? @"C:\Program Files";
         string previewRoot = Path.Combine(programFiles, "Microsoft PIX Preview");
         if (!Directory.Exists(previewRoot))
         {
@@ -103,10 +108,14 @@ public static class PixDiscovery
             return null;
         }
 
-        candidates.Sort((a, b) => CompareVersions(a.version, b.version));
+        candidates.Sort((a, b) =>
+        {
+            int comparison = CompareVersions(a.version, b.version);
+            return comparison != 0 ? comparison : StringComparer.OrdinalIgnoreCase.Compare(a.dir, b.dir);
+        });
         source = "Program Files scan";
         error = null;
-        return candidates[^1].dir;
+        return Path.GetFullPath(candidates[^1].dir);
     }
 
     /// <summary>Parses "YYMM.DD[.NNN][-flavor]" into integer parts; null if not parseable.</summary>
@@ -116,11 +125,11 @@ public static class PixDiscovery
         var parts = new List<int>();
         foreach (string component in version.Split('.'))
         {
-            if (component.Length == 0 || !component.All(char.IsAsciiDigit))
+            if (!int.TryParse(component, NumberStyles.None, CultureInfo.InvariantCulture, out int part))
             {
                 return null;
             }
-            parts.Add(int.Parse(component));
+            parts.Add(part);
         }
         return parts.Count >= 2 ? parts.ToArray() : null;
     }

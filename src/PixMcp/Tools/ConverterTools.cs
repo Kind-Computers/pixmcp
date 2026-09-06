@@ -53,6 +53,7 @@ public static class ConverterTools
                 {
                     throw new McpException($"Capture format {Json.EnumName(source)} cannot be upgraded.");
                 }
+                j.ThrowIfCancellationRequested();
                 _IPixCaptureFileConverter_Extensions.UpgradeGpuCaptureFile(converter, full, target, j.Sink);
                 PIX_GPU_CAPTURE_FILE_FORMAT result = _IPixCaptureFileConverter_Extensions.GetGpuCaptureFileFormat(converter, target);
                 return new { source = full, sourceFormat = source, path = target, format = result, upgraded = true };

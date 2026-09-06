@@ -55,8 +55,9 @@ public static class DrPixTools
     {
         try
         {
-            GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
-            Job job = jobs.Start("drpix", $"Run Dr. PIX experiments on {h.Id}", j => RunCore(h, j, experiments, firstEventGpuId, lastEventGpuId));
+            string[]? requestedExperiments = experiments?.ToArray();
+            Job job = jobs.StartForHandle<GpuCaptureHandle>("drpix", $"Run Dr. PIX experiments on {handle}", handle,
+                (j, h) => RunCore(h, j, requestedExperiments, firstEventGpuId, lastEventGpuId));
             return Json.Serialize(await jobs.WaitOrStatus(job, waitSeconds, cancellationToken).ConfigureAwait(false));
         }
         catch (Exception ex)
@@ -122,6 +123,7 @@ public static class DrPixTools
             },
         };
 
+        job.ThrowIfCancellationRequested();
         IPixCollection results = PixApiExtensionsDrPix.RunExperiments(h.DrPix!, runParams, callback, job.Sink, job.PixToken!);
 
         var dtos = new List<object>();

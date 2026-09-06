@@ -251,13 +251,11 @@ public static class DeviceTools
     {
         try
         {
-            ConnectionHandle h = session.Get<ConnectionHandle>(handle);
-            Job job = jobs.Start("gpu-capture", $"Take GPU capture of pid {processId}", j =>
+            Job job = jobs.StartForHandle<ConnectionHandle>("gpu-capture", $"Take GPU capture of pid {processId}", handle, (j, h) =>
             {
                 if (delaySeconds > 0)
                 {
                     j.AddMessage($"Waiting {delaySeconds:0.#}s for the target to initialise...");
-                    Thread.Sleep(TimeSpan.FromSeconds(Math.Min(delaySeconds, 60)));
                 }
                 IPixGpuCaptureResult result = CaptureWithOptions(
                     processId,
@@ -268,7 +266,7 @@ public static class DeviceTools
                         j.AddMessage("Capturing...");
                         return PixApiExtensionsDeviceConnection.TakeGpuCaptureResult(h.Connection, processId)
                             ?? throw new McpException("PIX returned no GPU capture result.");
-                    });
+                    }, j.Cancellation.Token, TimeSpan.FromSeconds(Math.Clamp(delaySeconds, 0, 60)));
                 string path = Interop.W(result.GetFilename());
                 if (string.IsNullOrEmpty(path))
                 {
@@ -297,12 +295,17 @@ public static class DeviceTools
         uint processId,
         uint frameCount,
         Action<PIX_GPU_CAPTURE_OPTIONS> applyOptions,
-        Func<T> capture)
+        Func<T> capture,
+        CancellationToken cancellationToken = default,
+        TimeSpan delay = default)
     {
         if (frameCount == 0)
         {
             throw new McpException("frameCount must be at least 1.");
         }
+        cancellationToken.ThrowIfCancellationRequested();
+        if (delay > TimeSpan.Zero) Task.Delay(delay, cancellationToken).GetAwaiter().GetResult();
+        cancellationToken.ThrowIfCancellationRequested();
         // PIX retains these settings for subsequent captures, including single-frame requests.
         applyOptions(new PIX_GPU_CAPTURE_OPTIONS
         {
@@ -310,6 +313,7 @@ public static class DeviceTools
             FrameCount = frameCount,
             TargetProcessId = processId,
         });
+        cancellationToken.ThrowIfCancellationRequested();
         return capture();
     }
 

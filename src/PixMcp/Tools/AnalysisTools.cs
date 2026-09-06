@@ -14,22 +14,15 @@ public static class AnalysisTools
         PixSession session,
         JobManager jobs,
         [Description("GPU capture handle")] string handle,
-        [Description("Adapter id from pix_gpu_analysis_adapters (default: first adapter).")] ulong? adapterId = null,
-        [Description("Power state id from pix_gpu_analysis_adapters (default 0).")] uint? powerStateId = null,
+        [Description("Adapter id from pix_gpu_analysis_adapters (default: chosen by PIX).")] ulong? adapterId = null,
+        [Description("Power state id from pix_gpu_analysis_adapters (default: chosen by PIX).")] uint? powerStateId = null,
         [Description("Analysis flags, e.g. IGNORE_INCOMPATIBILITIES, USE_SINGLE_COMMAND_QUEUE, ENABLE_DEBUG_LAYER, ENABLE_RECREATE_AT_GPUVA, DISABLE_GPU_PLUGINS.")] string[]? flags = null,
         [Description("Seconds to wait inline for completion before returning (default 0 = return the job immediately).")] double waitSeconds = 0,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
-            if (h.AnalysisStarted)
-            {
-                return Json.Serialize(new { alreadyStarted = true, analysis = h.AnalysisStatus() });
-            }
-
-            if (adapterId.HasValue) h.SelectedAdapter = adapterId;
-            if (powerStateId.HasValue) h.SelectedPowerState = powerStateId;
+            PIX_ANALYSIS_FLAGS? requestedFlags = null;
             if (flags is { Length: > 0 })
             {
                 PIX_ANALYSIS_FLAGS combined = 0;
@@ -37,11 +30,15 @@ public static class AnalysisTools
                 {
                     combined |= Tools.ParseEnum<PIX_ANALYSIS_FLAGS>(flag);
                 }
-                h.SelectedFlags = combined;
+                requestedFlags = combined;
             }
-
-            Job job = jobs.Start("analysis", $"Start GPU analysis for {h.Id} ({Path.GetFileName(h.Path)})", j =>
+            var options = new AnalysisOptions(adapterId, powerStateId, requestedFlags);
+            Job job = jobs.StartForHandle<GpuCaptureHandle>("analysis", $"Start GPU analysis for {handle}", handle, (j, h) =>
             {
+                if (h.ConfigureAnalysis(options))
+                {
+                    return new { alreadyStarted = true, analysis = h.AnalysisStatus() };
+                }
                 h.EnsureAnalysisStarted(j);
                 return h.AnalysisStatus();
             });

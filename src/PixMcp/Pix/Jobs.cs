@@ -1,89 +1,143 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using Microsoft.PIX;
 using Microsoft.PIX.Extension;
 using ModelContextProtocol;
+using PixMcp.Pix.Handles;
 using Windows.Win32.Foundation;
 
 namespace PixMcp.Pix;
 
 public enum JobStatus { Queued, Running, Succeeded, Failed, Cancelled }
 
-/// <summary>A long-running PIX operation (analysis start, Dr. PIX run, symbol resolution, capture).</summary>
+/// <summary>A long-running PIX operation and its thread-safe progress/status snapshot.</summary>
 public sealed class Job
 {
     private readonly object _lock = new();
     private readonly List<string> _messages = new();
+    private JobStatus _status = JobStatus.Queued;
+    private float _progress;
+    private object? _result;
+    private string? _error;
+    private DateTimeOffset? _startedAt, _finishedAt;
+    private bool _cancellationRequested;
+    private IPixCancellationToken? _pixToken;
 
-    public Job(string id, string kind, string description)
-    {
-        Id = id;
-        Kind = kind;
-        Description = description;
-    }
-
+    public Job(string id, string kind, string description) { Id = id; Kind = kind; Description = description; }
     public string Id { get; }
     public string Kind { get; }
     public string Description { get; }
-    public JobStatus Status { get; internal set; } = JobStatus.Queued;
-    public float Progress { get; private set; }
-    public object? Result { get; internal set; }
-    public string? Error { get; internal set; }
     public DateTimeOffset CreatedAt { get; } = DateTimeOffset.UtcNow;
-    public DateTimeOffset? StartedAt { get; internal set; }
-    public DateTimeOffset? FinishedAt { get; internal set; }
+    public JobStatus Status { get { lock (_lock) return _status; } }
+    public float Progress { get { lock (_lock) return _progress; } }
+    public object? Result { get { lock (_lock) return _result; } }
+    public string? Error { get { lock (_lock) return _error; } }
+    public DateTimeOffset? StartedAt { get { lock (_lock) return _startedAt; } }
+    public DateTimeOffset? FinishedAt { get { lock (_lock) return _finishedAt; } }
     public CancellationTokenSource Cancellation { get; } = new();
-    public IPixCancellationToken? PixToken { get; internal set; }
+    public bool CancellationRequested { get { lock (_lock) return _cancellationRequested || Cancellation.IsCancellationRequested; } }
+    public IPixCancellationToken? PixToken { get { lock (_lock) return _pixToken; } }
     internal TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
+    public bool IsFinished => Status is JobStatus.Succeeded or JobStatus.Failed or JobStatus.Cancelled;
     public Task WaitAsync(TimeSpan timeout, CancellationToken ct) => Completion.Task.WaitAsync(timeout, ct);
 
-    public bool IsFinished => Status is JobStatus.Succeeded or JobStatus.Failed or JobStatus.Cancelled;
+    public void ThrowIfCancellationRequested()
+    {
+        if (CancellationRequested) throw new OperationCanceledException(Cancellation.Token);
+    }
+
+    internal void Begin()
+    {
+        lock (_lock)
+        {
+            ThrowIfCancellationRequested();
+            _status = JobStatus.Running;
+            _startedAt = DateTimeOffset.UtcNow;
+        }
+    }
+
+    internal void AttachPixToken(IPixCancellationToken? token)
+    {
+        bool cancel;
+        lock (_lock) { _pixToken = token; cancel = CancellationRequested; }
+        // Covers cancellation arriving before, during, or after native token creation.
+        if (cancel) CancelNative(token);
+    }
+
+    internal void RequestCancellation()
+    {
+        IPixCancellationToken? token;
+        lock (_lock)
+        {
+            if (IsFinished) throw new McpException($"Job {Id} already finished with status {_status}.");
+            if (_cancellationRequested) return;
+            _cancellationRequested = true;
+            token = _pixToken;
+            AddMessage("Cancellation requested.");
+        }
+        // Never hold the status lock across callbacks or a native call.
+        Cancellation.Cancel();
+        CancelNative(token);
+    }
+
+    private void CancelNative(IPixCancellationToken? token)
+    {
+        try { token?.Cancel(); }
+        catch (Exception ex) { AddMessage("Native cancellation unavailable: " + PixErrors.Describe(ex)); }
+    }
+
+    internal void Succeed(object? result)
+    {
+        lock (_lock) { _result = result; _progress = 1; Finish(JobStatus.Succeeded); }
+    }
+
+    internal void Fail(Exception ex)
+    {
+        lock (_lock)
+        {
+            _error = PixErrors.Describe(ex);
+            // A cancellation request alone does not prove an operation stopped.
+            bool cancelled = CancellationRequested && (ex is OperationCanceledException ||
+                ex is ExternalException native && native.ErrorCode is unchecked((int)0x80004004) or unchecked((int)0x800704C7));
+            Finish(cancelled ? JobStatus.Cancelled : JobStatus.Failed);
+        }
+    }
+
+    private void Finish(JobStatus status)
+    {
+        _finishedAt = DateTimeOffset.UtcNow;
+        _status = status;
+        Completion.TrySetResult(true);
+    }
 
     public void SetProgress(float progress)
     {
-        Progress = Math.Clamp(progress, 0, 1);
+        lock (_lock)
+        {
+            if (!IsFinished && float.IsFinite(progress)) _progress = Math.Clamp(progress, 0, 1);
+        }
     }
 
     public void AddMessage(string message)
     {
-        if (string.IsNullOrWhiteSpace(message))
-        {
-            return;
-        }
+        if (string.IsNullOrWhiteSpace(message)) return;
+        lock (_lock) { _messages.Add(message); if (_messages.Count > 200) _messages.RemoveAt(0); }
+    }
+
+    public IReadOnlyList<string> Messages { get { lock (_lock) return _messages.ToArray(); } }
+
+    public JobDto ToDto(bool includeResult)
+    {
         lock (_lock)
         {
-            _messages.Add(message);
-            if (_messages.Count > 200)
-            {
-                _messages.RemoveAt(0);
-            }
+            return new JobDto(Id, Kind, Description, _status.ToString().ToLowerInvariant(),
+                _progress, CreatedAt, _startedAt, _finishedAt,
+                _startedAt is null ? null : ((_finishedAt ?? DateTimeOffset.UtcNow) - _startedAt.Value).TotalSeconds,
+                _messages.TakeLast(20).ToArray(), _error, includeResult ? _result : null, CancellationRequested);
         }
     }
 
-    public IReadOnlyList<string> Messages
-    {
-        get { lock (_lock) { return _messages.ToArray(); } }
-    }
-
-    public object ToDto(bool includeResult) => new
-    {
-        jobId = Id,
-        kind = Kind,
-        description = Description,
-        status = Status.ToString().ToLowerInvariant(),
-        progress = Progress,
-        createdAt = CreatedAt,
-        startedAt = StartedAt,
-        finishedAt = FinishedAt,
-        elapsedSeconds = StartedAt is null ? (double?)null : ((FinishedAt ?? DateTimeOffset.UtcNow) - StartedAt.Value).TotalSeconds,
-        messages = Messages.TakeLast(20).ToArray(),
-        error = Error,
-        result = includeResult ? Result : null,
-    };
-
-    /// <summary>IPixProgressNotifications adapter that reports into this job.</summary>
     public ProgressSink Sink => new(this);
-
     public sealed class ProgressSink : IPixGpuCaptureAnalysisNotifications, IPixProgressNotifications
     {
         private readonly Job _job;
@@ -99,74 +153,47 @@ public sealed class JobManager
     private readonly ConcurrentDictionary<string, Job> _jobs = new();
     private readonly PixWorker _worker;
     private readonly PixSession _session;
+    private readonly Func<IPixCancellationToken?> _createNativeToken;
     private int _next;
 
     public JobManager(PixWorker worker, PixSession session)
+        : this(worker, session, () => session.Factory.CreateCancellationToken()) { }
+    internal JobManager(PixWorker worker, PixSession session, Func<IPixCancellationToken?> createNativeToken)
     {
-        _worker = worker;
-        _session = session;
+        _worker = worker; _session = session; _createNativeToken = createNativeToken;
     }
 
     public IReadOnlyCollection<Job> All => _jobs.Values.OrderBy(j => j.CreatedAt).ToArray();
-
     public Job Get(string jobId)
         => _jobs.TryGetValue(jobId, out Job? job) ? job : throw new McpException($"Unknown job '{jobId}'. Known jobs: {string.Join(", ", _jobs.Keys)}");
+    public Job StartForHandle<T>(string kind, string description, string handleId, Func<Job, T, object?> work) where T : PixHandle
+        => Start(kind, description, job => work(job, _session.Get<T>(handleId)));
 
-    /// <summary>
-    /// Queues <paramref name="work"/> on the PIX worker thread. The work receives the job (for
-    /// progress/messages) and must return the result object. A PIX cancellation token is created
-    /// up front so pix_job_cancel can interrupt cooperative PIX operations.
-    /// </summary>
+    /// <summary>Runs work on the PIX worker. Success remains success when cancellation arrives too late.</summary>
     public Job Start(string kind, string description, Func<Job, object?> work)
     {
-        string id = $"job-{Interlocked.Increment(ref _next)}";
-        var job = new Job(id, kind, description);
-        _jobs[id] = job;
-
-        _ = _worker.Run(() =>
+        var job = new Job($"job-{Interlocked.Increment(ref _next)}", kind, description);
+        _jobs[job.Id] = job;
+        try
         {
-            job.Status = JobStatus.Running;
-            job.StartedAt = DateTimeOffset.UtcNow;
-            try
+            _ = _worker.Run(() =>
             {
-                try { job.PixToken = _session.Factory.CreateCancellationToken(); }
-                catch { /* cancellation is best-effort */ }
-
-                if (job.Cancellation.IsCancellationRequested)
+                try
                 {
-                    job.Status = JobStatus.Cancelled;
-                    job.Error = "Cancelled before it started.";
+                    job.Begin();
+                    try { job.AttachPixToken(_createNativeToken()); }
+                    catch (Exception ex) { job.AddMessage("Native cancellation unavailable: " + PixErrors.Describe(ex)); }
+                    job.ThrowIfCancellationRequested();
+                    job.Succeed(work(job));
                 }
-                else
-                {
-                    job.Result = work(job);
-                    job.Status = job.Cancellation.IsCancellationRequested ? JobStatus.Cancelled : JobStatus.Succeeded;
-                    job.SetProgress(1);
-                }
-            }
-            catch (Exception ex)
-            {
-                job.Status = job.Cancellation.IsCancellationRequested ? JobStatus.Cancelled : JobStatus.Failed;
-                job.Error = PixErrors.Describe(ex);
-            }
-            finally
-            {
-                job.FinishedAt = DateTimeOffset.UtcNow;
-                job.Completion.TrySetResult(true);
-            }
-        });
-
+                catch (Exception ex) { job.Fail(ex); }
+            });
+        }
+        catch (Exception ex) { job.Fail(ex); }
         return job;
     }
 
-    public void Cancel(Job job)
-    {
-        job.Cancellation.Cancel();
-        try { job.PixToken?.Cancel(); } catch { }
-        job.AddMessage("Cancellation requested.");
-    }
-
-    /// <summary>Waits up to <paramref name="waitSeconds"/> and returns the job DTO (with result when finished).</summary>
+    public void Cancel(Job job) => job.RequestCancellation();
     public async Task<object> WaitOrStatus(Job job, double waitSeconds, CancellationToken ct)
     {
         if (waitSeconds > 0 && !job.IsFinished)
@@ -174,6 +201,6 @@ public sealed class JobManager
             try { await job.WaitAsync(TimeSpan.FromSeconds(waitSeconds), ct).ConfigureAwait(false); }
             catch (TimeoutException) { }
         }
-        return job.ToDto(includeResult: job.IsFinished);
+        return job.ToDto(includeResult: true);
     }
 }

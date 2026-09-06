@@ -16,7 +16,8 @@ file plus PIX's own engine is the queryable store. The server just keeps open do
 - Windows 11 x64 with a D3D12-capable GPU.
 - **PIX Preview 2606.18 or newer** from https://devblogs.microsoft.com/pix/download/ (retail
   PIX builds do not ship the API). The server looks in `%ProgramFiles%\Microsoft PIX Preview\<version>`
-  and picks the newest; set `PIX_DIR` to override.
+  and picks the newest; set `PIX_DIR` to override. An invalid explicit override is an error;
+  the server does not silently select another installation.
 - **Windows Developer Mode** enabled (required by PIX for GPU analysis / replay).
 - .NET 10 SDK (to build) and runtime (to run).
 
@@ -30,6 +31,8 @@ dotnet test pixmcp.sln -c Release
 The output is `src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\PixMcp.exe`. The PIX managed
 assembly is loaded in place from the PIX install (it is never copied next to the exe), so the
 build also fails with a clear message when no compatible PIX Preview is installed.
+At runtime, missing or invalid PIX installations produce an actionable stderr message and
+exit code 1 before the MCP transport starts.
 
 ## Use with Claude Code
 
@@ -52,8 +55,15 @@ Typical conversation flow:
 6. `pix_gpu_drpix_run` – run Dr. PIX experiments over the frame.
 7. `pix_close` when done.
 
-Long operations (analysis start, Dr. PIX, symbol resolution, taking captures) return a `jobId`;
+Long operations (analysis start, counter collection, Dr. PIX, symbol resolution, taking captures) return a `jobId`;
 poll `pix_job_status`, block with `pix_job_wait`, or pass `waitSeconds` to the starting tool.
+`pix_job_cancel` requests cancellation; `cancellationRequested: true` does not mean the operation
+was interrupted. Work that completes before cancellation takes effect remains `succeeded` with
+its result. Cancelling during the capture initialization delay prevents capture from starting.
+
+`pix_gpu_analysis_start` always returns a job, including when compatible analysis is already
+running. To change an active analysis's adapter, power state, or flags, call
+`pix_gpu_analysis_stop` first.
 
 ## Tools
 
@@ -62,7 +72,7 @@ poll `pix_job_status`, block with `pix_job_wait`, or pass `waitSeconds` to the s
 | Session | `pix_info`, `pix_handles`, `pix_close`, `pix_close_all`, `pix_jobs`, `pix_job_status`, `pix_job_wait`, `pix_job_cancel`, `pix_log` |
 | GPU capture | `pix_gpu_open`, `pix_gpu_info`, `pix_gpu_queues`, `pix_gpu_events`, `pix_gpu_event`, `pix_gpu_api_objects`, `pix_gpu_screenshot` |
 | Analysis (replay) | `pix_gpu_analysis_start`, `pix_gpu_analysis_status`, `pix_gpu_analysis_adapters`, `pix_gpu_analysis_stop` |
-| Timing and counters | `pix_gpu_timing_collect`, `pix_gpu_timing_events`, `pix_gpu_counters_list`, `pix_gpu_counters_collect`, `pix_gpu_occupancy`, `pix_gpu_hf_counters` |
+| Timing and counters | `pix_gpu_timing_collect`, `pix_gpu_timing_events`, `pix_gpu_counters_list`, `pix_gpu_counters_start`, `pix_gpu_counters_collect`, `pix_gpu_occupancy`, `pix_gpu_hf_counters` |
 | Pipeline and shaders | `pix_gpu_pipeline_state`, `pix_gpu_shader_code` |
 | Resources | `pix_gpu_resources`, `pix_gpu_resource`, `pix_gpu_event_resources` |
 | Dr. PIX | `pix_gpu_drpix_experiments`, `pix_gpu_drpix_run` |
@@ -71,12 +81,31 @@ poll `pix_job_status`, block with `pix_job_wait`, or pass `waitSeconds` to the s
 | Capture files | `pix_capture_format`, `pix_capture_upgrade` |
 | DirectX dump files | `pix_dump_open`, `pix_dump_info`, `pix_dump_queues`, `pix_dump_events`, `pix_dump_page_faults`, `pix_dump_breadcrumbs`, `pix_dump_resources`, `pix_dump_gpu_state`, `pix_dump_blobs`, `pix_dump_journal`, `pix_dump_shader_waves` |
 
-Every enumeration tool takes `offset`/`limit` (default 100, max 1000) and returns `total` and
+Paged enumeration tools take `offset`/`limit` (default 100, max 1000) and return `total` and
 `nextOffset`. Enum values are returned as trimmed names (`GRAPHICS`, `R8G8B8A8_UNORM`).
 Optional hardware features (occupancy, high-frequency counters) return
 `{ "unavailable": true, "reason": ... }` instead of failing.
 
 MCP resources `pix://handles` and `pix://handles/{handle}` mirror the open handle table.
+
+For large counter queries, call `pix_gpu_counters_start(handle, counterIds, waitSeconds=0)`
+and wait for its job before paging `pix_gpu_counters_collect`. The existing collect tool still
+collects synchronously if needed. Decoded rows are cached per counter set and queue until
+analysis stops; reading another page does not reread every native counter value.
+
+`pix_dump_breadcrumbs` defaults to an operation window around the completed-operation boundary.
+Use `nodeIndex` to select one command list and `offset` to navigate its operation history;
+`offset: 0` retrieves the original prefix view. Operation indices remain absolute.
+`pix_gpu_resource` and `pix_gpu_event_resources` accept `viewIndex`, `bindingOffset`, and
+`bindingLimit` (default 32) to retrieve bindings beyond the initial page. Each view reports
+its binding total and continuation offset. A view index is relative to the resource's views
+or the event's views, respectively.
+
+Successful JSON tool results include `structuredContent` and advertised output schemas while
+retaining their existing JSON text. Object results have the same fields in both representations;
+legacy top-level arrays use `{ "items": [...] }` in structured content. Screenshot image blocks
+are preserved. Page, job, and event schemas describe stable fields; experimental PIX details
+remain extensible.
 
 ## Design notes
 
@@ -107,6 +136,10 @@ MCP resources `pix://handles` and `pix://handles/{handle}` mirror the open handl
 
   The `capture-and-inspect` scenario launches the test app under PIX, takes a capture, opens it,
   replays it for timing, and inspects the first draw.
+  Requests time out after 660 seconds by default; use `--timeout <seconds>` to change this.
+  Protocol errors, tool errors, failed/cancelled jobs, unresolved result references, and failed
+  assertions produce a nonzero exit code. A scenario step may include expected result fields:
+  `["pix_job_wait", {"jobId": "$last.jobId"}, {"status": "succeeded"}]`.
 
 ## Status
 

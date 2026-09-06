@@ -1,7 +1,8 @@
 [
  ["pix_gpu_open", {"path": "$env.PIX_TEST_CAPTURE"}],
- ["pix_gpu_events", {"handle": "gpu-1", "kind": "drawOrDispatch", "limit": 10}],
- ["pix_gpu_timing_events", {"handle": "gpu-1", "limit": 10}],
- ["pix_gpu_pipeline_state", {"handle": "gpu-1", "queueIndex": 0, "eventIndex": "$pix_gpu_events.items.0.index"}],
+ ["pix_gpu_events", {"handle": "$pix_gpu_open.handle", "kind": "drawOrDispatch", "limit": 10}],
+ ["pix_gpu_analysis_start", {"handle": "$pix_gpu_open.handle", "waitSeconds": 300}, {"status": "succeeded"}],
+ ["pix_gpu_timing_events", {"handle": "$pix_gpu_open.handle", "limit": 10}],
+ ["pix_gpu_pipeline_state", {"handle": "$pix_gpu_open.handle", "queueIndex": "$pix_gpu_events.items.0.queueIndex", "eventIndex": "$pix_gpu_events.items.0.index"}],
  ["pix_close_all", {}]
 ]

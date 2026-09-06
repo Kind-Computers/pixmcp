@@ -83,12 +83,16 @@ public static class ResourceTools
         [Description("Resource apiObjectId (hex like 0x1A2B or decimal).")] string? apiObjectId = null,
         [Description("Resource index from pix_gpu_resources.")] uint? index = null,
         [Description("Exact resource name.")] string? name = null,
-        [Description("Include views created on the resource (default true; may need analysis).")] bool includeViews = true)
+        [Description("Include views created on the resource (default true; may need analysis).")] bool includeViews = true,
+        [Description("Resource-local view index to include; omit for all views.")] uint? viewIndex = null,
+        [Description("First binding to return in each included view (default 0).")] int bindingOffset = 0,
+        [Description("Maximum bindings per view (default 32, max 1000).")] int bindingLimit = 32)
         => Tools.Run(session, "pix_gpu_resource", () =>
         {
             GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
             IPixD3D12Resource resource = FindResource(h, apiObjectId, index, name);
-            return ResourceDto(resource, includeViews, includeDesc: true);
+            if (viewIndex.HasValue && !includeViews) throw new McpException("viewIndex requires includeViews=true.");
+            return ResourceDto(resource, includeViews, includeDesc: true, viewIndex, bindingOffset, bindingLimit);
         });
 
     private static IPixD3D12Resource FindResource(GpuCaptureHandle h, string? apiObjectId, uint? index, string? name)
@@ -144,7 +148,8 @@ public static class ResourceTools
         flags = desc.Flags,
     };
 
-    internal static object ResourceDto(IPixD3D12Resource resource, bool includeViews, bool includeDesc)
+    internal static object ResourceDto(IPixD3D12Resource resource, bool includeViews, bool includeDesc,
+        uint? viewIndex = null, int bindingOffset = 0, int bindingLimit = 32)
     {
         string name = Interop.W(resource.GetName());
         PIX_D3D12_RESOURCE_TYPE type = resource.GetType();
@@ -185,8 +190,9 @@ public static class ResourceTools
             try
             {
                 IPixResourceViewsForResource rv = PixApiExtensionsGpuCaptureResources.GetD3D12ResourceViews(resource);
-                views = ViewList(rv, includeResource: false);
+                views = ViewList(rv, includeResource: false, viewIndex, bindingOffset, bindingLimit);
             }
+            catch (McpException) { throw; }
             catch (Exception ex) { views = PixErrors.Unavailable("views", ex); }
         }
 
@@ -206,18 +212,26 @@ public static class ResourceTools
         };
     }
 
-    internal static List<object> ViewList(IPixResourceViews views, bool includeResource)
+    internal static List<object> ViewList(IPixResourceViews views, bool includeResource,
+        uint? viewIndex = null, int bindingOffset = 0, int bindingLimit = 32)
     {
         var list = new List<object>();
         uint count = views.GetCount();
+        ValidateViewIndex(viewIndex, count);
         for (uint i = 0; i < count; i++)
         {
-            list.Add(ViewDto(views, i, includeResource));
+            if (viewIndex.HasValue && viewIndex.Value != i) continue;
+            list.Add(ViewDto(views, i, includeResource, bindingOffset, bindingLimit));
         }
         return list;
     }
 
-    internal static object ViewDto(IPixResourceViews views, uint index, bool includeResource)
+    internal static void ValidateViewIndex(uint? viewIndex, uint count)
+    {
+        if (viewIndex >= count) throw new McpException($"viewIndex {viewIndex} is out of range; there are {count} view(s).");
+    }
+
+    internal static object ViewDto(IPixResourceViews views, uint index, bool includeResource, int bindingOffset = 0, int bindingLimit = 32)
     {
         PIX_RESOURCE_VIEW_TYPE viewType = PIX_RESOURCE_VIEW_TYPE.PIX_RESOURCE_NONE;
         try { _IPixResourceViews_Extensions.GetType(views, index, ref viewType); } catch { }
@@ -335,21 +349,35 @@ public static class ResourceTools
         }
 
         object? bindings = null;
+        uint? bindingCount = null;
+        int? bindingCountReturned = null;
+        long? nextBindingOffset = null;
+        bool? bindingsTruncated = null;
+        (int bo, int bl) = Paging.Normalize(bindingOffset, bindingLimit);
         try
         {
             var view = PixApiExtensionsGpuCaptureResources.GetResourceView<IPixResourceView>(views, index);
             IPixResourceViewBindings rb = PixApiExtensionsGpuCaptureResources.GetResourceBindings(view);
-            uint bindingCount = rb.GetCount();
-            var list = new List<object>();
-            for (uint b = 0; b < Math.Min(bindingCount, 32u); b++)
-            {
-                list.Add(BindingDto(rb, b));
-            }
-            bindings = list;
+            bindingCount = rb.GetCount();
+            var page = BindingPage(bindingCount.Value, bo, bl, b => BindingDto(rb, b));
+            bindings = page.Items;
+            bindingCountReturned = page.Items.Count;
+            nextBindingOffset = page.NextOffset;
+            bindingsTruncated = page.Items.Count < bindingCount.Value;
         }
         catch { }
 
-        return new { index, type = viewType, desc, bufferLocationOffset = offset, resource, bindings };
+        return new { index, type = viewType, desc, bufferLocationOffset = offset, resource, bindings,
+            bindingCount, bindingOffset = bindingCount.HasValue ? (int?)bo : null, bindingCountReturned, nextBindingOffset, bindingsTruncated };
+    }
+
+    internal static (List<object> Items, long? NextOffset) BindingPage(uint count, int offset, int limit, Func<uint, object> read)
+    {
+        (int o, int l) = Paging.Normalize(offset, limit);
+        var items = new List<object>();
+        for (uint i = (uint)o; i < count && items.Count < l; i++) items.Add(read(i));
+        long next = (long)o + items.Count;
+        return (items, next < count ? next : null);
     }
 
     private static object BindingDto(IPixResourceViewBindings bindings, uint index)
@@ -400,7 +428,10 @@ public static class ResourceTools
         PixSession session,
         [Description("GPU capture handle")] string handle,
         [Description("Queue index")] int queueIndex,
-        [Description("Event index of a draw/dispatch event")] uint eventIndex)
+        [Description("Event index of a draw/dispatch event")] uint eventIndex,
+        [Description("Event-global view index to include; omit for all views.")] uint? viewIndex = null,
+        [Description("First binding to return in each included view (default 0).")] int bindingOffset = 0,
+        [Description("Maximum bindings per view (default 32, max 1000).")] int bindingLimit = 32)
         => Tools.Run(session, "pix_gpu_event_resources", () =>
         {
             GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
@@ -419,9 +450,11 @@ public static class ResourceTools
             var byResource = new Dictionary<string, (object resource, List<object> views)>();
             var unattached = new List<object>();
             uint count = viewsAtEvent.GetCount();
+            ValidateViewIndex(viewIndex, count);
             for (uint i = 0; i < count; i++)
             {
-                object dto = ViewDto(viewsAtEvent, i, includeResource: true);
+                if (viewIndex.HasValue && viewIndex.Value != i) continue;
+                object dto = ViewDto(viewsAtEvent, i, includeResource: true, bindingOffset, bindingLimit);
                 IPixD3D12Resource? res = null;
                 try
                 {

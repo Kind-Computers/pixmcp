@@ -73,13 +73,7 @@ public static class Paging
         return (o, l);
     }
 
-    public static object Page<T>(IReadOnlyList<T> items, long total, int offset, int limit, object? extra = null) => new
-    {
-        total,
-        offset,
-        count = items.Count,
-        nextOffset = offset + items.Count < total ? offset + items.Count : (int?)null,
-        items,
-        extra,
-    };
+    public static PageResult<T> Page<T>(IReadOnlyList<T> items, long total, int offset, int limit, object? extra = null)
+        => new(total, offset, items.Count,
+            offset + (long)items.Count < total ? checked(offset + items.Count) : null, items, extra);
 }

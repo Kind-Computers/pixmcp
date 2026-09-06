@@ -49,7 +49,14 @@ public class IntegrationTests : IDisposable
         Assert.True(events.GetProperty("count").GetInt32() <= 5);
 
         JsonElement draws = Parse(await GpuCaptureTools.Events(_session, handle, kind: "drawOrDispatch", limit: 3));
-        Assert.True(draws.GetProperty("count").GetInt32() >= 0);
+        AssertPage(draws, 3);
+        Assert.All(draws.GetProperty("items").EnumerateArray(), row =>
+        {
+            string name = row.GetProperty("name").GetString()!;
+            string api = row.TryGetProperty("apiCallData", out JsonElement call) ? call.GetString()! : string.Empty;
+            Assert.Contains(new[] { name, api }, s => s.StartsWith("Draw", StringComparison.OrdinalIgnoreCase)
+                || s.StartsWith("Dispatch", StringComparison.OrdinalIgnoreCase));
+        });
 
         JsonElement closed = Parse(await SessionTools.Close(_session, handle));
         Assert.Equal(handle, closed.GetProperty("closed").GetString());
@@ -66,7 +73,10 @@ public class IntegrationTests : IDisposable
         Assert.Equal("succeeded", started.GetProperty("status").GetString());
 
         JsonElement timing = Parse(await CountersTools.TimingEvents(_session, handle, limit: 5));
-        Assert.True(timing.GetProperty("total").GetInt64() >= 0);
+        AssertPage(timing, 5);
+        ulong[] durations = timing.GetProperty("items").EnumerateArray()
+            .Select(row => row.GetProperty("eopDurationNs").GetUInt64()).ToArray();
+        Assert.Equal(durations.OrderByDescending(value => value), durations);
 
         await SessionTools.Close(_session, handle);
     }
@@ -125,11 +135,29 @@ public class IntegrationTests : IDisposable
         Assert.Equal(1, result.GetProperty("experimentsRun").GetInt32());
         JsonElement experimentResult = Assert.Single(result.GetProperty("results").EnumerateArray());
         Assert.Equal(experimentId, experimentResult.GetProperty("guid").GetString());
-        Assert.True(experimentResult.GetProperty("succeeded").GetBoolean());
+        Assert.True(experimentResult.GetProperty("succeeded").GetBoolean(), experimentResult.GetRawText());
         await SessionTools.Close(_session, handle);
     }
 
     private static JsonElement Parse(string json) => JsonSerializer.Deserialize<JsonElement>(json);
+
+    private static void AssertPage(JsonElement page, int limit)
+    {
+        int count = page.GetProperty("count").GetInt32();
+        long total = page.GetProperty("total").GetInt64();
+        int offset = page.GetProperty("offset").GetInt32();
+        Assert.Equal(count, page.GetProperty("items").GetArrayLength());
+        Assert.InRange(count, 0, limit);
+        Assert.True(total >= count);
+        if (offset + count < total)
+        {
+            Assert.Equal(offset + count, page.GetProperty("nextOffset").GetInt32());
+        }
+        else
+        {
+            Assert.False(page.TryGetProperty("nextOffset", out _));
+        }
+    }
 
     public void Dispose()
     {

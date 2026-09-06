@@ -36,12 +36,11 @@ public static class TimingCaptureTools
     {
         try
         {
-            TimingCaptureHandle h = session.Get<TimingCaptureHandle>(handle);
             if (string.IsNullOrWhiteSpace(pdbSearchPath))
             {
                 throw new McpException("pdbSearchPath is required.");
             }
-            Job job = jobs.Start("symbols", $"Resolve symbols for {h.Id}", j =>
+            Job job = jobs.StartForHandle<TimingCaptureHandle>("symbols", $"Resolve symbols for {handle}", handle, (j, h) =>
             {
                 var settings = new TimingCaptureSymbolSettings
                 {
