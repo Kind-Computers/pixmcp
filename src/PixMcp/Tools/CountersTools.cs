@@ -131,7 +131,7 @@ public static class CountersTools
         [Description("GPU capture handle")] string handle,
         [Description("Queue index; omit for all queues.")] int? queueIndex = null,
         [Description("First item (default 0).")] int offset = 0,
-        [Description("Maximum items (default 100).")] int limit = Paging.DefaultLimit,
+        [Description("Maximum items (default 100, max 1000).")] int limit = Paging.DefaultLimit,
         [Description("Sort key: eopDuration (default), topDuration, eopStart, index.")] string sortBy = "eopDuration",
         [Description("Sort descending (default true).")] bool descending = true,
         [Description("Only events with EOP duration >= this many nanoseconds.")] ulong minDurationNs = 0,
@@ -166,20 +166,94 @@ public static class CountersTools
             return Paging.Page(page, sorted.Length, o, l);
         }, waitSeconds, cancellationToken);
 
+    [McpServerTool(Name = "pix_gpu_timing_tree", ReadOnly = true), Description("GPU time rolled up the marker hierarchy of one queue: lists the children of an event (top-level events when parentIndex is omitted) with inclusive time (PIX's own measurement when it has one, since PIX times markers as the span of their contents; otherwise the sum of the children), self time (inclusive minus children), timed-descendant count and share of the queue total, most expensive first. Answers 'which pass is slowest' directly; drill down by passing a child's index as parentIndex, or set depth > 1. Timing is collected first if needed, as a job (see waitSeconds).")]
+    public static Task<string> TimingTreeTool(
+        PixSession session,
+        JobManager jobs,
+        [Description("GPU capture handle")] string handle,
+        [Description("Queue index (default 0).")] int queueIndex = 0,
+        [Description("Event whose children to list; omit for the top level of the queue.")] uint? parentIndex = null,
+        [Description("Levels of children to expand (default 1, max 4); limit applies per node at every level.")] int depth = 1,
+        [Description("Maximum children per node, most expensive first (default 50, max 1000).")] int limit = 50,
+        [Description("Skip children whose inclusive time is below this many nanoseconds (default 0).")] ulong minInclusiveNs = 0,
+        [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        CancellationToken cancellationToken = default)
+        => Tools.RunWhenReady(session, jobs, "pix_gpu_timing_tree", handle, TimingPreparation(handle), h =>
+        {
+            TimingTreeNode[] nodes = h.TimingTreeNodes(queueIndex);
+            if (parentIndex.HasValue && parentIndex.Value >= nodes.Length)
+            {
+                throw new McpException($"parentIndex {parentIndex} is out of range; queue {queueIndex} has {nodes.Length} event(s).");
+            }
+            int levels = Math.Clamp(depth, 1, 4);
+            int perNode = Math.Clamp(limit, 1, Paging.MaxLimit);
+            ulong total = TimingTree.Total(nodes);
+            TimingTreeNode[] children = TimingTree.Children(nodes, parentIndex).Where(c => c.InclusiveEopNs >= minInclusiveNs).ToArray();
+            return new
+            {
+                handle = h.Id,
+                queueIndex,
+                totalEopNs = total,
+                timedEvents = nodes.Count(n => n.HasOwnTiming),
+                parent = parentIndex.HasValue ? TimingTreeNodeDto(nodes, nodes[(int)parentIndex.Value], total, 0, perNode, minInclusiveNs) : null,
+                childCount = children.Length,
+                children = children.Take(perNode).Select(c => TimingTreeNodeDto(nodes, c, total, levels - 1, perNode, minInclusiveNs)).ToArray(),
+                childrenTruncated = children.Length > perNode,
+            };
+        }, waitSeconds, cancellationToken);
+
+    private static object TimingTreeNodeDto(TimingTreeNode[] nodes, TimingTreeNode n, ulong total, int depth, int limit, ulong minInclusiveNs)
+    {
+        object? children = null;
+        bool? childrenTruncated = null;
+        if (depth > 0 && n.ChildCount > 0)
+        {
+            TimingTreeNode[] kids = TimingTree.Children(nodes, n.Index).Where(c => c.InclusiveEopNs >= minInclusiveNs).ToArray();
+            children = kids.Take(limit).Select(c => TimingTreeNodeDto(nodes, c, total, depth - 1, limit, minInclusiveNs)).ToArray();
+            childrenTruncated = kids.Length > limit;
+        }
+        return new
+        {
+            index = n.Index,
+            name = n.Name,
+            apiCallData = string.IsNullOrEmpty(n.ApiCallData) ? null : n.ApiCallData,
+            gpuId = n.GpuId,
+            measuredEopNs = n.MeasuredEopNs,
+            inclusiveEopNs = n.InclusiveEopNs,
+            selfEopNs = n.SelfEopNs,
+            percentOfQueue = total == 0 ? 0 : Math.Round(100.0 * n.InclusiveEopNs / total, 2),
+            hasOwnTiming = n.HasOwnTiming,
+            timedDescendants = n.TimedDescendants,
+            childCount = n.ChildCount,
+            children,
+            childrenTruncated,
+        };
+    }
+
     // ---- GPU hardware counters ----
 
-    [McpServerTool(Name = "pix_gpu_counters_list", ReadOnly = true), Description("Lists the GPU hardware counters and counter groups available for this capture on the local GPU (id, name, description, data type); pass ids to pix_gpu_counters_start / pix_gpu_counters_collect. Needs GPU analysis: started automatically as a job (see waitSeconds). For sampled-over-time counters see pix_gpu_hf_counters; for occupancy see pix_gpu_occupancy.")]
+    [McpServerTool(Name = "pix_gpu_counters_list", ReadOnly = true), Description("Pages the GPU hardware counters available for this capture on the local GPU (id, name, description, data type, groups); extra.groups lists every group name. Filter with nameContains or group, then pass ids to pix_gpu_counters_start / pix_gpu_counters_collect. Needs GPU analysis: started automatically as a job (see waitSeconds). For sampled-over-time counters see pix_gpu_hf_counters; for occupancy see pix_gpu_occupancy.")]
     public static Task<string> CountersList(
         PixSession session,
         JobManager jobs,
         [Description("GPU capture handle")] string handle,
+        [Description("First counter (default 0).")] int offset = 0,
+        [Description("Maximum counters (default 100, max 1000).")] int limit = Paging.DefaultLimit,
+        [Description("Only counters whose name or description contains this text (case-insensitive).")] string? nameContains = null,
+        [Description("Only counters in this group (exact name from extra.groups, case-insensitive).")] string? group = null,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
         CancellationToken cancellationToken = default)
         => Tools.RunWhenReady(session, jobs, "pix_gpu_counters_list", handle, GpuCaptureHandle.AnalysisPreparation(handle), h =>
         {
+            (int o, int l) = Paging.Normalize(offset, limit);
             List<CounterInfo> counters = LoadCounters(h);
-            var groups = counters.SelectMany(c => c.Groups).Distinct().OrderBy(g => g).ToArray();
-            return new { count = counters.Count, groups, counters = counters.Select(c => new { id = c.Id, name = c.Name, description = c.Description, dataType = c.DataType, groups = c.Groups }).ToArray() };
+            string[] groups = counters.SelectMany(c => c.Groups).Distinct().OrderBy(g => g).ToArray();
+            IEnumerable<CounterInfo> matching = counters.Where(c =>
+                (Tools.Contains(c.Name, nameContains) || Tools.Contains(c.Description, nameContains)) &&
+                (string.IsNullOrEmpty(group) || c.Groups.Any(g => g.Equals(group, StringComparison.OrdinalIgnoreCase))));
+            return Paging.Collect(matching, o, l,
+                c => new { id = c.Id, name = c.Name, description = c.Description, dataType = c.DataType, groups = c.Groups },
+                new { groups, counterCount = counters.Count });
         }, waitSeconds, cancellationToken);
 
     private static List<CounterInfo> LoadCounters(GpuCaptureHandle h, Job? job = null)
@@ -329,7 +403,7 @@ public static class CountersTools
         [Description("Counter ids to collect (from pix_gpu_counters_list). Keep the set small; each set replays the capture.")] uint[] counterIds,
         [Description("Queue index (default 0).")] int queueIndex = 0,
         [Description("First event (default 0).")] int offset = 0,
-        [Description("Maximum events (default 100).")] int limit = Paging.DefaultLimit,
+        [Description("Maximum events (default 100, max 1000).")] int limit = Paging.DefaultLimit,
         [Description(Tools.KindDescription)] string? kind = null,
         [Description("Only events whose name contains this text.")] string? nameContains = null,
         [Description("Skip events that have no data for any requested counter (default true).")] bool onlyEventsWithData = true,

@@ -13,7 +13,7 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class GpuCaptureTools
 {
-    [McpServerTool(Name = "pix_gpu_open"), Description("Opens a PIX GPU capture (.wpix) and returns a handle plus file info, application description and the list of queues. Opening is cheap; GPU analysis (needed for timing, counters, pipeline state, resources, Dr. PIX) is started on demand or via pix_gpu_analysis_start.")]
+    [McpServerTool(Name = "pix_gpu_open"), Description("Opens a PIX GPU capture (.wpix / .wpix_preview) and returns a handle plus the same payload as pix_gpu_info (file info, application description, queues, analysis state). Opening is cheap; GPU analysis (needed for timing, counters, pipeline state, resources, Dr. PIX) is started on demand or via pix_gpu_analysis_start. Each open creates a new handle; reuse the handle instead of reopening.")]
     public static Task<string> Open(PixSession session, [Description("Path to the .wpix GPU capture file.")] string path, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_gpu_open", () =>
         {
@@ -23,7 +23,7 @@ public static class GpuCaptureTools
             return Info(handle);
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_gpu_info", ReadOnly = true), Description("File info, application description, queues and analysis state for an open GPU capture.")]
+    [McpServerTool(Name = "pix_gpu_info", ReadOnly = true), Description("File info, application description, queues and analysis state for an already open GPU capture (the same payload pix_gpu_open returned).")]
     public static Task<string> GetInfo(PixSession session, [Description("GPU capture handle")] string handle, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_gpu_info", () => Info(session.Get<GpuCaptureHandle>(handle)), cancellationToken);
 
@@ -148,56 +148,75 @@ public static class GpuCaptureTools
             return Paging.Page(matches, total, o, l);
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_gpu_event", ReadOnly = true), Description("Details for one event: its record, the chain of parent (marker) events, and its direct children.")]
+    [McpServerTool(Name = "pix_gpu_event", ReadOnly = true), Description("Details for one event, addressed by queueIndex+eventIndex or by gpuId (as reported by timing rows and Dr. PIX results): its record, the chain of parent (marker) events, and its direct children. For more children than maxChildren, page with pix_gpu_events(queueIndex, parentIndex).")]
     public static Task<string> Event(
         PixSession session,
         [Description("GPU capture handle")] string handle,
-        [Description("Queue index")] int queueIndex,
-        [Description("Event index within the queue")] uint eventIndex,
-        [Description("Maximum direct children to include (default 50).")] int maxChildren = 50,
+        [Description("Queue index (required unless gpuId is given).")] int? queueIndex = null,
+        [Description("Event index within the queue (required unless gpuId is given).")] uint? eventIndex = null,
+        [Description("Find the event by its gpuId instead; all queues are searched.")] uint? gpuId = null,
+        [Description("Maximum direct children to include (default 50, max 1000).")] int maxChildren = 50,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_gpu_event", () =>
         {
             GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
-            EventRecord[] all = h.AllEvents(queueIndex);
-            if (eventIndex >= all.Length)
+            int q;
+            uint index;
+            if (gpuId.HasValue)
             {
-                throw new McpException($"eventIndex {eventIndex} is out of range; queue {queueIndex} has {all.Length} event(s).");
+                (q, EventRecord found) = h.FindByGpuId(gpuId.Value) ?? throw new McpException($"No event with gpuId {gpuId} exists in any queue of {h.Id}.");
+                index = found.Index;
             }
-            EventRecord e = all[eventIndex];
+            else if (queueIndex.HasValue && eventIndex.HasValue)
+            {
+                q = queueIndex.Value;
+                index = eventIndex.Value;
+            }
+            else
+            {
+                throw new McpException("Specify queueIndex and eventIndex, or gpuId.");
+            }
+            EventRecord[] all = h.AllEvents(q);
+            if (index >= all.Length)
+            {
+                throw new McpException($"eventIndex {index} is out of range; queue {q} has {all.Length} event(s).");
+            }
+            EventRecord e = all[index];
 
+            const int maxParents = 64;
             var parents = new List<object>();
             uint p = e.ParentIndex;
-            int guard = 0;
-            while (p != uint.MaxValue && p < all.Length && p != eventIndex && guard++ < 64)
+            while (p != uint.MaxValue && p < all.Length && p != index && parents.Count < maxParents)
             {
-                parents.Add(all[p].ToDto(queueIndex));
+                parents.Add(all[p].ToDto(q));
                 p = all[p].ParentIndex;
             }
+            bool parentsTruncated = p != uint.MaxValue && p < all.Length && p != index;
 
+            int max = Math.Clamp(maxChildren, 0, Paging.MaxLimit);
             var children = new List<object>();
             int childCount = 0;
             foreach (EventRecord c in all)
             {
-                if (c.ParentIndex == eventIndex && c.Index != eventIndex)
+                if (c.ParentIndex == index && c.Index != index)
                 {
-                    if (children.Count < maxChildren)
+                    if (children.Count < max)
                     {
-                        children.Add(c.ToDto(queueIndex));
+                        children.Add(c.ToDto(q));
                     }
                     childCount++;
                 }
             }
 
-            return new { @event = e.ToDto(queueIndex), parents, childCount, children };
+            return new { @event = e.ToDto(q), parents, parentsTruncated, childCount, children, childrenTruncated = childCount > children.Count };
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_gpu_api_objects", ReadOnly = true), Description("Lists D3D12 API objects recorded in the capture (heaps, resources, command queues, command allocators) with their ids and names.")]
+    [McpServerTool(Name = "pix_gpu_api_objects", ReadOnly = true), Description("Lists D3D12 API objects recorded in the capture (heaps, resources, command queues, command allocators) with their ids and names. For resource details use pix_gpu_resources / pix_gpu_resource.")]
     public static Task<string> ApiObjects(
         PixSession session,
         [Description("GPU capture handle")] string handle,
         [Description("First item (default 0).")] int offset = 0,
-        [Description("Maximum items (default 100).")] int limit = Paging.DefaultLimit,
+        [Description("Maximum items (default 100, max 1000).")] int limit = Paging.DefaultLimit,
         [Description("Filter by object type: HEAP, RESOURCE, COMMAND_QUEUE, COMMAND_ALLOCATOR.")] string? type = null,
         [Description("Only objects whose name contains this text.")] string? nameContains = null,
         CancellationToken cancellationToken = default)
@@ -237,12 +256,12 @@ public static class GpuCaptureTools
             return Paging.Page(page, total, o, l);
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_gpu_screenshot", Idempotent = true), Description("Saves the screenshot embedded in the GPU capture as a PNG file (and optionally returns it inline as an image).")]
+    [McpServerTool(Name = "pix_gpu_screenshot", Idempotent = true), Description("The screenshot embedded in the GPU capture as PNG: written to outPath (default <capture>.screenshot.png next to the capture) and/or returned inline as image content. With inline=true and no outPath nothing is written to disk. Only 8-bit RGBA/BGRA and R10G10B10A2 swapchain formats are supported.")]
     public static async Task<CallToolResult> Screenshot(
         PixSession session,
         [Description("GPU capture handle")] string handle,
-        [Description("Output PNG path. Defaults to <capture>.screenshot.png next to the capture file.")] string? outPath = null,
-        [Description("When true, also returns the PNG inline as image content (only if under 4 MB).")] bool inline = false)
+        [Description("Output PNG path. Defaults to <capture>.screenshot.png next to the capture file unless inline is true.")] string? outPath = null,
+        [Description("When true, returns the PNG inline as image content (only if under 4 MB).")] bool inline = false)
     {
         try
         {
@@ -257,10 +276,14 @@ public static class GpuCaptureTools
                     throw new McpException($"Screenshot format {Json.EnumName(info.Format)} is not supported by the PNG encoder ({info.Width}x{info.Height}, {pixels.Length} bytes).");
                 }
                 byte[] encoded = Png.Encode(pixels, (int)info.Width, (int)info.Height, (int)info.RowPitchBytes, info.Format);
-                string target = string.IsNullOrWhiteSpace(outPath)
-                    ? Path.Combine(Path.GetDirectoryName(h.Path) ?? ".", Path.GetFileNameWithoutExtension(h.Path) + ".screenshot.png")
-                    : Path.GetFullPath(outPath);
-                File.WriteAllBytes(target, encoded);
+                string? target = null;
+                if (!string.IsNullOrWhiteSpace(outPath) || !inline)
+                {
+                    target = string.IsNullOrWhiteSpace(outPath)
+                        ? Path.Combine(Path.GetDirectoryName(h.Path) ?? ".", Path.GetFileNameWithoutExtension(h.Path) + ".screenshot.png")
+                        : Path.GetFullPath(outPath);
+                    File.WriteAllBytes(target, encoded);
+                }
                 string result = Json.Serialize(new
                 {
                     path = target,

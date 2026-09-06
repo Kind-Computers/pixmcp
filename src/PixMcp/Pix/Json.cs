@@ -76,4 +76,29 @@ public static class Paging
     public static PageResult<T> Page<T>(IReadOnlyList<T> items, long total, int offset, int limit, object? extra = null)
         => new(total, offset, items.Count,
             offset + (long)items.Count < total ? checked(offset + items.Count) : null, items, extra);
+
+    /// <summary>Counts every (already filtered) item for <c>total</c> and projects only the requested window.</summary>
+    public static PageResult<object> Collect<T>(IEnumerable<T> items, int offset, int limit, Func<T, object> project, object? extra = null)
+    {
+        var page = new List<object>();
+        long total = 0;
+        foreach (T item in items)
+        {
+            if (total >= offset && page.Count < limit)
+            {
+                page.Add(project(item));
+            }
+            total++;
+        }
+        return Page(page, total, offset, limit, extra);
+    }
+
+    /// <summary>An empty page carrying an unavailable marker, so paged tools keep their shape when PIX has no data.</summary>
+    public static PageResult<object> Unavailable(int offset, int limit, string feature, Exception? error, string? fallbackReason = null)
+        => Page(Array.Empty<object>(), 0, offset, limit, new
+        {
+            unavailable = true,
+            feature,
+            reason = error is null ? fallbackReason ?? "PIX returned no data." : PixErrors.Describe(error),
+        });
 }

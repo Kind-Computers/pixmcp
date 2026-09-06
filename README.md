@@ -51,8 +51,10 @@ Typical conversation flow:
 1. `pix_info` – confirms which PIX install loaded and that Developer Mode is on.
 2. `pix_gpu_open` – returns a handle (`gpu-1`), file info, application and queue list.
 3. `pix_gpu_events` – paged, filterable event list (`kind: "draw"`, `nameContains`, `parentIndex`, ...).
-4. `pix_gpu_timing_events` – slowest events by GPU duration (starts analysis automatically).
-5. `pix_gpu_pipeline_state`, `pix_gpu_shader_code`, `pix_gpu_event_resources` – inspect one draw.
+4. `pix_gpu_timing_tree` – GPU time rolled up the marker hierarchy ("which pass is slowest"), then
+   `pix_gpu_timing_events` for the slowest individual draws (both start analysis automatically).
+5. `pix_gpu_pipeline_state`, `pix_gpu_shader_code`, `pix_gpu_event_resources` – inspect one draw
+   (`pix_gpu_event` with `gpuId` maps timing rows or Dr. PIX ranges back to an event).
 6. `pix_gpu_drpix_run` – run Dr. PIX experiments over the frame.
 7. `pix_close` when done.
 
@@ -89,7 +91,7 @@ flags, call `pix_gpu_analysis_stop` first.
 | Session | `pix_info`, `pix_handles`, `pix_close`, `pix_close_all`, `pix_jobs`, `pix_job_status`, `pix_job_wait`, `pix_job_cancel`, `pix_log` |
 | GPU capture | `pix_gpu_open`, `pix_gpu_info`, `pix_gpu_queues`, `pix_gpu_events`, `pix_gpu_event`, `pix_gpu_api_objects`, `pix_gpu_screenshot` |
 | Analysis (replay) | `pix_gpu_analysis_start`, `pix_gpu_analysis_status`, `pix_gpu_analysis_adapters`, `pix_gpu_analysis_stop` |
-| Timing and counters | `pix_gpu_timing_collect`, `pix_gpu_timing_events`, `pix_gpu_counters_list`, `pix_gpu_counters_start`, `pix_gpu_counters_collect`, `pix_gpu_occupancy`, `pix_gpu_hf_counters` |
+| Timing and counters | `pix_gpu_timing_collect`, `pix_gpu_timing_events`, `pix_gpu_timing_tree`, `pix_gpu_counters_list`, `pix_gpu_counters_start`, `pix_gpu_counters_collect`, `pix_gpu_occupancy`, `pix_gpu_hf_counters` |
 | Pipeline and shaders | `pix_gpu_pipeline_state`, `pix_gpu_shader_code` |
 | Resources | `pix_gpu_resources`, `pix_gpu_resource`, `pix_gpu_event_resources` |
 | Dr. PIX | `pix_gpu_drpix_experiments`, `pix_gpu_drpix_run` |
@@ -98,12 +100,22 @@ flags, call `pix_gpu_analysis_stop` first.
 | Capture files | `pix_capture_format`, `pix_capture_upgrade` |
 | DirectX dump files | `pix_dump_open`, `pix_dump_info`, `pix_dump_queues`, `pix_dump_events`, `pix_dump_page_faults`, `pix_dump_breadcrumbs`, `pix_dump_resources`, `pix_dump_gpu_state`, `pix_dump_blobs`, `pix_dump_journal`, `pix_dump_shader_waves` |
 
-Paged enumeration tools take `offset`/`limit` (default 100, max 1000) and return `total` and
-`nextOffset`. Enum values are returned as trimmed names (`GRAPHICS`, `R8G8B8A8_UNORM`).
-Optional hardware features (occupancy, high-frequency counters) return
-`{ "unavailable": true, "reason": ... }` instead of failing.
+Paged enumeration tools take `offset`/`limit` (default 100, max 1000) and return `total`,
+`count`, `items`, `nextOffset` and an optional `extra` object (for example the counter groups of
+`pix_gpu_counters_list` or the DRED data of `pix_dump_page_faults`). When PIX has no data for a
+paged query the page is empty and `extra.unavailable` says why. Enum values are returned as
+trimmed names (`GRAPHICS`, `R8G8B8A8_UNORM`). Optional fields and hardware features (occupancy,
+high-frequency counters, per-view bindings, correlated shaders) return
+`{ "unavailable": true, "feature": ..., "reason": ... }` instead of failing or silently
+disappearing. Every cap (`maxChars`, `maxRows`, `maxEvents`, children/parents/lanes) is stated in
+the parameter description and reported with a `...Truncated` flag when it cuts data.
 
-MCP resources `pix://handles` and `pix://handles/{handle}` mirror the open handle table.
+A tool result larger than 2 MB of JSON is refused with a message naming the paging parameter to
+reduce (`PIXMCP_MAX_RESULT_BYTES` changes the limit); `pix_job_status` is exempt so a large job
+result stays reachable.
+
+MCP resources `pix://handles`, `pix://handles/{handle}`, `pix://jobs` and `pix://jobs/{jobId}`
+mirror the handle and job tables for clients that prefer resources over tool calls.
 
 For large counter queries, call `pix_gpu_counters_start(handle, counterIds, waitSeconds=0)`
 and wait for its job before paging `pix_gpu_counters_collect`. The existing collect tool still
@@ -117,6 +129,11 @@ Use `nodeIndex` to select one command list and `offset` to navigate its operatio
 `bindingLimit` (default 32) to retrieve bindings beyond the initial page. Each view reports
 its binding total and continuation offset. A view index is relative to the resource's views
 or the event's views, respectively.
+
+`pix_gpu_timing_tree` rolls the measured end-of-pipe time of every draw/dispatch up its parent
+markers: each node reports `selfEopNs`, `inclusiveEopNs`, `percentOfQueue`, `timedDescendants`
+and `childCount`, children come most expensive first, and `depth` (max 4) or a child's index as
+`parentIndex` drills down. `pix_gpu_timing_events` remains the flat, sortable per-event view.
 
 Successful JSON tool results include `structuredContent` and advertised output schemas while
 retaining their existing JSON text. Object results have the same fields in both representations;

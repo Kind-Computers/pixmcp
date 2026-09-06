@@ -28,7 +28,7 @@ public static class DumpTools
             return new { handle = handle.Id, path = full, metadata = handle.Metadata, queues = QueueList(handle) };
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_dump_info", ReadOnly = true), Description("Metadata and queue summary for an open dump file.")]
+    [McpServerTool(Name = "pix_dump_info", ReadOnly = true), Description("Metadata (device error, summaries, system info) and the plain queue list for an open dump file; the same payload pix_dump_open returned. Use pix_dump_queues for per-queue hardware status and fault/event counts.")]
     public static Task<string> Info(PixSession session, [Description("Dump handle")] string handle, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_info", () =>
         {
@@ -195,7 +195,7 @@ public static class DumpTools
             hardwareStatusCount = q.GetHardwareStatusCount(),
         }).ToArray();
 
-    [McpServerTool(Name = "pix_dump_queues", ReadOnly = true), Description("Queues in the dump with their status at dump time, hardware status fields (severity/values) and page fault counts.")]
+    [McpServerTool(Name = "pix_dump_queues", ReadOnly = true), Description("Queues in the dump with their status at dump time, hardware status fields (severity/values), page fault counts and root event counts (more detail than the queue list in pix_dump_info). Feed queueIndex to pix_dump_events.")]
     public static Task<string> DumpQueues(PixSession session, [Description("Dump handle")] string handle, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_queues", () =>
         {
@@ -208,20 +208,8 @@ public static class DumpTools
                     hw = PixApiExtensionsPostmortemDump.GetHardwareStatuses(q).Select(s => Reflect.ToObject(s)).ToArray();
                 }
                 catch (Exception ex) { hw = PixErrors.Unavailable("hardwareStatus", ex); }
-                object? faults;
-                try
-                {
-                    IPixCollection? pf = PixApiExtensionsPostmortemDump.GetPageFaults(q);
-                    faults = pf is null ? 0 : (object)pf.GetCount();
-                }
-                catch { faults = null; }
-                object? eventCount;
-                try
-                {
-                    IPixCollection? ev = PixApiExtensionsPostmortemDump.TryGetEvents(q, out _);
-                    eventCount = ev?.GetCount();
-                }
-                catch { eventCount = null; }
+                object? faults = Tools.Try(() => PixApiExtensionsPostmortemDump.GetPageFaults(q)?.GetCount() ?? 0, "pageFaultCount");
+                object? eventCount = Tools.Try(() => PixApiExtensionsPostmortemDump.TryGetEvents(q, out _)?.GetCount(), "rootEventCount");
                 return new
                 {
                     queueIndex = i,
@@ -274,51 +262,49 @@ public static class DumpTools
         object? resources = null;
         if (includeCorrelations)
         {
-            try
+            shaders = Tools.Try(() =>
             {
                 IPixCollection? s = PixApiExtensionsPostmortemDump.TryGetCorrelatedShaders(evt, out _);
-                if (s is not null && s.GetCount() > 0)
-                {
-                    shaders = Interop.Items<IPixShader>(s).Select(sh => ShaderSummary(sh)).ToArray();
-                }
-            }
-            catch { }
-            try
+                return s is null || s.GetCount() == 0 ? null : Interop.Items<IPixShader>(s).Select(sh => ShaderSummary(sh)).ToArray();
+            }, "correlatedShaders");
+            resources = Tools.Try(() =>
             {
                 IPixCollection? r = PixApiExtensionsPostmortemDump.TryGetCorrelatedResources(evt, out _);
-                if (r is not null && r.GetCount() > 0)
-                {
-                    resources = Interop.Items<IPixPostmortemD3D12Resource>(r).Select(res => new { name = Interop.WOrNull(res.GetName()), gpuVirtualAddress = Interop.Hex(res.GetGpuVirtualAddress()), sizeBytes = res.GetSizeBytes() }).ToArray();
-                }
-            }
-            catch { }
+                return r is null || r.GetCount() == 0 ? null : Interop.Items<IPixPostmortemD3D12Resource>(r).Select(res => new { name = Interop.WOrNull(res.GetName()), gpuVirtualAddress = Interop.Hex(res.GetGpuVirtualAddress()), sizeBytes = res.GetSizeBytes() }).ToArray();
+            }, "correlatedResources");
         }
 
         object? children = null;
-        ulong childCount = 0;
+        object? childCount = null;
+        bool childrenTruncated = false;
         try
         {
             IPixCollection? c = PixApiExtensionsPostmortemDump.TryGetChildEvents(evt, out _);
             if (c is not null)
             {
-                childCount = c.GetCount();
-                if (depth < maxDepth && childCount > 0 && budget > 0)
+                ulong count = c.GetCount();
+                childCount = count;
+                if (depth < maxDepth && count > 0 && budget > 0)
                 {
                     var list = new List<object>();
                     foreach (IPixPostmortemEvent child in Interop.Items<IPixPostmortemEvent>(c))
                     {
                         if (budget-- <= 0)
                         {
-                            list.Add(new { truncated = true });
+                            childrenTruncated = true;
                             break;
                         }
                         list.Add(EventDto(child, depth + 1, maxDepth, includeCorrelations, ref budget));
                     }
                     children = list;
                 }
+                else if (count > 0)
+                {
+                    childrenTruncated = true;
+                }
             }
         }
-        catch { }
+        catch (Exception ex) { childCount = PixErrors.Unavailable("children", ex); }
 
         return new
         {
@@ -332,6 +318,7 @@ public static class DumpTools
             correlatedResources = resources,
             childCount,
             children,
+            childrenTruncated = childrenTruncated ? true : (bool?)null,
         };
     }
 
@@ -347,15 +334,15 @@ public static class DumpTools
         return new { id = shader.GetId(), stage = shader.GetStage(), hash, entry = Interop.WOrNull(shader.GetEntry()), target = Interop.WOrNull(shader.GetTarget()) };
     }
 
-    [McpServerTool(Name = "pix_dump_events", ReadOnly = true), Description("Command queue event history from the dump (D3D API calls, PIX markers, custom markers, driver events) as a tree, with completion status (IN_PROGRESS / POSSIBLY_COMPLETED marks work that was running when the GPU hung) and correlated shaders/resources.")]
+    [McpServerTool(Name = "pix_dump_events", ReadOnly = true), Description("Command queue event history from the dump (D3D API calls, PIX markers, custom markers, driver events) as a tree of root events with nested children, with completion status (IN_PROGRESS / POSSIBLY_COMPLETED marks work that was running when the GPU hung) and correlated shaders/resources. Root events are paged with offset/limit; maxEvents bounds the expanded tree (childrenTruncated marks cut nodes, extra.eventBudgetExhausted the page).")]
     public static Task<string> Events(
         PixSession session,
         [Description("Dump handle")] string handle,
         [Description("Queue index from pix_dump_queues.")] int queueIndex,
         [Description("First root event (default 0).")] int offset = 0,
-        [Description("Maximum root events (default 50).")] int limit = 50,
-        [Description("Maximum child depth to expand (default 3).")] int maxDepth = 3,
-        [Description("Maximum total events to expand including children (default 500).")] int maxEvents = 500,
+        [Description("Maximum root events (default 50, max 1000).")] int limit = 50,
+        [Description("Maximum child depth to expand (default 3, max 16).")] int maxDepth = 3,
+        [Description("Maximum total events to expand including children (default 500, max 5000).")] int maxEvents = 500,
         [Description("Include correlated shaders/resources (default true).")] bool includeCorrelations = true,
         [Description("Only include root events with this status: IN_PROGRESS, POSSIBLY_COMPLETED, COMPLETED, NOT_STARTED.")] string? status = null,
         CancellationToken cancellationToken = default)
@@ -371,100 +358,105 @@ public static class DumpTools
             IPixCollection? events = PixApiExtensionsPostmortemDump.TryGetEvents(queues[queueIndex], out Exception ex);
             if (events is null)
             {
-                return new { total = 0, items = Array.Empty<object>(), unavailable = ex is null ? null : PixErrors.Describe(ex) };
+                return Paging.Unavailable(o, l, "events", ex, "The dump has no event history for this queue.");
             }
             PIX_EVENT_STATUS? wanted = string.IsNullOrEmpty(status) ? null : Tools.ParseEnum<PIX_EVENT_STATUS>(status);
 
             int budget = Math.Clamp(maxEvents, 1, 5000);
             var page = new List<object>();
             long total = 0;
+            bool exhausted = false;
             foreach (IPixPostmortemEvent evt in Interop.Items<IPixPostmortemEvent>(events))
             {
                 if (wanted.HasValue && evt.GetStatus() != wanted.Value)
                 {
                     continue;
                 }
-                if (total >= o && page.Count < l && budget > 0)
+                if (total >= o && page.Count < l)
                 {
-                    budget--;
-                    page.Add(EventDto(evt, 0, Math.Clamp(maxDepth, 0, 16), includeCorrelations, ref budget));
+                    if (budget > 0)
+                    {
+                        budget--;
+                        page.Add(EventDto(evt, 0, Math.Clamp(maxDepth, 0, 16), includeCorrelations, ref budget));
+                    }
+                    else
+                    {
+                        exhausted = true;
+                    }
                 }
                 total++;
             }
-            return Paging.Page(page, total, o, l);
+            return Paging.Page(page, total, o, l, exhausted ? new { eventBudgetExhausted = true, maxEvents } : null);
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_dump_page_faults", ReadOnly = true), Description("GPU page faults recorded in the dump: faulting virtual address, type, access, timestamp, queue, and the resource allocation/free events around that address. Also includes DRED page fault data when present.")]
-    public static Task<string> PageFaults(PixSession session, [Description("Dump handle")] string handle, CancellationToken cancellationToken = default)
+    [McpServerTool(Name = "pix_dump_page_faults", ReadOnly = true), Description("GPU page faults recorded in the dump, paged: faulting virtual address, type, access, timestamp, queue, and the resource allocation/free events around that address (each capped by maxResourceEvents). extra.dred carries DRED page fault data when present.")]
+    public static Task<string> PageFaults(
+        PixSession session,
+        [Description("Dump handle")] string handle,
+        [Description("First fault (default 0).")] int offset = 0,
+        [Description("Maximum faults (default 100, max 1000).")] int limit = Paging.DefaultLimit,
+        [Description("Maximum resource events listed per fault (default 50, max 1000).")] int maxResourceEvents = 50,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_page_faults", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
-            var faults = new List<object>();
-            IPixCollection? pf = PixApiExtensionsPostmortemDump.TryGetPageFaults(h.Document, out _);
-            if (pf is not null)
-            {
-                foreach (IPixPostmortemPageFault fault in Interop.Items<IPixPostmortemPageFault>(pf))
-                {
-                    object? queue = null;
-                    try
-                    {
-                        IPixPostmortemQueueInfo? q = PixApiExtensionsPostmortemDump.TryGetQueue(fault, out _);
-                        queue = q is null ? null : new { id = q.GetId(), name = Interop.W(q.GetName()) };
-                    }
-                    catch { }
-                    var resourceEvents = new List<object>();
-                    try
-                    {
-                        IPixCollection? re = PixApiExtensionsPostmortemDump.TryGetResourceEvents(fault, out _);
-                        if (re is not null)
-                        {
-                            foreach (IPixPostmortemResourceEvent e in Interop.Items<IPixPostmortemResourceEvent>(re))
-                            {
-                                object? res = null;
-                                try
-                                {
-                                    IPixPostmortemD3D12Resource? r = PixApiExtensionsPostmortemDump.TryGetResource(e, out _);
-                                    res = r is null ? null : new { name = Interop.WOrNull(r.GetName()), gpuVirtualAddress = Interop.Hex(r.GetGpuVirtualAddress()), sizeBytes = r.GetSizeBytes() };
-                                }
-                                catch { }
-                                resourceEvents.Add(new { type = e.GetType(), timestampNs = e.GetTimestampInNs(), resource = res });
-                            }
-                        }
-                    }
-                    catch { }
-                    faults.Add(new
-                    {
-                        id = fault.GetId(),
-                        gpuVirtualAddress = Interop.Hex(fault.GetGpuVirtualAddress()),
-                        type = fault.GetType(),
-                        accessType = fault.GetAccessType(),
-                        timestampNs = fault.GetTimestampInNs(),
-                        queue,
-                        resourceEvents,
-                    });
-                }
-            }
-
-            object? dred = null;
-            try
+            (int o, int l) = Paging.Normalize(offset, limit);
+            int maxEvents = Math.Clamp(maxResourceEvents, 1, Paging.MaxLimit);
+            object? dred = Tools.Try(() =>
             {
                 DredPageFaultData? data = PixApiExtensionsPostmortemDump.TryGetDredPageFault(h.Document, out _);
-                if (data.HasValue)
+                return !data.HasValue ? null : new
                 {
-                    dred = new
-                    {
-                        pageFaultVA = Interop.Hex(data.Value.PageFaultVA),
-                        existingAllocations = data.Value.ExistingAllocations?.Select(a => new { name = a.ObjectName, type = a.AllocationType }).ToArray(),
-                        freedAllocations = data.Value.FreedAllocations?.Select(a => new { name = a.ObjectName, type = a.AllocationType }).ToArray(),
-                    };
-                }
+                    pageFaultVA = Interop.Hex(data.Value.PageFaultVA),
+                    existingAllocations = data.Value.ExistingAllocations?.Select(a => new { name = a.ObjectName, type = a.AllocationType }).ToArray(),
+                    freedAllocations = data.Value.FreedAllocations?.Select(a => new { name = a.ObjectName, type = a.AllocationType }).ToArray(),
+                };
+            }, "dred");
+            IPixCollection? pf = PixApiExtensionsPostmortemDump.TryGetPageFaults(h.Document, out Exception ex);
+            if (pf is null)
+            {
+                return Paging.Page(Array.Empty<object>(), 0, o, l, new { dred, unavailable = ex is not null, reason = ex is null ? null : PixErrors.Describe(ex) });
             }
-            catch { }
-
-            return new { pageFaults = faults, dred };
+            return Paging.Collect(Interop.Items<IPixPostmortemPageFault>(pf), o, l, fault =>
+            {
+                object? queue = Tools.Try(() =>
+                {
+                    IPixPostmortemQueueInfo? q = PixApiExtensionsPostmortemDump.TryGetQueue(fault, out _);
+                    return q is null ? null : new { id = q.GetId(), name = Interop.W(q.GetName()) };
+                }, "queue");
+                int resourceEventCount = 0;
+                object? resourceEvents = Tools.Try(() =>
+                {
+                    IPixCollection? re = PixApiExtensionsPostmortemDump.TryGetResourceEvents(fault, out _);
+                    if (re is null) return null;
+                    resourceEventCount = (int)Math.Min(re.GetCount(), int.MaxValue);
+                    return Interop.Items<IPixPostmortemResourceEvent>(re).Take(maxEvents).Select(e => new
+                    {
+                        type = e.GetType(),
+                        timestampNs = e.GetTimestampInNs(),
+                        resource = Tools.Try(() =>
+                        {
+                            IPixPostmortemD3D12Resource? r = PixApiExtensionsPostmortemDump.TryGetResource(e, out _);
+                            return r is null ? null : new { name = Interop.WOrNull(r.GetName()), gpuVirtualAddress = Interop.Hex(r.GetGpuVirtualAddress()), sizeBytes = r.GetSizeBytes() };
+                        }, "resource"),
+                    }).ToArray();
+                }, "resourceEvents");
+                return new
+                {
+                    id = fault.GetId(),
+                    gpuVirtualAddress = Interop.Hex(fault.GetGpuVirtualAddress()),
+                    type = fault.GetType(),
+                    accessType = fault.GetAccessType(),
+                    timestampNs = fault.GetTimestampInNs(),
+                    queue,
+                    resourceEventCount,
+                    resourceEvents,
+                    resourceEventsTruncated = resourceEventCount > maxEvents,
+                };
+            }, new { dred });
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_dump_breadcrumbs", ReadOnly = true), Description("DRED auto-breadcrumb nodes from the dump: per command list, the recorded operations and how many completed, plus context strings. Shows where each command list was when the GPU hung.")]
+    [McpServerTool(Name = "pix_dump_breadcrumbs", ReadOnly = true), Description("DRED auto-breadcrumb nodes from the dump: per command list, the recorded operations and how many completed, plus context strings. Shows where each command list was when the GPU hung. Operations are windowed per node (opsOffset/returnedOps/nextOpsOffset, indices absolute): by default around the completion boundary, or from offset when given.")]
     public static Task<string> Breadcrumbs(PixSession session,
         [Description("Dump handle")] string handle,
         [Description("Maximum ops to list per node (default 200, max 5000).")] int maxOps = 200,
@@ -516,13 +508,13 @@ public static class DumpTools
         return (start, take, next < total ? (int)next : null);
     }
 
-    [McpServerTool(Name = "pix_dump_resources", ReadOnly = true), Description("Resources known to the dump: name, GPU virtual address, size, dimensions, attributes, and their lifetime events (create/destroy/map...).")]
+    [McpServerTool(Name = "pix_dump_resources", ReadOnly = true), Description("Resources known to the dump, paged: name, GPU virtual address, size, dimensions, attributes, and optionally their lifetime events (create/destroy/map...). To correlate a fault address use pix_dump_page_faults.")]
     public static Task<string> Resources(
         PixSession session,
         [Description("Dump handle")] string handle,
         [Description("First item (default 0).")] int offset = 0,
-        [Description("Maximum items (default 100).")] int limit = Paging.DefaultLimit,
-        [Description("Only resources whose name contains this text.")] string? nameContains = null,
+        [Description("Maximum items (default 100, max 1000).")] int limit = Paging.DefaultLimit,
+        [Description("Only resources whose name contains this text (case-insensitive).")] string? nameContains = null,
         [Description("Include per-resource lifetime events (default false).")] bool includeEvents = false,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_resources", () =>
@@ -532,47 +524,31 @@ public static class DumpTools
             IPixCollection? resources = PixApiExtensionsPostmortemDump.TryGetResources(h.Document, out Exception ex);
             if (resources is null)
             {
-                return new { total = 0, items = Array.Empty<object>(), unavailable = ex is null ? null : PixErrors.Describe(ex) };
+                return Paging.Unavailable(o, l, "resources", ex, "The dump lists no resources.");
             }
-            var page = new List<object>();
-            long total = 0;
-            foreach (IPixPostmortemD3D12Resource r in Interop.Items<IPixPostmortemD3D12Resource>(resources))
+            IEnumerable<(IPixPostmortemD3D12Resource Resource, string Name)> matching = Interop.Items<IPixPostmortemD3D12Resource>(resources)
+                .Select(r => (Resource: r, Name: Interop.W(r.GetName())))
+                .Where(r => Tools.Contains(r.Name, nameContains));
+            return Paging.Collect(matching, o, l, item =>
             {
-                string name = Interop.W(r.GetName());
-                if (!Tools.Contains(name, nameContains))
+                IPixPostmortemD3D12Resource r = item.Resource;
+                D3D12_RESOURCE_DESC2? desc = PixApiExtensionsPostmortemDump.TryGetDesc(r);
+                return new
                 {
-                    continue;
-                }
-                if (total >= o && page.Count < l)
-                {
-                    D3D12_RESOURCE_DESC2? desc = PixApiExtensionsPostmortemDump.TryGetDesc(r);
-                    object? attributes = null;
-                    try { attributes = PixApiExtensionsPostmortemDump.GetAttributes(r).Select(a => new { name = Interop.W(a.Name), description = Interop.WOrNull(a.Description), value = Interop.Value(a.Value) }).ToArray(); } catch { }
-                    object? events = null;
-                    if (includeEvents)
+                    name = string.IsNullOrEmpty(item.Name) ? null : item.Name,
+                    apiObjectId = Interop.Hex(r.GetApiObjectId()),
+                    gpuVirtualAddress = Interop.Hex(r.GetGpuVirtualAddress()),
+                    sizeBytes = r.GetSizeBytes(),
+                    type = r.GetType(),
+                    desc = desc.HasValue ? ResourceTools.ResourceDesc(desc.Value) : null,
+                    attributes = Tools.Try(() => PixApiExtensionsPostmortemDump.GetAttributes(r).Select(a => new { name = Interop.W(a.Name), description = Interop.WOrNull(a.Description), value = Interop.Value(a.Value) }).ToArray(), "attributes"),
+                    events = !includeEvents ? null : Tools.Try(() =>
                     {
-                        try
-                        {
-                            IPixCollection? ev = PixApiExtensionsPostmortemDump.TryGetEvents(r, out _);
-                            events = ev is null ? null : Interop.Items<IPixPostmortemResourceEvent>(ev).Select(e => new { type = e.GetType(), timestampNs = e.GetTimestampInNs() }).ToArray();
-                        }
-                        catch { }
-                    }
-                    page.Add(new
-                    {
-                        name = string.IsNullOrEmpty(name) ? null : name,
-                        apiObjectId = Interop.Hex(r.GetApiObjectId()),
-                        gpuVirtualAddress = Interop.Hex(r.GetGpuVirtualAddress()),
-                        sizeBytes = r.GetSizeBytes(),
-                        type = r.GetType(),
-                        desc = desc.HasValue ? ResourceTools.ResourceDesc(desc.Value) : null,
-                        attributes,
-                        events,
-                    });
-                }
-                total++;
-            }
-            return Paging.Page(page, total, o, l);
+                        IPixCollection? ev = PixApiExtensionsPostmortemDump.TryGetEvents(r, out _);
+                        return ev is null ? null : Interop.Items<IPixPostmortemResourceEvent>(ev).Select(e => new { type = e.GetType(), timestampNs = e.GetTimestampInNs() }).ToArray();
+                    }, "events"),
+                };
+            });
         }, cancellationToken);
 
     [McpServerTool(Name = "pix_dump_gpu_state", ReadOnly = true), Description("GPU state tables captured at dump time (engine/queue registers, hardware status), as named tables with columns and (nested) rows.")]
@@ -580,7 +556,7 @@ public static class DumpTools
         PixSession session,
         [Description("Dump handle")] string handle,
         [Description("Table index to expand; omit to list tables with row counts only.")] int? tableIndex = null,
-        [Description("Maximum rows to return including nested rows (default 500).")] int maxRows = 500,
+        [Description("Maximum rows to return including nested rows (default 500, max 20000); a { truncated: true } row marks the cut.")] int maxRows = 500,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_gpu_state", () =>
         {
@@ -677,12 +653,13 @@ public static class DumpTools
         return new { id = row.GetId(), name = Interop.W(row.GetName()), description = Interop.WOrNull(row.GetDescription()), values, children };
     }
 
-    [McpServerTool(Name = "pix_dump_blobs", ReadOnly = true), Description("Application-provided blobs embedded in the dump (metadata id and size); optionally returns the bytes of one blob as base64.")]
+    [McpServerTool(Name = "pix_dump_blobs", ReadOnly = true), Description("Application-provided blobs embedded in the dump (metadata id and size). With blobIndex, returns that blob's bytes: written to outPath when given (whole blob), otherwise inline as base64 capped by maxBytes.")]
     public static Task<string> Blobs(
         PixSession session,
         [Description("Dump handle")] string handle,
         [Description("Blob index to read; omit to list only.")] int? blobIndex = null,
-        [Description("Maximum bytes to return (default 65536).")] int maxBytes = 65536,
+        [Description("Maximum bytes to return inline as base64 (default 65536, max 1 MB); larger blobs should go to outPath.")] int maxBytes = 65536,
+        [Description("File to write the selected blob to (whole blob, no size cap); nothing is returned inline then.")] string? outPath = null,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_blobs", () =>
         {
@@ -702,9 +679,18 @@ public static class DumpTools
                 }
                 IPixApplicationBlob blob = list[blobIndex.Value];
                 ulong size = blob.GetSizeBytes();
-                ulong take = Math.Min(size, (ulong)Math.Clamp(maxBytes, 1, 16 * 1024 * 1024));
-                byte[] bytes = PixApiExtensions.GetData(blob, take);
-                data = new { blobIndex, sizeBytes = size, returnedBytes = bytes.Length, base64 = Convert.ToBase64String(bytes) };
+                if (!string.IsNullOrWhiteSpace(outPath))
+                {
+                    string target = Path.GetFullPath(outPath);
+                    File.WriteAllBytes(target, PixApiExtensions.GetData(blob, size));
+                    data = new { blobIndex, sizeBytes = size, path = target };
+                }
+                else
+                {
+                    ulong take = Math.Min(size, (ulong)Math.Clamp(maxBytes, 1, 1024 * 1024));
+                    byte[] bytes = PixApiExtensions.GetData(blob, take);
+                    data = new { blobIndex, sizeBytes = size, returnedBytes = bytes.Length, truncated = (ulong)bytes.Length < size, base64 = Convert.ToBase64String(bytes) };
+                }
             }
             return new
             {
@@ -713,73 +699,70 @@ public static class DumpTools
             };
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_dump_journal", ReadOnly = true), Description("D3D runtime journal entries recorded before the device removal (error codes, thread ids, messages).")]
-    public static Task<string> Journal(PixSession session, [Description("Dump handle")] string handle, [Description("Maximum entries (default 200).")] int limit = 200, CancellationToken cancellationToken = default)
+    [McpServerTool(Name = "pix_dump_journal", ReadOnly = true), Description("D3D runtime journal entries recorded before the device removal (error codes, thread ids, messages), paged with offset/limit.")]
+    public static Task<string> Journal(
+        PixSession session,
+        [Description("Dump handle")] string handle,
+        [Description("First entry (default 0).")] int offset = 0,
+        [Description("Maximum entries (default 200, max 1000).")] int limit = 200,
+        CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_journal", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
+            (int o, int l) = Paging.Normalize(offset, limit);
             IPixCollection? entries = PixApiExtensionsPostmortemDump.TryGetD3DJournalEntries(h.Document, out Exception ex);
             if (entries is null)
             {
-                return new { entries = Array.Empty<object>(), unavailable = ex is null ? null : PixErrors.Describe(ex) };
+                return Paging.Unavailable(o, l, "journal", ex, "The dump contains no D3D journal.");
             }
-            return new
-            {
-                total = entries.GetCount(),
-                entries = Interop.Items<IPixD3DJournalEntry>(entries).Take(Math.Clamp(limit, 1, 5000))
-                    .Select(e => new { code = Interop.Hex(e.GetCode()), threadId = e.GetThreadID(), tickCount = e.GetTickCount(), message = Interop.WOrNull(e.GetErrorMessage()) }).ToArray(),
-            };
+            return Paging.Collect(Interop.Items<IPixD3DJournalEntry>(entries), o, l,
+                e => new { code = Interop.Hex(e.GetCode()), threadId = e.GetThreadID(), tickCount = e.GetTickCount(), message = Interop.WOrNull(e.GetErrorMessage()) });
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_dump_shader_waves", ReadOnly = true), Description("Shader debugging data captured at the hang: in-flight shader waves with stage, status, coordinates, instruction pointer, exceptions hit, offending source locations, and optionally lanes.")]
+    [McpServerTool(Name = "pix_dump_shader_waves", ReadOnly = true), Description("Shader debugging data captured at the hang, paged: in-flight shader waves with stage, status, coordinates, instruction pointer, exceptions hit, offending HLSL locations (first 32), and optionally lanes (first 256).")]
     public static Task<string> ShaderWaves(
         PixSession session,
         [Description("Dump handle")] string handle,
         [Description("First wave (default 0).")] int offset = 0,
-        [Description("Maximum waves (default 50).")] int limit = 50,
-        [Description("Include per-lane status and shader parameters (default false).")] bool includeLanes = false,
+        [Description("Maximum waves (default 50, max 1000).")] int limit = 50,
+        [Description("Include per-lane status and shader parameters (default false; first 256 lanes).")] bool includeLanes = false,
         [Description("Include offending code locations (default true).")] bool includeOffendingLocations = true,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_shader_waves", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
+            (int o, int l) = Paging.Normalize(offset, limit);
             IPixShaderDebuggingData? data = PixApiExtensionsPostmortemDump.TryGetShaderData(h.Document, out Exception ex);
             if (data is null)
             {
-                return new { total = 0, items = Array.Empty<object>(), unavailable = ex is null ? "No shader debugging data in this dump." : PixErrors.Describe(ex) };
+                return Paging.Unavailable(o, l, "shaderDebuggingData", ex, "No shader debugging data in this dump.");
             }
             IPixCollection? waves = PixApiExtensionsShaderDebugging.TryGetWaves(data, out Exception wex);
             if (waves is null)
             {
-                return new { total = 0, items = Array.Empty<object>(), unavailable = wex is null ? null : PixErrors.Describe(wex) };
+                return Paging.Unavailable(o, l, "waves", wex, "The shader debugging data lists no waves.");
             }
-            (int o, int l) = Paging.Normalize(offset, limit);
-            var page = new List<object>();
-            long total = 0;
-            foreach (IPixShaderWave wave in Interop.Items<IPixShaderWave>(waves))
-            {
-                if (total >= o && page.Count < l)
-                {
-                    page.Add(WaveDto(wave, includeLanes, includeOffendingLocations));
-                }
-                total++;
-            }
-            return Paging.Page(page, total, o, l);
+            return Paging.Collect(Interop.Items<IPixShaderWave>(waves), o, l, wave => WaveDto(wave, includeLanes, includeOffendingLocations));
         }, cancellationToken);
 
     private static object WaveDto(IPixShaderWave wave, bool includeLanes, bool includeOffending)
     {
+        const int maxLanes = 256;
+        const int maxOffending = 32;
         object? lanes = null;
-        ulong? laneCount = null;
+        object? laneCount = null;
+        bool lanesTruncated = false;
         try
         {
             IPixCollection? c = PixApiExtensionsShaderDebugging.TryGetLanes(wave, out _);
             if (c is not null)
             {
-                laneCount = c.GetCount();
+                ulong count = c.GetCount();
+                laneCount = count;
                 if (includeLanes)
                 {
-                    lanes = Interop.Items<IPixShaderLane>(c).Take(256).Select(lane => new
+                    lanesTruncated = count > maxLanes;
+                    lanes = Interop.Items<IPixShaderLane>(c).Take(maxLanes).Select(lane => new
                     {
                         index = lane.GetIndex(),
                         status = lane.GetStatus(),
@@ -788,36 +771,33 @@ public static class DumpTools
                 }
             }
         }
-        catch { }
+        catch (Exception ex) { laneCount = PixErrors.Unavailable("lanes", ex); }
 
         object? offending = null;
+        bool offendingTruncated = false;
         if (includeOffending && wave is IPixPostmortemShaderWave pw)
         {
-            try
+            offending = Tools.Try(() =>
             {
                 IPixCollection? locs = PixApiExtensionsPostmortemDump.TryGetOffendingCodeLocations(pw, PIX_SHADER_CODE_TYPE.PIX_SHADER_CODE_TYPE_HLSL, out _);
-                if (locs is not null)
+                if (locs is null) return null;
+                offendingTruncated = locs.GetCount() > maxOffending;
+                return Interop.Items<IPixOffendingShaderCodeLocation>(locs).Take(maxOffending).Select(loc => new
                 {
-                    offending = Interop.Items<IPixOffendingShaderCodeLocation>(locs).Take(32).Select(loc => new
-                    {
-                        codeType = loc.GetCodeType(),
-                        line = loc.GetLineNumber(),
-                        statement = Interop.WOrNull(loc.GetStatement()),
-                        reason = loc.GetReason(),
-                        explanation = Interop.WOrNull(loc.GetExplanation()),
-                    }).ToArray();
-                }
-            }
-            catch { }
+                    codeType = loc.GetCodeType(),
+                    line = loc.GetLineNumber(),
+                    statement = Interop.WOrNull(loc.GetStatement()),
+                    reason = loc.GetReason(),
+                    explanation = Interop.WOrNull(loc.GetExplanation()),
+                }).ToArray();
+            }, "offendingLocations");
         }
 
-        object? ip = null;
-        try
+        object? ip = Tools.Try(() =>
         {
             IPixShaderCodeLocation? loc = PixApiExtensionsShaderDebugging.TryGetInstructionPointerCodeLocation(wave, PIX_SHADER_CODE_TYPE.PIX_SHADER_CODE_TYPE_HLSL, out _);
-            ip = loc is null ? null : new { line = loc.GetLineNumber(), statement = Interop.WOrNull(loc.GetStatement()) };
-        }
-        catch { }
+            return loc is null ? null : new { line = loc.GetLineNumber(), statement = Interop.WOrNull(loc.GetStatement()) };
+        }, "instructionPointerLocation");
 
         return new
         {
@@ -830,7 +810,9 @@ public static class DumpTools
             exceptionsHit = wave.GetExceptionsHit(),
             laneCount,
             lanes,
+            lanesTruncated = lanesTruncated ? true : (bool?)null,
             offendingLocations = offending,
+            offendingLocationsTruncated = offendingTruncated ? true : (bool?)null,
         };
     }
 }

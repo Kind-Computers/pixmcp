@@ -101,49 +101,50 @@ public static class DeviceTools
         return new { handle = h.Id, metrics, adapters, launchedProcessIds = h.ProcessIds, timingCaptureInProgress = h.TimingCaptureInProgress, recentEvents = h.RecentEvents() };
     }
 
-    [McpServerTool(Name = "pix_device_processes", ReadOnly = true), Description("Lists running processes PIX can see, with whether they use D3D12 and any reason they are unsupported for capture.")]
+    [McpServerTool(Name = "pix_device_processes", ReadOnly = true), Description("Pages the running processes PIX can see, with whether they use D3D12 and any reason they are unsupported for capture. Filter with nameContains (exe name) or d3d12Only, then pass processId to pix_device_attach.")]
     public static Task<string> Processes(
         PixSession session,
         [Description("Device handle")] string handle,
-        [Description("Only processes whose exe name contains this text.")] string? nameContains = null,
+        [Description("Only processes whose exe name contains this text (case-insensitive).")] string? nameContains = null,
+        [Description("Only processes PIX reports as using D3D12 (default false).")] bool d3d12Only = false,
+        [Description("First process (default 0).")] int offset = 0,
+        [Description("Maximum processes (default 100, max 1000).")] int limit = Paging.DefaultLimit,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_processes", () =>
         {
             ConnectionHandle h = session.Get<ConnectionHandle>(handle);
+            (int o, int l) = Paging.Normalize(offset, limit);
             IPixGetRunningProcessesResults results = PixApiExtensionsDeviceConnection.GetRunningProcesses<IPixGetRunningProcessesResults>(h.Connection);
-            var list = new List<object>();
-            ulong count = results.GetNumProcesses();
-            for (ulong i = 0; i < count; i++)
+            IEnumerable<IPixProcessInfo> processes = Enumerable.Range(0, (int)Math.Min(results.GetNumProcesses(), int.MaxValue))
+                .Select(i => PixApiExtensionsDeviceConnection.GetProcessInfo<IPixProcessInfo>(results, (ulong)i))
+                .Where(p => Tools.Contains(Interop.W(p.GetExeName()), nameContains))
+                .Where(p => !d3d12Only || !Json.EnumName(p.GetUnsupportedReason()).Contains("NOT_USING_D3D12", StringComparison.Ordinal));
+            return Paging.Collect(processes, o, l, p => new
             {
-                IPixProcessInfo p = PixApiExtensionsDeviceConnection.GetProcessInfo<IPixProcessInfo>(results, i);
-                string exe = Interop.W(p.GetExeName());
-                if (!Tools.Contains(exe, nameContains))
-                {
-                    continue;
-                }
-                list.Add(new
-                {
-                    processId = p.GetProcessId(),
-                    exeName = exe,
-                    friendlyName = Interop.WOrNull(p.GetFriendlyName()),
-                    commandLine = Interop.WOrNull(p.GetExeCmdLineArgs()),
-                    isPackagedApp = (bool)p.IsPackagedApp(),
-                    architecture = p.GetArchitecture(),
-                    unsupportedReason = p.GetUnsupportedReason(),
-                });
-            }
-            return list;
+                processId = p.GetProcessId(),
+                exeName = Interop.W(p.GetExeName()),
+                friendlyName = Interop.WOrNull(p.GetFriendlyName()),
+                commandLine = Interop.WOrNull(p.GetExeCmdLineArgs()),
+                isPackagedApp = (bool)p.IsPackagedApp(),
+                architecture = p.GetArchitecture(),
+                unsupportedReason = p.GetUnsupportedReason(),
+            });
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_device_counters", ReadOnly = true), Description("Lists the system monitor counters (CPU, GPU, memory, ...) PIX can collect on this machine, with units and ranges.")]
+    [McpServerTool(Name = "pix_device_counters", ReadOnly = true), Description("Pages the system monitor counters (CPU, GPU, memory, ...) PIX can collect on this machine, with units and ranges; extra.groups lists the counter groups. Filter with nameContains or group. (These are live system counters; GPU hardware counters of a capture come from pix_gpu_counters_list.)")]
     public static Task<string> Counters(
         PixSession session,
         [Description("Device handle")] string handle,
         [Description("Only visible, non-internal counters (default true).")] bool visibleOnly = true,
+        [Description("Only counters whose display name contains this text (case-insensitive).")] string? nameContains = null,
+        [Description("Only counters in this group (name from extra.groups, case-insensitive).")] string? group = null,
+        [Description("First counter (default 0).")] int offset = 0,
+        [Description("Maximum counters (default 100, max 1000).")] int limit = Paging.DefaultLimit,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_counters", () =>
         {
             ConnectionHandle h = session.Get<ConnectionHandle>(handle);
+            (int o, int l) = Paging.Normalize(offset, limit);
             IPixGetCounterDescriptionsResults results = PixApiExtensionsDeviceConnection.GetCounterDescriptions<IPixGetCounterDescriptionsResults>(h.Connection);
             var groups = new Dictionary<uint, string>();
             ulong groupCount = results.GetNumCounterGroups();
@@ -152,30 +153,25 @@ public static class DeviceTools
                 IPixSystemMonitorCounterGroup g = PixApiExtensionsDeviceConnectionResults.GetCounterGroupDescription<IPixSystemMonitorCounterGroup>(results, i);
                 groups[g.GetCounterGroupId()] = Interop.W(g.GetName());
             }
-            var counters = new List<object>();
-            ulong count = results.GetNumCounters();
-            for (ulong i = 0; i < count; i++)
+            string GroupName(IPixSystemMonitorCounter c) => groups.TryGetValue(c.GetCounterGroupId(), out string? gn) ? gn : c.GetCounterGroupId().ToString();
+            IEnumerable<IPixSystemMonitorCounter> counters = Enumerable.Range(0, (int)Math.Min(results.GetNumCounters(), int.MaxValue))
+                .Select(i => PixApiExtensionsDeviceConnectionResults.GetCounterDescription<IPixSystemMonitorCounter>(results, (ulong)i))
+                .Where(c => !visibleOnly || ((bool)c.GetIsVisible() && !(bool)c.GetIsInternal()))
+                .Where(c => Tools.Contains(Interop.W(c.GetDisplayName()), nameContains))
+                .Where(c => string.IsNullOrEmpty(group) || GroupName(c).Equals(group, StringComparison.OrdinalIgnoreCase));
+            return Paging.Collect(counters, o, l, c => new
             {
-                IPixSystemMonitorCounter c = PixApiExtensionsDeviceConnectionResults.GetCounterDescription<IPixSystemMonitorCounter>(results, i);
-                if (visibleOnly && (!(bool)c.GetIsVisible() || (bool)c.GetIsInternal()))
-                {
-                    continue;
-                }
-                counters.Add(new
-                {
-                    id = c.GetCounterId(),
-                    name = Interop.W(c.GetDisplayName()),
-                    internalName = Interop.WOrNull(c.GetInternalName()),
-                    group = groups.TryGetValue(c.GetCounterGroupId(), out string? gn) ? gn : c.GetCounterGroupId().ToString(),
-                    units = Interop.WOrNull(c.GetUnits()),
-                    description = Interop.WOrNull(c.GetDescription()),
-                    min = c.GetDefinedMin(),
-                    max = c.GetDefinedMax(),
-                    isDefault = (bool)c.GetIsDefault(),
-                    processType = c.GetProcessType(),
-                });
-            }
-            return new { groups = groups.Select(kv => new { id = kv.Key, name = kv.Value }).ToArray(), counters };
+                id = c.GetCounterId(),
+                name = Interop.W(c.GetDisplayName()),
+                internalName = Interop.WOrNull(c.GetInternalName()),
+                group = GroupName(c),
+                units = Interop.WOrNull(c.GetUnits()),
+                description = Interop.WOrNull(c.GetDescription()),
+                min = c.GetDefinedMin(),
+                max = c.GetDefinedMax(),
+                isDefault = (bool)c.GetIsDefault(),
+                processType = c.GetProcessType(),
+            }, new { groups = groups.Select(kv => new { id = kv.Key, name = kv.Value }).ToArray() });
         }, cancellationToken);
 
     [McpServerTool(Name = "pix_device_launch"), Description("Launches a Win32 executable under PIX, by default hooked for GPU capture. Returns the process id. Give the app a few seconds to create its D3D12 device before taking a capture.")]

@@ -26,13 +26,34 @@ internal static class Tools
     public const string ReadyWaitDescription = "Seconds to wait if GPU analysis (or the data this tool needs) still has to be prepared first (default 60; 0 = never wait). " +
                                                "If the wait elapses the result is { pending: true, jobId }: wait for the job with pix_job_wait, then repeat this call unchanged.";
 
+    /// <summary>Upper bound on a serialized tool result (characters); larger results fail with guidance to page or filter. Override with PIXMCP_MAX_RESULT_BYTES.</summary>
+    public static int MaxResultChars { get; } = int.TryParse(Environment.GetEnvironmentVariable("PIXMCP_MAX_RESULT_BYTES"), out int configured) && configured > 0 ? configured : 2 * 1024 * 1024;
+
+    /// <summary>Serializes a tool result, refusing oversized payloads so a client never receives megabytes of JSON it cannot use.</summary>
+    public static string Serialize(object? value, string context)
+    {
+        string json = Json.Serialize(value);
+        if (json.Length > MaxResultChars)
+        {
+            throw new McpException($"{context}: the result is {json.Length:N0} characters, above the {MaxResultChars:N0} limit. Request less at once: use offset/limit, a filter such as nameContains, or a smaller max* argument (PIXMCP_MAX_RESULT_BYTES raises the limit).");
+        }
+        return json;
+    }
+
+    /// <summary>Reads an optional value; a failure becomes an { unavailable, feature, reason } marker instead of a silent null.</summary>
+    public static object? Try<T>(Func<T?> read, string feature)
+    {
+        try { return read(); }
+        catch (Exception ex) { return PixErrors.Unavailable(feature, ex); }
+    }
+
     /// <summary>Runs <paramref name="work"/> on the PIX worker thread and serializes the result; PIX errors become McpExceptions.</summary>
     public static Task<string> Run(PixSession session, string context, Func<object?> work, CancellationToken cancellationToken = default)
-        => PixErrors.Guard(context, async () => Json.Serialize(await session.Run(work, cancellationToken).ConfigureAwait(false)));
+        => PixErrors.Guard(context, async () => Serialize(await session.Run(work, cancellationToken).ConfigureAwait(false), context));
 
     /// <summary>Starts a job and returns its status, waiting inline up to <paramref name="waitSeconds"/>; failures to start become McpExceptions.</summary>
     public static Task<string> RunJob(JobManager jobs, string context, Func<Job> start, double waitSeconds, CancellationToken cancellationToken)
-        => PixErrors.Guard(context, async () => Json.Serialize(await jobs.WaitOrStatus(start(), waitSeconds, cancellationToken).ConfigureAwait(false)));
+        => PixErrors.Guard(context, async () => Serialize(await jobs.WaitOrStatus(start(), waitSeconds, cancellationToken).ConfigureAwait(false), context));
 
     /// <summary>
     /// Runs <paramref name="query"/> on the PIX thread once <paramref name="preparation"/> is satisfied.
@@ -64,7 +85,7 @@ internal static class Tools
             }, cancellationToken).ConfigureAwait(false);
             if (ready)
             {
-                return Json.Serialize(result);
+                return Serialize(result, tool);
             }
 
             Job job = existing is { IsFinished: false }
@@ -87,7 +108,7 @@ internal static class Tools
                 throw new McpException($"{tool}: {preparation.Description} {job.Status.ToString().ToLowerInvariant()} ({job.Id}): {job.Error ?? "no details"}");
             }
 
-            return Json.Serialize(await session.Run(() =>
+            return Serialize(await session.Run(() =>
             {
                 T h = session.Get<T>(handle);
                 if (!preparation.IsReady(h))
@@ -95,7 +116,7 @@ internal static class Tools
                     throw new McpException($"{tool}: {preparation.Description} finished but the data is no longer available (analysis was stopped or the handle changed). Retry the call.");
                 }
                 return query(h);
-            }, cancellationToken).ConfigureAwait(false));
+            }, cancellationToken).ConfigureAwait(false), tool);
         });
 
     /// <summary>Starts a preparation job for a handle and registers it so other callers can join it.</summary>

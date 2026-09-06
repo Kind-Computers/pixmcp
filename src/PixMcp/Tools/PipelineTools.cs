@@ -97,18 +97,17 @@ public static class PipelineTools
                         try
                         {
                             IPixShaderTable table = PixApiExtensionsGpuCaptureResources.GetShaderTable(rt, stage);
+                            const uint maxRecords = 64;
                             uint recordCount = table.GetRecordCount();
                             var records = new List<object>();
-                            for (uint i = 0; i < Math.Min(recordCount, 64u); i++)
+                            for (uint i = 0; i < Math.Min(recordCount, maxRecords); i++)
                             {
                                 IPixShaderRecord rec = PixApiExtensionsGpuCaptureResources.GetShaderRecord(table, i);
-                                string? localRs = null;
-                                try { localRs = Interop.WOrNull(PixApiExtensionsGpuCaptureResources.GetLocalRootSignature(rec)?.GetName() ?? default); } catch { }
+                                object? localRs = Tools.Try(() => Interop.WOrNull(PixApiExtensionsGpuCaptureResources.GetLocalRootSignature(rec)?.GetName() ?? default), "localRootSignature");
                                 records.Add(new { index = i, exportName = Interop.W(rec.GetExportName()), localRootSignature = localRs });
                             }
-                            string? resourceName = null;
-                            try { resourceName = Interop.WOrNull(PixApiExtensionsGpuCaptureResources.GetResource(table)?.GetName() ?? default); } catch { }
-                            tables.Add(new { stage, recordCount, records, resource = resourceName });
+                            object? resourceName = Tools.Try(() => Interop.WOrNull(PixApiExtensionsGpuCaptureResources.GetResource(table)?.GetName() ?? default), "resource");
+                            tables.Add(new { stage, recordCount, records, recordsTruncated = recordCount > maxRecords, resource = resourceName });
                         }
                         catch (Exception ex) { tables.Add(new { stage, unavailable = true, reason = PixErrors.Describe(ex) }); }
                     }

@@ -13,13 +13,13 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class ResourceTools
 {
-    [McpServerTool(Name = "pix_gpu_resources", ReadOnly = true), Description("Lists the D3D12 resources in a GPU capture (buffers and textures) with dimensions and formats. No GPU analysis needed.")]
+    [McpServerTool(Name = "pix_gpu_resources", ReadOnly = true), Description("Lists the D3D12 resources in a GPU capture (buffers and textures) with dimensions and formats, paged and filterable. No GPU analysis needed. Use pix_gpu_resource for one resource's full details and views, pix_gpu_event_resources for what a draw binds.")]
     public static Task<string> Resources(
         PixSession session,
         [Description("GPU capture handle")] string handle,
         [Description("First item (default 0).")] int offset = 0,
-        [Description("Maximum items (default 100).")] int limit = Paging.DefaultLimit,
-        [Description("Only resources whose name contains this text.")] string? nameContains = null,
+        [Description("Maximum items (default 100, max 1000).")] int limit = Paging.DefaultLimit,
+        [Description("Only resources whose name contains this text (case-insensitive).")] string? nameContains = null,
         [Description("Filter by allocation type: COMMITTED, PLACED, RESERVED.")] string? type = null,
         [Description("Filter by dimension: BUFFER, TEXTURE1D, TEXTURE2D, TEXTURE3D.")] string? dimension = null,
         CancellationToken cancellationToken = default)
@@ -163,11 +163,11 @@ public static class ResourceTools
         object? heap = null;
         if (includeDesc)
         {
-            try { desc = ResourceDesc(PixApiExtensionsGpuCaptureResources.GetDesc(resource)); } catch (Exception ex) { desc = PixErrors.Unavailable("desc", ex); }
-            try { clearValue = Reflect.ToObject(PixApiExtensionsGpuCaptureResources.GetClearValue(resource)); } catch { }
-            try { initialState = PixApiExtensionsGpuCaptureResources.GetInitialState(resource); } catch { }
-            try { initialLayout = PixApiExtensionsGpuCaptureResources.GetInitialLayout(resource); } catch { }
-            try { castable = PixApiExtensionsGpuCaptureResources.GetCastableFormats(resource); } catch { }
+            desc = Tools.Try(() => ResourceDesc(PixApiExtensionsGpuCaptureResources.GetDesc(resource)), "desc");
+            clearValue = Tools.Try(() => Reflect.ToObject(PixApiExtensionsGpuCaptureResources.GetClearValue(resource)), "clearValue");
+            initialState = Tools.Try(() => PixApiExtensionsGpuCaptureResources.GetInitialState(resource), "initialState");
+            initialLayout = Tools.Try(() => PixApiExtensionsGpuCaptureResources.GetInitialLayout(resource), "initialLayout");
+            castable = Tools.Try(() => PixApiExtensionsGpuCaptureResources.GetCastableFormats(resource), "castableFormats");
             try
             {
                 if (resource is IPixCommittedD3D12Resource committed)
@@ -236,7 +236,8 @@ public static class ResourceTools
     internal static object ViewDto(IPixResourceViews views, uint index, bool includeResource, int bindingOffset = 0, int bindingLimit = 32)
     {
         PIX_RESOURCE_VIEW_TYPE viewType = PIX_RESOURCE_VIEW_TYPE.PIX_RESOURCE_NONE;
-        try { _IPixResourceViews_Extensions.GetType(views, index, ref viewType); } catch { }
+        string? viewTypeError = null;
+        try { _IPixResourceViews_Extensions.GetType(views, index, ref viewType); } catch (Exception ex) { viewTypeError = PixErrors.Describe(ex); }
 
         object? desc = null;
         ulong? offset = null;
@@ -338,6 +339,7 @@ public static class ResourceTools
 
         if (includeResource)
         {
+            // Root constants, samplers and similar views have no backing resource; PIX signals that by failing the query.
             try
             {
                 var d3dView = PixApiExtensionsGpuCaptureResources.GetResourceView<IPixD3D12ResourceView>(views, index);
@@ -367,9 +369,9 @@ public static class ResourceTools
             nextBindingOffset = page.NextOffset;
             bindingsTruncated = page.Items.Count < bindingCount.Value;
         }
-        catch { }
+        catch (Exception ex) { bindings = PixErrors.Unavailable("bindings", ex); }
 
-        return new { index, type = viewType, desc, bufferLocationOffset = offset, resource, bindings,
+        return new { index, type = viewType, typeError = viewTypeError, desc, bufferLocationOffset = offset, resource, bindings,
             bindingCount, bindingOffset = bindingCount.HasValue ? (int?)bo : null, bindingCountReturned, nextBindingOffset, bindingsTruncated };
     }
 

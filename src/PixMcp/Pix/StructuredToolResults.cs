@@ -73,13 +73,13 @@ internal static class StructuredToolResults
             or "pix_device_timing_capture_stop" or "pix_capture_upgrade" or "pix_job_status" or "pix_job_wait" or "pix_job_cancel" => JobSchema,
         "pix_jobs" => JobsSchema,
         "pix_gpu_events" => EventPageSchema,
-        "pix_gpu_api_objects" or "pix_gpu_resources" => PageSchema,
-        "pix_gpu_timing_events" or "pix_gpu_counters_collect" => PageOrPendingSchema,
-        "pix_gpu_pipeline_state" or "pix_gpu_shader_code" or "pix_gpu_event_resources" or "pix_gpu_counters_list"
+        "pix_gpu_api_objects" or "pix_gpu_resources" or "pix_device_processes" or "pix_device_counters"
+            or "pix_dump_events" or "pix_dump_resources" or "pix_dump_shader_waves" or "pix_dump_journal" or "pix_dump_page_faults" => PageSchema,
+        "pix_gpu_timing_events" or "pix_gpu_counters_collect" or "pix_gpu_counters_list" => PageOrPendingSchema,
+        "pix_gpu_pipeline_state" or "pix_gpu_shader_code" or "pix_gpu_event_resources" or "pix_gpu_timing_tree"
             or "pix_gpu_occupancy" or "pix_gpu_hf_counters" => ObjectOrPendingSchema,
         "pix_gpu_drpix_experiments" => ArrayOrPendingSchema,
-        "pix_handles" or "pix_close_all" or "pix_log" or "pix_gpu_queues" or "pix_dump_queues"
-            or "pix_device_processes" => ArraySchema,
+        "pix_handles" or "pix_close_all" or "pix_log" or "pix_gpu_queues" or "pix_dump_queues" => ArraySchema,
         _ => ObjectSchema,
     };
 

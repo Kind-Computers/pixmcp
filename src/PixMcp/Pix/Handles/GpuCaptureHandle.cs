@@ -93,6 +93,7 @@ public sealed class GpuCaptureHandle : PixHandle
     // Caches of expensive results
     public IPixGpuCaptureTiming? Timing { get; set; }
     public Dictionary<int, EventTimingRow[]> TimingRowsByQueue { get; internal set; } = new();
+    public Dictionary<int, TimingTreeNode[]> TimingTreeByQueue { get; } = new();
     public IPixGpuCaptureCounters? Counters { get; set; }
     public List<CounterInfo>? CounterList { get; set; }
     public Dictionary<string, IPixGpuCaptureCounterData> CollectedCounters { get; } = new();
@@ -184,6 +185,19 @@ public sealed class GpuCaptureHandle : PixHandle
             }
         }
         return null;
+    }
+
+    /// <summary>Per-event inclusive GPU time for a queue (needs timing rows); cached until analysis stops.</summary>
+    public TimingTreeNode[] TimingTreeNodes(int queueIndex)
+    {
+        QueueEntry queue = Queue(queueIndex);
+        if (!TimingTreeByQueue.TryGetValue(queue.Index, out TimingTreeNode[]? nodes))
+        {
+            EventTimingRow[] rows = TimingRowsByQueue.TryGetValue(queue.Index, out EventTimingRow[]? collected) ? collected : Array.Empty<EventTimingRow>();
+            nodes = TimingTree.Build(AllEvents(queue.Index), rows);
+            TimingTreeByQueue[queue.Index] = nodes;
+        }
+        return nodes;
     }
 
     public IPixGpuCaptureAnalysis GetAnalysis() => Analysis ??= Document.GetAnalysis();
@@ -315,6 +329,7 @@ public sealed class GpuCaptureHandle : PixHandle
         Adapters = null;
         Timing = null;
         TimingRowsByQueue.Clear();
+        TimingTreeByQueue.Clear();
         Counters = null;
         CounterList = null;
         CollectedCounters.Clear();

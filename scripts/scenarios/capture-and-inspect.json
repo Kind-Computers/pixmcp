@@ -13,8 +13,8 @@
  ["pix_gpu_shader_code", {"handle": "$pix_device_take_gpu_capture.result.gpuCapture.handle", "queueIndex": "$pix_gpu_events.items.0.queueIndex", "eventIndex": "$pix_gpu_events.items.0.index", "shaderIndex": 0, "maxChars": 2000}],
  ["pix_gpu_event_resources", {"handle": "$pix_device_take_gpu_capture.result.gpuCapture.handle", "queueIndex": "$pix_gpu_events.items.0.queueIndex", "eventIndex": "$pix_gpu_events.items.0.index"}],
  ["pix_gpu_counters_list", {"handle": "$pix_device_take_gpu_capture.result.gpuCapture.handle"}],
- ["pix_gpu_counters_start", {"handle": "$pix_device_take_gpu_capture.result.gpuCapture.handle", "counterIds": ["$pix_gpu_counters_list.counters.0.id"], "waitSeconds": 300}, {"status": "succeeded"}],
- ["pix_gpu_counters_collect", {"handle": "$pix_device_take_gpu_capture.result.gpuCapture.handle", "counterIds": ["$pix_gpu_counters_list.counters.0.id"], "limit": 5}],
+ ["pix_gpu_counters_start", {"handle": "$pix_device_take_gpu_capture.result.gpuCapture.handle", "counterIds": ["$pix_gpu_counters_list.items.0.id"], "waitSeconds": 300}, {"status": "succeeded"}],
+ ["pix_gpu_counters_collect", {"handle": "$pix_device_take_gpu_capture.result.gpuCapture.handle", "counterIds": ["$pix_gpu_counters_list.items.0.id"], "limit": 5}],
  ["pix_gpu_drpix_experiments", {"handle": "$pix_device_take_gpu_capture.result.gpuCapture.handle"}],
  ["pix_gpu_drpix_run", {"handle": "$pix_device_take_gpu_capture.result.gpuCapture.handle", "experiments": ["1x1 Viewport"], "waitSeconds": 300}, {"status": "succeeded"}],
  ["pix_close_all", {}]

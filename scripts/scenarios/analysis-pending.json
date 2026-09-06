@@ -11,8 +11,10 @@
  ["pix_job_wait", {"jobId": "$last.jobId", "timeoutSeconds": 300}, {"status": "succeeded"}],
  ["pix_gpu_timing_events", {"handle": "$pix_gpu_open.handle", "kind": "draw", "limit": 3}, {"total": 3}],
  ["pix_gpu_timing_collect", {"handle": "$pix_gpu_open.handle", "waitSeconds": 60}, {"status": "succeeded"}],
+ ["pix_gpu_timing_tree", {"handle": "$pix_gpu_open.handle", "queueIndex": 0, "depth": 2, "limit": 5}, {"queueIndex": 0}],
+ ["pix_gpu_event", {"handle": "$pix_gpu_open.handle", "gpuId": "$pix_gpu_events.items.0.gpuId"}, {"event.index": "$pix_gpu_events.items.0.index"}],
  ["pix_gpu_counters_list", {"handle": "$pix_gpu_open.handle"}],
- ["pix_gpu_counters_collect", {"handle": "$pix_gpu_open.handle", "counterIds": ["$pix_gpu_counters_list.counters.0.id"], "limit": 3, "waitSeconds": 120}, {"offset": 0}],
+ ["pix_gpu_counters_collect", {"handle": "$pix_gpu_open.handle", "counterIds": ["$pix_gpu_counters_list.items.0.id"], "limit": 3, "waitSeconds": 120}, {"offset": 0}],
  ["pix_jobs", {}],
  ["pix_close_all", {}]
 ]
