@@ -9,6 +9,8 @@ Usage: python scripts/smoke.py [--max=6000] [--timeout=660] <server exe> <tool> 
  - RPC, tool, failed/cancelled jobs, missing references, and assertion errors exit nonzero.
 """
 import argparse
+import base64
+import binascii
 from collections import deque
 import json
 import math
@@ -33,6 +35,7 @@ class Client:
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1)
         self.next_id = 1
+        self.last_response_bytes = 0
         self.stderr_lines = deque(maxlen=200)
         self._stdout = queue.Queue()
         self._closed = False
@@ -95,6 +98,7 @@ class Client:
                     raise SmokeError(f"{method}: RPC error: {json.dumps(data['error'])}")
                 if "result" not in data:
                     raise SmokeError(f"{method}: response has neither result nor error")
+                self.last_response_bytes = len(line.encode("utf-8"))
                 return data
             print("<<", json.dumps(data)[:300], file=sys.stderr)
 
@@ -113,6 +117,15 @@ class Client:
                     out.append(json.loads(content["text"]))
                 except json.JSONDecodeError:
                     out.append(content["text"])
+            elif content.get("type") == "image":
+                data = content.get("data")
+                if not isinstance(data, str):
+                    raise SmokeError(f"{tool}: image content is missing base64 data")
+                try:
+                    decoded = base64.b64decode(data, validate=True)
+                except (ValueError, binascii.Error) as error:
+                    raise SmokeError(f"{tool}: image content is not valid base64") from error
+                out.append({"type": "image", "mimeType": content.get("mimeType"), "bytes": len(decoded)})
             else:
                 out.append({"type": content.get("type"), "mimeType": content.get("mimeType"),
                             "bytes": len(content.get("data", ""))})

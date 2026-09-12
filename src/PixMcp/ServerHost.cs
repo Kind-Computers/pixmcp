@@ -46,13 +46,29 @@ internal static class ServerHost
                 o.ServerInstructions =
                     "PIX on Windows MCP server. Open a .wpix GPU capture with pix_gpu_open (returns a handle), " +
                     "a timing capture with pix_timing_open, or a DirectX dump (.dxdmp_preview) with pix_dump_open. " +
-                    "Enumeration tools are paged (offset/limit). GPU analysis tools (timing, counters, pipeline " +
+                    "Start with pix_gpu_overview, then pass eventRef to pix_gpu_inspect_event. " +
+                    "Follow resourceRef with pix_gpu_resource_uses and shaderRef with pix_gpu_shader_code or pix_gpu_shader_search. " +
+                    "Use pix_gpu_shaders and pix_gpu_shader_uses for shader inventory and reverse navigation. " +
+                    "Use pix_gpu_compare for baseline/candidate differences, then pix_gpu_compare_changes to filter its saved fullResultRef without replay. " +
+                    "Use pix_dump_triage for crash evidence. " +
+                    "Enumeration tools are paged (offset/limit, default 25). GPU analysis tools (timing, counters, pipeline " +
                     "state, resources, Dr. PIX) replay the capture on the local GPU. They start analysis " +
                     "automatically as a background job and wait up to waitSeconds for it; if it is still running " +
                     "they return { pending: true, jobId }: call pix_job_wait with that jobId, then repeat the call. " +
-                    "Long operations return a jobId: poll pix_job_status or block with pix_job_wait. All PIX work runs " +
-                    "on one thread, so calls queue behind a running job (pix_info shows worker.busy). " +
+                    "Long operations return a jobId: poll pix_job_status or block with pix_job_wait, then read resultRef with pix_result_read. " +
+                    "Large results also return resultRef; use JSON pointers and offsets to retrieve every nested value, or pix_result_export to save JSON. " +
+                    "Result snapshots use bounded memory and temporary disk; close, pruning, or storage pressure can expire them. " +
+                    "Use nextCalls for exact recovery and continuation arguments. All PIX work runs " +
+                    "on one thread. Query waitSeconds includes queue admission; worker_busy returns recovery calls if admission times out. " +
+                    "pix_info shows the active operation and storage usage. Queued cancellation is immediate; running native cancellation is best effort. " +
                     "Use pix_gpu_counters_start to collect counters in the background before paging pix_gpu_counters_collect. " +
+                    "Timing describes GPU replay; nested marker sums and replay queue spans are not application frame latency. " +
+                    "Recorded timing captures use pix_timing_overview, pix_timing_events, pix_timing_counters_list/read, " +
+                    "pix_timing_hotspots and pix_timing_calltree without GPU replay. Times are nanoseconds with exclusive interval ends. " +
+                    "CPU samples are statistical counts, not exact CPU time; inspect stack/symbol coverage and explicitly resolve symbols when needed. " +
+                    "pix_gpu_preview uses pixtool and requires all connected analyses to be stopped first. " +
+                    "pix_gpu_preview_image retrieves preview or screenshot artifacts with optional crop/maxDimension; byte retrieval preserves originals. " +
+                    "Live GPU capture waits for target readiness (default 30 seconds) with optional warmup (default zero). " +
                     "Cancellation is best effort; cancellationRequested does not mean an operation was interrupted. " +
                     "Call pix_close when done with a handle.";
             })

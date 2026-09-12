@@ -1,4 +1,7 @@
 using ModelContextProtocol;
+using System.Text;
+using System.Text.Json;
+using System.Diagnostics;
 using PixMcp.Pix;
 using PixMcp.Pix.Handles;
 
@@ -20,24 +23,35 @@ internal sealed record Preparation<T>(string Key, string Kind, string Descriptio
 internal static class Tools
 {
     /// <summary>Default inline wait for tools that may first have to start analysis or collect data.</summary>
-    public const double DefaultReadyWaitSeconds = 60;
+    public const double DefaultReadyWaitSeconds = 2;
 
     public const string WaitSecondsDescription = "Seconds to wait inline for the job to finish before returning (default 0 = return the job immediately; poll pix_job_status or block with pix_job_wait).";
-    public const string ReadyWaitDescription = "Seconds to wait if GPU analysis (or the data this tool needs) still has to be prepared first (default 60; 0 = never wait). " +
-                                               "If the wait elapses the result is { pending: true, jobId }: wait for the job with pix_job_wait, then repeat this call unchanged.";
+    public const string ReadyWaitDescription = "Seconds to wait for worker admission and prerequisite preparation (default 2; 0 admits only an idle worker). " +
+        "Preparation still running returns pending/jobId; an occupied worker returns retryable worker_busy. Follow nextCalls. Once a native query starts its execution time is outside this budget.";
 
-    /// <summary>Upper bound on a serialized tool result (characters); larger results fail with guidance to page or filter. Override with PIXMCP_MAX_RESULT_BYTES.</summary>
-    public static int MaxResultChars { get; } = int.TryParse(Environment.GetEnvironmentVariable("PIXMCP_MAX_RESULT_BYTES"), out int configured) && configured > 0 ? configured : 2 * 1024 * 1024;
+    /// <summary>Hard upper bound on UTF-8 JSON bytes. Normal responses target 32 KiB; snapshots preserve the complete result.</summary>
+    public static int MaxResultBytes { get; } = int.TryParse(Environment.GetEnvironmentVariable("PIXMCP_MAX_RESULT_BYTES"), out int configured) && configured > 0 ? configured : 2 * 1024 * 1024;
 
-    /// <summary>Serializes a tool result, refusing oversized payloads so a client never receives megabytes of JSON it cannot use.</summary>
-    public static string Serialize(object? value, string context)
+    /// <summary>Serializes a tool result, preserving large payloads in a managed snapshot when a session is available.</summary>
+    public static string Serialize(object? value, string context, PixSession? session = null, string? owner = null)
     {
         string json = Json.Serialize(value);
-        if (json.Length > MaxResultChars)
+        int bytes = Encoding.UTF8.GetByteCount(json);
+        if (session is not null && bytes > Math.Min(ResultStore.TargetBytes, MaxResultBytes))
         {
-            throw new McpException($"{context}: the result is {json.Length:N0} characters, above the {MaxResultChars:N0} limit. Request less at once: use offset/limit, a filter such as nameContains, or a smaller max* argument (PIXMCP_MAX_RESULT_BYTES raises the limit).");
+            using JsonDocument doc = JsonDocument.Parse(json);
+            string resultRef = session.Results.StoreElement(doc.RootElement, owner is null ? StructuredToolResults.CurrentOwners() : [owner], operation: context);
+            json = Json.Serialize(new DeferredResultDto(true, resultRef, bytes, [ResultStore.ReadCall(resultRef)]));
         }
+        EnsureByteBudget(json, context);
         return json;
+    }
+
+    internal static void EnsureByteBudget(string json, string context)
+    {
+        int bytes = Encoding.UTF8.GetByteCount(json);
+        if (bytes > MaxResultBytes)
+            throw new PixToolException("result_too_large", $"{context}: response is {bytes:N0} UTF-8 bytes, above PIXMCP_MAX_RESULT_BYTES={MaxResultBytes:N0}. Request a smaller window.");
     }
 
     /// <summary>Reads an optional value; a failure becomes an { unavailable, feature, reason } marker instead of a silent null.</summary>
@@ -49,11 +63,17 @@ internal static class Tools
 
     /// <summary>Runs <paramref name="work"/> on the PIX worker thread and serializes the result; PIX errors become McpExceptions.</summary>
     public static Task<string> Run(PixSession session, string context, Func<object?> work, CancellationToken cancellationToken = default)
-        => PixErrors.Guard(context, async () => Serialize(await session.Run(work, cancellationToken).ConfigureAwait(false), context));
+        => PixErrors.Guard(context, async () => Serialize(await session.Run(work, cancellationToken, context).ConfigureAwait(false), context, session));
 
     /// <summary>Starts a job and returns its status, waiting inline up to <paramref name="waitSeconds"/>; failures to start become McpExceptions.</summary>
     public static Task<string> RunJob(JobManager jobs, string context, Func<Job> start, double waitSeconds, CancellationToken cancellationToken)
-        => PixErrors.Guard(context, async () => Serialize(await jobs.WaitOrStatus(start(), waitSeconds, cancellationToken).ConfigureAwait(false), context));
+        => PixErrors.Guard(context, async () =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!double.IsFinite(waitSeconds) || waitSeconds is < 0 or > 3600)
+                throw new PixToolException("invalid_arguments", "waitSeconds must be finite and between 0 and 3600.");
+            return Serialize(await jobs.WaitOrStatus(start(), waitSeconds, cancellationToken).ConfigureAwait(false), context);
+        });
 
     /// <summary>
     /// Runs <paramref name="query"/> on the PIX thread once <paramref name="preparation"/> is satisfied.
@@ -73,19 +93,45 @@ internal static class Tools
         CancellationToken cancellationToken) where T : PixHandle
         => PixErrors.Guard(tool, async () =>
         {
-            (bool ready, object? result, Job? existing) = await session.Run<(bool, object?, Job?)>(() =>
+            if (!double.IsFinite(waitSeconds) || waitSeconds is < 0 or > 3600)
+                throw new PixToolException("invalid_arguments", "waitSeconds must be finite and between 0 and 3600.");
+            long started = Stopwatch.GetTimestamp();
+            TimeSpan Remaining() => TimeSpan.FromSeconds(Math.Max(0, waitSeconds - Stopwatch.GetElapsedTime(started).TotalSeconds));
+            async Task<TResult> Admit<TResult>(Func<TResult> work)
             {
-                T h = session.Get<T>(handle);
-                if (preparation.IsReady(h))
+                try { return await session.Worker.RunWithAdmission(work, Remaining(), cancellationToken, tool).ConfigureAwait(false); }
+                catch (PixToolException ex) when (ex.Detail.Code == "worker_busy")
                 {
-                    return (true, query(h), null);
+                    var next = new List<ToolCallDto>();
+                    if (jobs.Running is Job active) next.Add(new("pix_job_wait", new { jobId = active.Id, timeoutSeconds = 2 }));
+                    next.Add(new(tool, StructuredToolResults.CurrentArguments() ?? new { handle }));
+                    WorkerSnapshot worker = session.Worker.Snapshot();
+                    throw new PixToolException(ex.Detail with
+                    {
+                        Message = worker.Operation is null ? ex.Detail.Message
+                            : $"The PIX worker is running '{worker.Operation}'. Retry when it finishes.",
+                        NextCalls = next,
+                    });
                 }
-                h.PreparationJobs.TryGetValue(preparation.Key, out Job? running);
-                return (false, null, running);
-            }, cancellationToken).ConfigureAwait(false);
+            }
+            // Joining a running preparation must not queue a readiness probe behind that very replay.
+            T current = session.Get<T>(handle);
+            current.PreparationJobs.TryGetValue(preparation.Key, out Job? existing);
+            bool ready = false;
+            object? result = null;
+            if (existing is not { IsFinished: false })
+            {
+                (ready, result, existing) = await Admit<(bool, object?, Job?)>(() =>
+                {
+                    T h = session.Get<T>(handle);
+                    if (preparation.IsReady(h)) return (true, query(h), null);
+                    h.PreparationJobs.TryGetValue(preparation.Key, out Job? running);
+                    return (false, null, running);
+                }).ConfigureAwait(false);
+            }
             if (ready)
             {
-                return Serialize(result, tool);
+                return Serialize(result, tool, session, handle);
             }
 
             Job job = existing is { IsFinished: false }
@@ -94,21 +140,24 @@ internal static class Tools
 
             if (waitSeconds > 0 && !job.IsFinished)
             {
-                try { await job.WaitAsync(TimeSpan.FromSeconds(Math.Clamp(waitSeconds, 0, 3600)), cancellationToken).ConfigureAwait(false); }
+                try { await job.WaitAsync(Remaining(), cancellationToken).ConfigureAwait(false); }
                 catch (TimeoutException) { }
             }
             if (!job.IsFinished)
             {
                 return Json.Serialize(new PendingDto(true, job.Id, tool,
                     $"{preparation.Description} is still running as {job.Id}. Wait for it with pix_job_wait, then call {tool} again with the same arguments.",
-                    job.ToDto(includeResult: false)));
+                    job.ToDto(),
+                    [new("pix_job_wait", new { jobId = job.Id, timeoutSeconds = 2 }),
+                     new(tool, StructuredToolResults.CurrentArguments() ?? new { handle })]));
             }
             if (job.Status != JobStatus.Succeeded)
             {
-                throw new McpException($"{tool}: {preparation.Description} {job.Status.ToString().ToLowerInvariant()} ({job.Id}): {job.Error ?? "no details"}");
+                ErrorDto detail = job.ErrorDetail ?? new("preparation_failed", job.Error ?? "No details", null, false, []);
+                throw new PixToolException(detail with { Message = $"{tool}: {preparation.Description} {job.Status.ToString().ToLowerInvariant()} ({job.Id}): {detail.Message}" });
             }
 
-            return Serialize(await session.Run(() =>
+            return Serialize(await Admit(() =>
             {
                 T h = session.Get<T>(handle);
                 if (!preparation.IsReady(h))
@@ -116,19 +165,24 @@ internal static class Tools
                     throw new McpException($"{tool}: {preparation.Description} finished but the data is no longer available (analysis was stopped or the handle changed). Retry the call.");
                 }
                 return query(h);
-            }, cancellationToken).ConfigureAwait(false), tool);
+            }).ConfigureAwait(false), tool, session, handle);
         });
 
     /// <summary>Starts a preparation job for a handle and registers it so other callers can join it.</summary>
     public static Job StartPreparation<T>(PixSession session, JobManager jobs, string handle, Preparation<T> preparation) where T : PixHandle
     {
-        Job job = jobs.StartForHandle<T>(preparation.Kind, preparation.Description, handle, (j, h) =>
+        T current = session.Get<T>(handle);
+        lock (current.PreparationJobs)
         {
-            preparation.Prepare(h, j);
-            return new { handle = h.Id, prepared = preparation.Key };
-        });
-        RegisterPreparation(session, handle, preparation.Key, job);
-        return job;
+            if (current.PreparationJobs.TryGetValue(preparation.Key, out Job? running) && !running.IsFinished) return running;
+            Job job = jobs.StartForHandle<T>(preparation.Kind, preparation.Description, handle, (j, h) =>
+            {
+                preparation.Prepare(h, j);
+                return new { handle = h.Id, prepared = preparation.Key };
+            });
+            current.PreparationJobs[preparation.Key] = job;
+            return job;
+        }
     }
 
     /// <summary>Records <paramref name="job"/> as the job preparing <paramref name="key"/> for the handle, so query tools wait for it instead of starting another.</summary>
@@ -165,7 +219,7 @@ internal static class Tools
         ["marker"] = new[] { "PIXBeginEvent", "BeginEvent", "PIXSetMarker", "SetMarker" },
     };
 
-    public const string KindDescription = "Optional event kind filter: draw, dispatch, drawOrDispatch, executeIndirect, copy, clear, barrier, present, marker (matched case-insensitively against the start of the event name or API call).";
+    public const string KindDescription = "Optional event kind filter: draw, dispatch, drawOrDispatch, executeIndirect, copy, clear, barrier, present, marker. API calls match case-insensitive name prefixes; marker also recognizes native PIX labels with no API call text.";
 
     public static bool MatchesKind(EventRecord e, string? kind)
     {
@@ -177,6 +231,10 @@ internal static class Tools
         {
             throw new McpException($"Unknown kind '{kind}'. Valid kinds: {string.Join(", ", KindPrefixes.Keys)}.");
         }
+        // Native PIX marker events carry their label as Name and no API call text. BeginEvent
+        // commonly has no GPU ID, but SetMarker can have one, so GPU ID is not a discriminator.
+        if (kind.Trim().Equals("marker", StringComparison.OrdinalIgnoreCase) && string.IsNullOrEmpty(e.ApiCallData))
+            return true;
         foreach (string prefix in prefixes)
         {
             if (e.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || e.ApiCallData.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))

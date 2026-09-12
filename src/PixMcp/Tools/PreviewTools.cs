@@ -1,0 +1,280 @@
+using System.Buffers.Binary;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Text;
+using System.Text.Json;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
+using PixMcp.Pix;
+using PixMcp.Pix.Handles;
+
+namespace PixMcp.Tools;
+
+public enum PreviewTarget { RenderTarget, Depth }
+
+/// <summary>Optional CLI backend. The complete process lifetime executes on the PIX worker.</summary>
+[McpServerToolType]
+public static class PreviewTools
+{
+    internal const int MaxInlineBytes = 4 * 1024 * 1024;
+    internal const int MaxArtifactBytes = 32 * 1024 * 1024;
+    private static readonly ConditionalWeakTable<PixSession, PreviewArtifacts> Artifacts = new();
+
+    [McpServerTool(Name = "pix_gpu_preview", ReadOnly = true), Description("Starts a rendering-preview job using installed pixtool. Stop all connected GPU analyses first. Saves the selected RTV (default 0) or depth visualization. With markerName, uses the last child of that globally unique exact marker with the resource bound; otherwise uses the last event with it bound. Job result contains an artifactRef and image retrieval call.")]
+    public static Task<string> Preview(PixSession session, JobManager jobs,
+        [Description("Open GPU capture handle.")] string handle,
+        [Description("Globally unique, case-sensitive exact PIX marker name; omit for the last bound instance in the capture.")] string? markerName = null,
+        [Description("RenderTarget or Depth visualization.")] PreviewTarget target = PreviewTarget.RenderTarget,
+        [Description("RTV index, 0 through 7. Ignored only when zero for Depth.")] int rtvIndex = 0,
+        [Description("Process timeout in seconds, 1 through 3600.")] int timeoutSeconds = 120,
+        [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateSelection(markerName, target, rtvIndex, timeoutSeconds);
+        session.Get<GpuCaptureHandle>(handle);
+        return Tools.RunJob(jobs, "pix_gpu_preview", () => jobs.StartForHandle<GpuCaptureHandle>("preview", $"Preview {handle}", handle, (job, capture) =>
+        {
+            string[] connected = session.Handles.OfType<GpuCaptureHandle>().Where(h => h.AnalysisConnected || h.AnalysisStarted).Select(h => h.Id).ToArray();
+            if (connected.Length > 0)
+                throw new PixToolException("analysis_active", $"Stop connected GPU analyses before CLI replay: {string.Join(", ", connected)}.", true,
+                    connected.Select(id => new ToolCallDto("pix_gpu_analysis_stop", new { handle = id })).ToArray());
+            string executable = Path.Combine(PixDiscovery.InstallDir ?? string.Empty, "pixtool.exe");
+            if (!File.Exists(executable))
+                throw new PixToolException("preview_unavailable", "The installed PIX runtime does not contain pixtool.exe.");
+            if (markerName is not null)
+            {
+                var markers = capture.Queues.SelectMany(q => capture.AllEvents(q.Index))
+                    .Where(e => e.GpuId == uint.MaxValue || Tools.MatchesKind(e, "marker")).Select(e => e.Name);
+                ValidateMarker(markers, markerName);
+            }
+            job.ThrowIfCancellationRequested();
+            string folder = Path.Combine(Path.GetTempPath(), "pixmcp-preview-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(folder);
+            string output = Path.Combine(folder, "preview.png");
+            string replayCapture = Path.Combine(folder, "capture" + Path.GetExtension(capture.Path));
+            try
+            {
+                // PIX documents hold an exclusive engine lock on the original path; the CLI must open its own copy.
+                using (var source = new FileStream(capture.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (var destination = new FileStream(replayCapture, FileMode.CreateNew, FileAccess.Write))
+                {
+                    byte[] buffer = new byte[1024 * 1024];
+                    int copied;
+                    while ((copied = source.Read(buffer)) > 0)
+                    {
+                        job.ThrowIfCancellationRequested();
+                        destination.Write(buffer, 0, copied);
+                    }
+                }
+                ProcessStartInfo start = BuildStartInfo(executable, replayCapture, output, markerName, target, rtvIndex);
+                // pixtool has its own raw command-line parser: option values need quotes after '='.
+                // ArgumentList quotes the entire option, which this CLI rejects when the value has spaces.
+                string arguments = FormatPixToolArguments(start.ArgumentList);
+                start.ArgumentList.Clear();
+                start.Arguments = arguments;
+                job.AddMessage("Replaying with pixtool defaults; native analysis adapter and power settings do not apply.");
+                RunProcess(start, TimeSpan.FromSeconds(timeoutSeconds), job.Cancellation.Token, job.AddMessage);
+                job.ThrowIfCancellationRequested();
+                if (!File.Exists(output)) throw new PixToolException("preview_missing_output", "pixtool completed without producing a PNG.");
+                long size = new FileInfo(output).Length;
+                if (size > MaxArtifactBytes) throw new PixToolException("preview_too_large", $"PNG exceeds the {MaxArtifactBytes} byte artifact limit.");
+                byte[] png = File.ReadAllBytes(output);
+                (uint width, uint height) = PngDimensions(png);
+                string artifactRef = Artifacts.GetOrCreateValue(session).Add(capture.Id, png);
+                return new
+                {
+                    handle = capture.Id, artifactRef, mimeType = "image/png", width, height, pngBytes = png.Length,
+                    target, rtvIndex = target == PreviewTarget.RenderTarget ? rtvIndex : (int?)null,
+                    selection = new { markerName, semantics = markerName is null ? "last event with the selected resource bound" : "last child of the exact marker with the selected resource bound" },
+                    replay = new { source = "pixtool", runtimeVersion = PixDiscovery.Version, settings = "CLI defaults, local replay; independent of native analysis settings" },
+                    inlineAvailable = true, originalInlineAvailable = png.Length <= MaxInlineBytes,
+                    nextCalls = new[] { new ToolCallDto("pix_gpu_preview_image", new { artifactRef }) },
+                };
+            }
+            finally
+            {
+                try { if (File.Exists(output)) File.Delete(output); if (File.Exists(replayCapture)) File.Delete(replayCapture); if (!Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder); }
+                catch (IOException ex) { job.AddMessage("Temporary preview cleanup failed: " + ex.Message); }
+                catch (UnauthorizedAccessException ex) { job.AddMessage("Temporary preview cleanup failed: " + ex.Message); }
+            }
+        }), waitSeconds, cancellationToken);
+    }
+
+    [McpServerTool(Name = "pix_gpu_preview_image", ReadOnly = true), Description("Returns a preview or embedded screenshot as inline PNG. Optional crop uses original pixel coordinates, then maxDimension bounds the longest edge without upscaling. Originals above 4 MiB automatically get a thumbnail. Original bytes remain available through pix_gpu_preview_bytes. Artifacts expire on capture close or cache eviction.")]
+    public static async Task<CallToolResult> Image(PixSession session, string artifactRef, ImageCrop? crop = null,
+        int? maxDimension = null, CancellationToken cancellationToken = default)
+        => ImageResult(artifactRef, await ImageRenderer.Render(GetArtifact(session, artifactRef), crop, maxDimension, cancellationToken).ConfigureAwait(false));
+
+    internal static CallToolResult ImageResult(string artifactRef, RenderedImage rendered)
+    {
+        string json = Json.Serialize(new { artifactRef, mimeType = "image/png", pngBytes = rendered.Png.Length,
+            originalWidth = rendered.OriginalWidth, originalHeight = rendered.OriginalHeight,
+            width = rendered.Width, height = rendered.Height, crop = rendered.Crop, resized = rendered.Resized });
+        return new CallToolResult
+        {
+            Content = [new TextContentBlock { Text = json }, ImageContentBlock.FromBytes(rendered.Png, "image/png")],
+            StructuredContent = JsonSerializer.Deserialize<JsonElement>(json),
+        };
+    }
+
+    [McpServerTool(Name = "pix_gpu_preview_bytes", ReadOnly = true), Description("Retrieves PNG artifact bytes as paged base64. Decode each page separately and concatenate the decoded bytes. Available while the capture remains open and the artifact has not been evicted.")]
+    public static string Bytes(PixSession session, string artifactRef, int offset = 0, int limit = 16384)
+    {
+        if (offset < 0 || limit < 1 || limit > 16384) throw new PixToolException("invalid_arguments", "offset must be nonnegative; limit must be 1 through 16384.");
+        byte[] png = GetArtifact(session, artifactRef);
+        int count = Math.Min(limit, Math.Max(0, png.Length - offset));
+        int? nextOffset = (long)offset + count < png.Length ? offset + count : null;
+        return Json.Serialize(new { artifactRef, mimeType = "image/png", offset, totalBytes = png.Length, returnedBytes = count,
+            base64 = count == 0 ? "" : Convert.ToBase64String(png, offset, count), nextOffset,
+            nextCalls = nextOffset.HasValue ? new[] { new ToolCallDto("pix_gpu_preview_bytes", new { artifactRef, offset = nextOffset.Value, limit }) } : null });
+    }
+
+    private static byte[] GetArtifact(PixSession session, string artifactRef)
+        => Artifacts.GetOrCreateValue(session).Get(artifactRef, id => session.TryGet<GpuCaptureHandle>(id) is not null);
+
+    internal static string StoreArtifact(PixSession session, string handle, byte[] png)
+        => Artifacts.GetOrCreateValue(session).Add(handle, png);
+
+    internal static void ForgetCapture(PixSession session, string handle)
+    {
+        if (Artifacts.TryGetValue(session, out PreviewArtifacts? artifacts)) artifacts.Forget(handle);
+    }
+
+    internal static void ValidateSelection(string? markerName, PreviewTarget target, int rtvIndex, int timeoutSeconds)
+    {
+        if (markerName?.Any(c => c == '"' || char.IsControl(c)) == true)
+            throw new PixToolException("unsupported_selection", "The pixtool parser cannot reliably represent marker names containing literal quotes or control characters. Omit markerName to inspect the last bound resource.");
+        if (!Enum.IsDefined(target) || rtvIndex is < 0 or > 7 || target == PreviewTarget.Depth && rtvIndex != 0 || timeoutSeconds is < 1 or > 3600 || markerName is not null && string.IsNullOrWhiteSpace(markerName))
+            throw new PixToolException("invalid_arguments", "Use a valid target, RTV 0 through 7 (0 for depth), nonempty marker, and timeoutSeconds 1 through 3600.");
+    }
+
+    internal static void ValidateMarker(IEnumerable<string> markers, string markerName)
+    {
+        int matches = markers.Count(name => name.Equals(markerName, StringComparison.Ordinal));
+        if (matches != 1) throw new PixToolException("ambiguous_marker", $"markerName must identify exactly one PIX marker across all queues; found {matches} exact matches.");
+    }
+
+    internal static ProcessStartInfo BuildStartInfo(string executable, string capture, string output, string? markerName, PreviewTarget target, int rtvIndex)
+    {
+        var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (string arg in new[] { "--output=quiet", "--log=off", "open-capture", capture, "save-resource", output }) start.ArgumentList.Add(arg);
+        start.ArgumentList.Add(target == PreviewTarget.Depth ? "--depth" : $"--rtv={rtvIndex}");
+        if (markerName is not null) start.ArgumentList.Add("--marker=" + markerName);
+        return start;
+    }
+
+    internal static string FormatPixToolArguments(IEnumerable<string> arguments)
+        => string.Join(' ', arguments.Select(argument =>
+        {
+            int separator = argument.StartsWith("--", StringComparison.Ordinal) ? argument.IndexOf('=') : -1;
+            return separator < 0 ? QuoteWindowsArgument(argument) : argument[..(separator + 1)] + QuoteWindowsArgument(argument[(separator + 1)..]);
+        }));
+
+    private static string QuoteWindowsArgument(string value)
+    {
+        if (value.Length > 0 && !value.Any(c => char.IsWhiteSpace(c) || c == '"')) return value;
+        var quoted = new StringBuilder("\"");
+        int backslashes = 0;
+        foreach (char c in value)
+        {
+            if (c == '\\') { backslashes++; continue; }
+            quoted.Append('\\', c == '"' ? backslashes * 2 + 1 : backslashes).Append(c);
+            backslashes = 0;
+        }
+        return quoted.Append('\\', backslashes * 2).Append('"').ToString();
+    }
+
+    internal static void RunProcess(ProcessStartInfo start, TimeSpan timeout, CancellationToken cancellation, Action<string> diagnostic)
+    {
+        using var process = new Process { StartInfo = start };
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        deadline.CancelAfter(timeout);
+        cancellation.ThrowIfCancellationRequested();
+        if (!process.Start()) throw new PixToolException("preview_start_failed", "Could not start pixtool.");
+        Task<string> stdout = Drain(process.StandardOutput);
+        Task<string> stderr = Drain(process.StandardError);
+        try
+        {
+            process.WaitForExitAsync(deadline.Token).GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+            finally { process.WaitForExit(); }
+            if (cancellation.IsCancellationRequested) throw new OperationCanceledException(cancellation);
+            throw new PixToolException("preview_timeout", "pixtool exceeded the preview timeout and was terminated.", true);
+        }
+        finally
+        {
+            diagnostic(stdout.GetAwaiter().GetResult());
+            diagnostic(stderr.GetAwaiter().GetResult());
+        }
+        if (process.ExitCode != 0) throw new PixToolException("preview_failed", $"pixtool exited with code {process.ExitCode}; see bounded job diagnostics.");
+    }
+
+    private static async Task<string> Drain(StreamReader reader)
+    {
+        const int max = 4096;
+        var text = new StringBuilder();
+        var buffer = new char[1024];
+        int count;
+        while ((count = await reader.ReadAsync(buffer).ConfigureAwait(false)) != 0)
+            if (text.Length < max) text.Append(buffer, 0, Math.Min(count, max - text.Length));
+        return text.ToString();
+    }
+
+    internal static (uint Width, uint Height) PngDimensions(byte[] png)
+    {
+        if (png.Length < 24 || !png.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }) || !png.AsSpan(12, 4).SequenceEqual("IHDR"u8))
+            throw new PixToolException("preview_invalid_output", "pixtool output does not contain a valid PNG header.");
+        return (BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(16, 4)), BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(20, 4)));
+    }
+}
+
+internal sealed class PreviewArtifacts
+{
+    private readonly Dictionary<string, (string Handle, byte[] Bytes)> _entries = new();
+    private readonly Queue<string> _order = new();
+    private long _bytes;
+    internal string Add(string handle, byte[] bytes)
+    {
+        if (bytes.Length > PreviewTools.MaxArtifactBytes)
+            throw new PixToolException("image_too_large", "The image exceeds the 32 MiB artifact limit.");
+        lock (_entries)
+        {
+            string id = "preview-" + Guid.NewGuid().ToString("N");
+            _entries[id] = (handle, bytes); _order.Enqueue(id); _bytes += bytes.Length;
+            while (_entries.Count > 50 || _bytes > 64 * 1024 * 1024)
+                if (_entries.Remove(_order.Dequeue(), out var removed)) _bytes -= removed.Bytes.Length;
+            return id;
+        }
+    }
+    internal byte[] Get(string id, Func<string, bool> isOpen)
+    {
+        lock (_entries)
+        {
+            foreach (string expired in _entries.Where(entry => !isOpen(entry.Value.Handle)).Select(entry => entry.Key).ToArray())
+                if (_entries.Remove(expired, out var removed)) _bytes -= removed.Bytes.Length;
+            CompactOrder();
+            if (_entries.TryGetValue(id, out var entry)) return entry.Bytes;
+            throw new PixToolException("artifact_expired", "The preview artifact is unknown, was evicted, or its capture has closed. Run pix_gpu_preview again.");
+        }
+    }
+    internal void Forget(string handle)
+    {
+        lock (_entries)
+        {
+            foreach (string id in _entries.Where(entry => entry.Value.Handle == handle).Select(entry => entry.Key).ToArray())
+                if (_entries.Remove(id, out var removed)) _bytes -= removed.Bytes.Length;
+            CompactOrder();
+        }
+    }
+
+    private void CompactOrder()
+    {
+        string[] active = _order.Where(_entries.ContainsKey).ToArray();
+        _order.Clear();
+        foreach (string id in active) _order.Enqueue(id);
+    }
+}

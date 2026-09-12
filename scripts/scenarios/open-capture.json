@@ -3,6 +3,6 @@
  ["pix_gpu_events", {"handle": "$pix_gpu_open.handle", "kind": "drawOrDispatch", "limit": 10}],
  ["pix_gpu_analysis_start", {"handle": "$pix_gpu_open.handle", "waitSeconds": 300}, {"status": "succeeded"}],
  ["pix_gpu_timing_events", {"handle": "$pix_gpu_open.handle", "limit": 10}],
- ["pix_gpu_pipeline_state", {"handle": "$pix_gpu_open.handle", "queueIndex": "$pix_gpu_events.items.0.queueIndex", "eventIndex": "$pix_gpu_events.items.0.index"}],
+ ["pix_gpu_pipeline_state", {"eventRef": "$pix_gpu_events.items.0.eventRef"}],
  ["pix_close_all", {}]
 ]

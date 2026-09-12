@@ -7,6 +7,23 @@ namespace PixMcp.Tests;
 
 public class StdioTests
 {
+    [SkippableFact]
+    public async Task ResponseBudgetFailureRemainsAStructuredToolError()
+    {
+        Skip.If(PixDiscovery.InstallDir is null, "PIX Preview install required for server startup.");
+        ProcessStartInfo start = ServerStart();
+        start.Environment["PIXMCP_MAX_RESULT_BYTES"] = "80";
+        await using var server = new StdioClient(start);
+        await server.Send("initialize", new { protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "budget-test", version = "1" } });
+        await server.Notify("notifications/initialized");
+        JsonElement response = await server.Send("tools/call", new { name = "pix_info", arguments = new { } });
+        Assert.False(response.TryGetProperty("error", out _));
+        JsonElement result = response.GetProperty("result");
+        Assert.True(result.GetProperty("isError").GetBoolean());
+        Assert.Equal("result_too_large", result.GetProperty("structuredContent").GetProperty("code").GetString());
+        Assert.Equal(0, await server.Close());
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -66,10 +83,13 @@ public class StdioTests
         Assert.Contains("pix_info", names);
         Assert.Contains("pix_gpu_open", names);
         Assert.Contains("pix_job_status", names);
+        JsonElement resultReadInputs = tools.EnumerateArray().Single(tool => tool.GetProperty("name").GetString() == "pix_result_read")
+            .GetProperty("inputSchema").GetProperty("properties");
+        Assert.Equal(new[] { "limit", "offset", "pointer", "resultRef" }, resultReadInputs.EnumerateObject().Select(p => p.Name).OrderBy(name => name));
         foreach (JsonElement tool in tools.EnumerateArray())
             Assert.Equal("object", tool.GetProperty("outputSchema").GetProperty("type").GetString());
         JsonElement eventSchema = tools.EnumerateArray().Single(tool => tool.GetProperty("name").GetString() == "pix_gpu_events")
-            .GetProperty("outputSchema").GetProperty("properties");
+            .GetProperty("outputSchema").GetProperty("anyOf")[0].GetProperty("properties");
         Assert.True(eventSchema.TryGetProperty("nextOffset", out _));
         Assert.True(eventSchema.GetProperty("items").GetProperty("items").GetProperty("properties").TryGetProperty("queueIndex", out _));
 
@@ -85,15 +105,19 @@ public class StdioTests
         using var infoText = JsonDocument.Parse(info.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!);
         Assert.Equal(PixDiscovery.InstallDir, infoText.RootElement.GetProperty("pix").GetProperty("installDir").GetString());
         Assert.True(JsonElement.DeepEquals(infoText.RootElement, info.GetProperty("result").GetProperty("structuredContent")), info.GetRawText());
+        OutputSchemaTests.AssertMatches(infoText.RootElement, tools.EnumerateArray().Single(t => t.GetProperty("name").GetString() == "pix_info").GetProperty("outputSchema"));
 
         JsonElement jobs = (await server.Send("tools/call", new { name = "pix_jobs", arguments = new { } })).GetProperty("result");
-        Assert.Equal("[]", jobs.GetProperty("content")[0].GetProperty("text").GetString());
+        Assert.Equal("{\"items\":[]}", jobs.GetProperty("content")[0].GetProperty("text").GetString());
         Assert.Empty(jobs.GetProperty("structuredContent").GetProperty("items").EnumerateArray());
 
         JsonElement unknown = await server.Send("tools/call", new { name = "pix_job_status", arguments = new { jobId = "missing-job" } });
         Assert.True(unknown.GetProperty("result").GetProperty("isError").GetBoolean());
         Assert.Contains("Unknown job", unknown.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString());
-        Assert.False(unknown.GetProperty("result").TryGetProperty("structuredContent", out _));
+        Assert.Equal("pix_error", unknown.GetProperty("result").GetProperty("structuredContent").GetProperty("code").GetString());
+        JsonElement invalidBounds = (await server.Send("tools/call", new { name = "pix_gpu_events", arguments = new { handle = "missing", limit = -1 } })).GetProperty("result");
+        Assert.True(invalidBounds.GetProperty("isError").GetBoolean());
+        Assert.Equal("invalid_arguments", invalidBounds.GetProperty("structuredContent").GetProperty("code").GetString());
         JsonElement invalid = await server.Send("tools/call", new { name = "pix_job_status", arguments = new { } });
         Assert.True(invalid.TryGetProperty("error", out _) ||
                     (invalid.GetProperty("result").TryGetProperty("isError", out isError) && isError.GetBoolean()));

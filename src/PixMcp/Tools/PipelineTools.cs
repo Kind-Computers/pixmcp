@@ -19,8 +19,6 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class PipelineTools
 {
-    private const int MaxSubobjectJsonChars = 16000;
-
     private static readonly Lazy<JsonSerializerOptions> SubobjectJsonOptions = new(() =>
     {
         var options = new JsonSerializerOptions(PipelineStateSubobjectJsonSerializerOptions.DefaultOptions);
@@ -32,16 +30,24 @@ public static class PipelineTools
     public static Task<string> PipelineState(
         PixSession session,
         JobManager jobs,
-        [Description("GPU capture handle")] string handle,
-        [Description("Queue index")] int queueIndex,
-        [Description("Event index of a draw/dispatch event")] uint eventIndex,
-        [Description("Include decoded PSO subobject details (default true).")] bool includeSubobjects = true,
-        [Description("Include the global root signature parameters (default true).")] bool includeRootSignature = true,
+        [Description("Event reference from an event listing or timing result.")] EventRef eventRef,
+        [Description("Include decoded PSO subobject details (default false).")] bool includeSubobjects = false,
+        [Description("Include the global root signature parameters (default false).")] bool includeRootSignature = false,
         [Description("Include the bound shaders (default true).")] bool includeShaders = true,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
         CancellationToken cancellationToken = default)
-        => Tools.RunWhenReady(session, jobs, "pix_gpu_pipeline_state", handle, GpuCaptureHandle.AnalysisPreparation(handle), h =>
-        {
+    {
+        ReferenceValidation.Event(session, eventRef);
+        return Tools.RunWhenReady(session, jobs, "pix_gpu_pipeline_state", eventRef.Handle,
+            GpuCaptureHandle.AnalysisPreparation(eventRef.Handle),
+            h => QueryPipelineState(h, eventRef, includeSubobjects, includeRootSignature, includeShaders), waitSeconds, cancellationToken);
+    }
+
+    internal static PipelineStateDto QueryPipelineState(GpuCaptureHandle h, EventRef eventRef,
+        bool includeSubobjects = true, bool includeRootSignature = true, bool includeShaders = true)
+    {
+            int queueIndex = eventRef.QueueIndex;
+            uint eventIndex = eventRef.EventIndex;
             EventRecord record = h.Event(queueIndex, eventIndex);
             PIX_EVENT_INFO info = h.EventInfo(queueIndex, eventIndex);
 
@@ -63,7 +69,7 @@ public static class PipelineTools
             object? shaders = null;
             if (includeShaders)
             {
-                try { shaders = Shaders(program); }
+                try { shaders = Shaders(program, eventRef); }
                 catch (Exception ex) { shaders = PixErrors.Unavailable("shaders", ex); }
             }
 
@@ -97,17 +103,16 @@ public static class PipelineTools
                         try
                         {
                             IPixShaderTable table = PixApiExtensionsGpuCaptureResources.GetShaderTable(rt, stage);
-                            const uint maxRecords = 64;
                             uint recordCount = table.GetRecordCount();
                             var records = new List<object>();
-                            for (uint i = 0; i < Math.Min(recordCount, maxRecords); i++)
+                            for (uint i = 0; i < recordCount; i++)
                             {
                                 IPixShaderRecord rec = PixApiExtensionsGpuCaptureResources.GetShaderRecord(table, i);
                                 object? localRs = Tools.Try(() => Interop.WOrNull(PixApiExtensionsGpuCaptureResources.GetLocalRootSignature(rec)?.GetName() ?? default), "localRootSignature");
                                 records.Add(new { index = i, exportName = Interop.W(rec.GetExportName()), localRootSignature = localRs });
                             }
                             object? resourceName = Tools.Try(() => Interop.WOrNull(PixApiExtensionsGpuCaptureResources.GetResource(table)?.GetName() ?? default), "resource");
-                            tables.Add(new { stage, recordCount, records, recordsTruncated = recordCount > maxRecords, resource = resourceName });
+                            tables.Add(new { stage, recordCount, records, resource = resourceName });
                         }
                         catch (Exception ex) { tables.Add(new { stage, unavailable = true, reason = PixErrors.Describe(ex) }); }
                     }
@@ -116,16 +121,10 @@ public static class PipelineTools
                 catch (Exception ex) { raytracing = PixErrors.Unavailable("raytracingPipeline", ex); }
             }
 
-            return new
-            {
-                @event = record.ToDto(queueIndex),
-                programType,
-                rootSignature,
-                shaders,
-                genericPipeline = generic,
-                raytracingPipeline = raytracing,
-            };
-        }, waitSeconds, cancellationToken);
+            return new PipelineStateDto(eventRef, EventNavigation.MarkerPath(h.AllEvents(queueIndex), eventIndex),
+                h.DescribeEvent(queueIndex, record), programType.HasValue ? Json.EnumName(programType.Value) : null,
+                rootSignature, shaders, generic, raytracing);
+    }
 
     private static object? SubobjectDetail(D3D12_STATE_SUBOBJECT subobject)
     {
@@ -137,10 +136,6 @@ public static class PipelineTools
                 return null;
             }
             string json = JsonSerializer.Serialize(wrapper, wrapper.GetType(), SubobjectJsonOptions.Value);
-            if (json.Length > MaxSubobjectJsonChars)
-            {
-                return new { truncated = true, jsonLength = json.Length, preview = json[..MaxSubobjectJsonChars] };
-            }
             return JsonSerializer.Deserialize<JsonElement>(json);
         }
         catch (Exception ex)
@@ -200,7 +195,7 @@ public static class PipelineTools
         };
     }
 
-    internal static unsafe List<object> Shaders(IPixGpuProgram program)
+    internal static unsafe List<object> Shaders(IPixGpuProgram program, EventRef? eventRef = null)
     {
         var result = new List<object>();
         IPixCollection shaders = PixApiExtensionsGpuCaptureResources.GetShaders(program);
@@ -213,12 +208,12 @@ public static class PipelineTools
                 result.Add(new { index = i, unavailable = true, reason = ex?.Message });
                 continue;
             }
-            result.Add(ShaderDto((int)i, shader));
+            result.Add(ShaderDto((int)i, shader, eventRef));
         }
         return result;
     }
 
-    internal static unsafe object ShaderDto(int index, IPixShader shader)
+    internal static unsafe ShaderInfoDto ShaderDto(int index, IPixShader shader, EventRef? eventRef = null)
     {
         string? hash = null;
         try
@@ -255,88 +250,153 @@ public static class PipelineTools
             catch { }
         }
 
-        return new
-        {
-            index,
-            id = shader.GetId(),
-            stage = shader.GetStage(),
-            hash,
-            entry = Interop.WOrNull(shader.GetEntry()),
-            target = Interop.WOrNull(shader.GetTarget()),
-            flags = Interop.WOrNull(shader.GetFlags()),
-            defines = defines.Count == 0 ? null : defines,
-            sizeBytes = shader.GetSize(),
-            address = Interop.Hex(shader.GetAddress()),
-            availableCode = codeTypes,
-        };
+        return new ShaderInfoDto(eventRef is null ? null : new ShaderRef(eventRef, index), index,
+            shader.GetId().ToString(System.Globalization.CultureInfo.InvariantCulture), Json.EnumName(shader.GetStage()), hash,
+            Interop.WOrNull(shader.GetEntry()), Interop.WOrNull(shader.GetTarget()), Interop.WOrNull(shader.GetFlags()),
+            defines.Count == 0 ? null : defines, shader.GetSize(), Interop.Hex(shader.GetAddress()), codeTypes);
     }
 
-    [McpServerTool(Name = "pix_gpu_shader_code", ReadOnly = true), Description("Returns shader source/IL/ISA for a shader bound at a draw/dispatch event (see pix_gpu_pipeline_state for shader indices). Code is split into nodes (files/functions); pick a node or get the first one. Output is capped by maxChars (truncated: true when cut). Needs GPU analysis: started automatically as a job (see waitSeconds).")]
-    public static Task<string> ShaderCode(
-        PixSession session,
-        JobManager jobs,
-        [Description("GPU capture handle")] string handle,
-        [Description("Queue index")] int queueIndex,
-        [Description("Event index of a draw/dispatch event")] uint eventIndex,
-        [Description("Shader index within the event's shader list")] int shaderIndex,
-        [Description("HLSL, IL (DXIL disassembly) or ISA (default HLSL).")] string codeType = "HLSL",
-        [Description("Node index to return code for (default: first node). Use -1 to list nodes only.")] int nodeIndex = 0,
-        [Description("Maximum characters of code to return (default 30000).")] int maxChars = 30000,
+    internal static IPixGpuProgram ReadProgram(GpuCaptureHandle h, EventRef eventRef)
+    {
+        PIX_EVENT_INFO info = h.EventInfo(eventRef.QueueIndex, eventRef.EventIndex);
+        IPixProgramState state = PixApiExtensionsGpuCapture.GetProgramState(h.Document, ref info);
+        return PixApiExtensionsGpuCaptureResources.GetGpuProgram<IPixGpuProgram>(state);
+    }
+
+    internal static IReadOnlyList<ShaderInfoDto> ReadShaders(GpuCaptureHandle h, EventRef eventRef)
+    {
+        List<object> shaders = Shaders(ReadProgram(h, eventRef), eventRef);
+        if (shaders.Any(s => s is not ShaderInfoDto))
+            throw new PixToolException("unavailable_shader_data", "PIX could not read every shader bound at this event; shader matching requires a complete identity list.",
+                nextCalls: [new("pix_gpu_pipeline_state", new { eventRef })]);
+        return shaders.Cast<ShaderInfoDto>().ToArray();
+    }
+
+    internal static IPixShader ReadShader(GpuCaptureHandle h, ShaderRef shaderRef)
+    {
+        IPixCollection shaders = PixApiExtensionsGpuCaptureResources.GetShaders(ReadProgram(h, shaderRef.EventRef));
+        if (shaderRef.ShaderIndex < 0 || (ulong)shaderRef.ShaderIndex >= shaders.GetCount())
+            throw new McpException($"shaderIndex {shaderRef.ShaderIndex} is out of range; the event has {shaders.GetCount()} shader(s).");
+        return shaders.Get<IPixShader>((ulong)shaderRef.ShaderIndex);
+    }
+
+    [McpServerTool(Name = "pix_gpu_shader_code", ReadOnly = true), Description("Retrieve HLSL, IL or ISA using one-based line windows. Every line is retrievable with nextStartLine. Code nodes are paged independently; nodeIndex=-1 lists nodes only.")]
+    public static Task<string> ShaderCode(PixSession session, JobManager jobs,
+        [Description("Shader reference returned by pipeline inspection.")] ShaderRef shaderRef,
+        ShaderCodeKind codeType = ShaderCodeKind.HLSL,
+        int nodeIndex = 0, int startLine = 1, int lineCount = 100,
+        int nodeOffset = 0, int nodeLimit = Paging.DefaultLimit,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
         CancellationToken cancellationToken = default)
-        => Tools.RunWhenReady(session, jobs, "pix_gpu_shader_code", handle, GpuCaptureHandle.AnalysisPreparation(handle), h =>
-        {
-            PIX_EVENT_INFO info = h.EventInfo(queueIndex, eventIndex);
-            IPixProgramState programState = PixApiExtensionsGpuCapture.GetProgramState(h.Document, ref info);
-            IPixGpuProgram program = PixApiExtensionsGpuCaptureResources.GetGpuProgram<IPixGpuProgram>(programState);
-            IPixCollection shaders = PixApiExtensionsGpuCaptureResources.GetShaders(program);
-            if (shaderIndex < 0 || (ulong)shaderIndex >= shaders.GetCount())
+    {
+        ValidateShaderRequest(shaderRef, nodeIndex, startLine, lineCount, nodeOffset, nodeLimit);
+        if (!Enum.IsDefined(codeType)) throw new McpException("codeType must be HLSL, IL or ISA.");
+        ReferenceValidation.Shader(session, shaderRef);
+        return Tools.RunWhenReady(session, jobs, "pix_gpu_shader_code", shaderRef.EventRef.Handle,
+            GpuCaptureHandle.AnalysisPreparation(shaderRef.EventRef.Handle), h =>
             {
-                throw new McpException($"shaderIndex {shaderIndex} is out of range; the event has {shaders.GetCount()} shader(s).");
-            }
-            IPixShader shader = shaders.Get<IPixShader>((ulong)shaderIndex);
-            PIX_SHADER_CODE_TYPE type = Tools.ParseEnum<PIX_SHADER_CODE_TYPE>(codeType);
-
-            IPixCollection? nodes = PixApiExtensionsShaders.TryGetNodes(shader, type, out Exception ex);
-            if (nodes is null)
-            {
-                throw new McpException($"No {Json.EnumName(type)} code is available for this shader: {(ex is null ? "unknown reason" : PixErrors.Describe(ex))}");
-            }
-
-            var nodeList = new List<object>();
-            ulong nodeCount = nodes.GetCount();
-            for (ulong i = 0; i < nodeCount; i++)
-            {
-                IPixShaderNode? node = PixApiExtensionsShaders.TryGetNode(nodes, i, out _);
-                nodeList.Add(new { index = i, id = node?.GetId(), name = node is null ? null : Interop.WOrNull(node.GetName()) });
-            }
-
-            string? code = null;
-            bool truncated = false;
-            if (nodeIndex >= 0 && nodeCount > 0)
-            {
-                if ((ulong)nodeIndex >= nodeCount)
+                IPixShader shader = ReadShader(h, shaderRef);
+                PIX_SHADER_CODE_TYPE type = Tools.ParseEnum<PIX_SHADER_CODE_TYPE>(codeType.ToString());
+                IPixCollection nodes = ReadNodes(shader, type);
+                ulong count = nodes.GetCount();
+                var nodeList = new List<ShaderNodeDto>();
+                for (ulong i = (ulong)nodeOffset; i < count && nodeList.Count < nodeLimit; i++)
                 {
-                    throw new McpException($"nodeIndex {nodeIndex} is out of range; the shader has {nodeCount} node(s).");
+                    IPixShaderNode? node = PixApiExtensionsShaders.TryGetNode(nodes, i, out _);
+                    nodeList.Add(new(i, node?.GetId().ToString(), node is null ? null : Interop.WOrNull(node.GetName())));
                 }
-                IPixShaderNode? node = PixApiExtensionsShaders.TryGetNode(nodes, (ulong)nodeIndex, out _);
-                IPixAnnotatedString? text = node is null ? null : PixApiExtensionsShaders.TryGetCode(node, out _);
-                code = text is null ? null : Interop.W(text.GetString());
-                if (code is not null && code.Length > maxChars)
+                string? code = null;
+                int returned = 0, total = 0;
+                int? next = null;
+                if (nodeIndex >= 0 && count > 0)
                 {
-                    code = code[..Math.Max(0, maxChars)];
-                    truncated = true;
+                    if ((ulong)nodeIndex >= count) throw new McpException($"nodeIndex {nodeIndex} is out of range; there are {count} nodes.");
+                    string fullCode = ReadCode(nodes, (ulong)nodeIndex);
+                    (code, returned, total, next) = ShaderText.Window(fullCode, startLine, lineCount);
                 }
-            }
+                PageResult<ShaderNodeDto> nodePage = Paging.Page(nodeList, checked((long)count), nodeOffset, nodeLimit);
+                var nextCalls = new List<ToolCallDto>();
+                if (next.HasValue) nextCalls.Add(new("pix_gpu_shader_code", new { shaderRef, codeType, nodeIndex,
+                    startLine = next.Value, lineCount, nodeOffset, nodeLimit }));
+                if (nodePage.NextOffset.HasValue) nextCalls.Add(new("pix_gpu_shader_code", new { shaderRef, codeType,
+                    nodeIndex = -1, nodeOffset = nodePage.NextOffset.Value, nodeLimit }));
+                return new ShaderCodeDto(shaderRef, ShaderDto(shaderRef.ShaderIndex, shader, shaderRef.EventRef),
+                    Json.EnumName(type), nodePage, nodeIndex >= 0 ? nodeIndex : null, startLine, returned, total, next, code)
+                    { NextCalls = nextCalls };
+            }, waitSeconds, cancellationToken);
+    }
 
-            return new
+    [McpServerTool(Name = "pix_gpu_shader_search", ReadOnly = true), Description("Search shader code for literal case-insensitive text. Returns matching line numbers and context, paged across all code nodes or a selected node. Use pix_gpu_shader_code to read larger windows.")]
+    public static Task<string> ShaderSearch(PixSession session, JobManager jobs, ShaderRef shaderRef,
+        string query, ShaderCodeKind codeType = ShaderCodeKind.HLSL, int? nodeIndex = null,
+        int contextLines = 2, int offset = 0, int limit = Paging.DefaultLimit,
+        [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateShaderRequest(shaderRef, nodeIndex ?? -1, 1, 1, offset, limit);
+        if (!Enum.IsDefined(codeType)) throw new McpException("codeType must be HLSL, IL or ISA.");
+        ReferenceValidation.Shader(session, shaderRef);
+        if (nodeIndex < 0) throw new McpException("nodeIndex must be nonnegative when supplied.");
+        if (string.IsNullOrEmpty(query)) throw new McpException("query must not be empty.");
+        if (query.Contains('\n') || query.Contains('\r')) throw new McpException("query must fit on a single line.");
+        if (contextLines is < 0 or > 20) throw new McpException("contextLines must be between 0 and 20.");
+        return Tools.RunWhenReady(session, jobs, "pix_gpu_shader_search", shaderRef.EventRef.Handle,
+            GpuCaptureHandle.AnalysisPreparation(shaderRef.EventRef.Handle), h =>
             {
-                shader = ShaderDto(shaderIndex, shader),
-                codeType = type,
-                nodes = nodeList,
-                nodeIndex = nodeIndex >= 0 ? nodeIndex : (int?)null,
-                code,
-                truncated,
-            };
-        }, waitSeconds, cancellationToken);
+                IPixShader shader = ReadShader(h, shaderRef);
+                PIX_SHADER_CODE_TYPE type = Tools.ParseEnum<PIX_SHADER_CODE_TYPE>(codeType.ToString());
+                IPixCollection nodes = ReadNodes(shader, type);
+                ulong nodeCount = nodes.GetCount();
+                if (nodeIndex is >= 0 && (ulong)nodeIndex.Value >= nodeCount) throw new McpException("nodeIndex is out of range.");
+                var items = new List<ShaderSearchMatchDto>();
+                var coverage = new List<object>();
+                long total = 0;
+                for (ulong i = 0; i < nodeCount; i++)
+                {
+                    if (nodeIndex.HasValue && (ulong)nodeIndex.Value != i) continue;
+                    try
+                    {
+                        IPixShaderNode? node = PixApiExtensionsShaders.TryGetNode(nodes, i, out _);
+                        string? name = node is null ? null : Interop.WOrNull(node.GetName());
+                        foreach (ShaderSearchMatchDto match in ShaderText.Search(ReadCode(nodes, i), query, i, name, contextLines))
+                        {
+                            if (total >= offset && items.Count < limit) items.Add(match);
+                            total++;
+                        }
+                    }
+                    catch (Exception ex) { coverage.Add(new { nodeIndex = i, unavailable = true, reason = PixErrors.Describe(ex) }); }
+                }
+                int? next = (long)offset + items.Count < total ? offset + items.Count : null;
+                return new ShaderSearchDto(shaderRef, Json.EnumName(type), query, false, total, offset, items.Count,
+                    next, items, coverage)
+                    { NextCalls = next.HasValue ? [new("pix_gpu_shader_search", new { shaderRef, query, codeType,
+                        nodeIndex, contextLines, offset = next.Value, limit })] : [] };
+            }, waitSeconds, cancellationToken);
+    }
+
+    private static void ValidateShaderRequest(ShaderRef shaderRef, int nodeIndex, int startLine, int lineCount, int offset, int limit)
+    {
+        if (shaderRef is null || shaderRef.EventRef is null || string.IsNullOrWhiteSpace(shaderRef.EventRef.Handle)) throw new McpException("shaderRef and its eventRef are required.");
+        if (shaderRef.ShaderIndex < 0 || shaderRef.EventRef.QueueIndex < 0) throw new McpException("Shader and queue indices must be nonnegative.");
+        if (nodeIndex < -1) throw new McpException("nodeIndex must be -1 or a nonnegative index.");
+        ShaderText.ValidateWindow(startLine, lineCount);
+        if (offset < 0 || limit is < 1 or > Paging.MaxLimit) throw new McpException("offset must be nonnegative and limit must be between 1 and 1000.");
+    }
+
+    private static IPixCollection ReadNodes(IPixShader shader, PIX_SHADER_CODE_TYPE type)
+    {
+        IPixCollection? nodes = PixApiExtensionsShaders.TryGetNodes(shader, type, out Exception ex);
+        return nodes ?? throw new McpException($"No {Json.EnumName(type)} code is available: {(ex is null ? "PIX returned no nodes" : PixErrors.Describe(ex))}");
+    }
+
+    private static string ReadCode(IPixCollection nodes, ulong nodeIndex)
+    {
+        IPixShaderNode? node = PixApiExtensionsShaders.TryGetNode(nodes, nodeIndex, out Exception nodeError);
+        if (node is null) throw new McpException(nodeError is null ? "Shader node is unavailable." : PixErrors.Describe(nodeError));
+        IPixAnnotatedString? text = PixApiExtensionsShaders.TryGetCode(node, out Exception codeError);
+        if (text is null) throw new McpException(codeError is null ? "Shader code is unavailable." : PixErrors.Describe(codeError));
+        return Interop.W(text.GetString());
+    }
 }
+
+public enum ShaderCodeKind { HLSL, IL, ISA }

@@ -3,6 +3,17 @@ using ModelContextProtocol;
 
 namespace PixMcp.Pix;
 
+/// <summary>Structured failure. JSON in Message also survives SDK paths that flatten exceptions into text content.</summary>
+public sealed class PixToolException : McpException
+{
+    public ErrorDto Detail { get; }
+    public PixToolException(ErrorDto detail) : base(Json.Serialize(detail)) => Detail = detail;
+    public PixToolException(string code, string message, bool retryable = false,
+        IReadOnlyList<ToolCallDto>? nextCalls = null, int? hresult = null)
+        : base(Json.Serialize(new ErrorDto(code, message, hresult.HasValue ? PixErrors.Hex(hresult.Value) : null, retryable, nextCalls ?? [])))
+        => Detail = new(code, message, hresult.HasValue ? PixErrors.Hex(hresult.Value) : null, retryable, nextCalls ?? []);
+}
+
 public static class PixErrors
 {
     public const int E_PIX_DEVELOPER_MODE_NOT_ENABLED = unchecked((int)0x8ABC0000);
@@ -22,8 +33,33 @@ public static class PixErrors
         _ => null,
     };
 
+    public static ErrorDto ToDto(Exception ex, string? context = null)
+    {
+        if (ex is PixToolException tool) return tool.Detail;
+        int? hr = HResultOf(ex);
+        string code = hr switch
+        {
+            E_PIX_DEVELOPER_MODE_NOT_ENABLED or E_PIX_FEATURE_REQUIRES_DEVELOPER_MODE => "developer_mode_required",
+            E_NOT_VALID_STATE => "invalid_state",
+            unchecked((int)0x80004001) or unchecked((int)0x80004002) or unchecked((int)0x80070032) or unchecked((int)0x887A0004) => "unsupported_feature",
+            _ => ex switch
+            {
+                ArgumentException or FormatException => "invalid_arguments",
+                FileNotFoundException => "file_not_found",
+                OperationCanceledException => "cancelled",
+                TimeoutException => "timeout",
+                _ => "pix_error",
+            },
+        };
+        return new(code, (context is null ? "" : context + ": ") + Describe(ex),
+            hr.HasValue ? Hex(hr.Value) : null, ex is TimeoutException, []);
+    }
+
     /// <summary>True for the HRESULTs PIX uses to report an interrupted (cancelled) operation.</summary>
     public static bool IsCancellationHResult(int hresult) => hresult is E_ABORT or E_OPERATION_ABORTED;
+
+    public static bool IsUnsupportedHResult(int? hresult) => hresult is unchecked((int)0x80004001)
+        or unchecked((int)0x80004002) or unchecked((int)0x80070032) or unchecked((int)0x887A0004);
 
     /// <summary>PIX reports its own failures with facility 0xABC (0x8ABC0000..0x8ABCFFFF).</summary>
     public static bool IsPixFacility(int hresult) => ((uint)hresult & 0xFFFF0000) == 0x8ABC0000;
@@ -31,6 +67,7 @@ public static class PixErrors
     /// <summary>Human-readable description with HRESULT and, where relevant, remediation.</summary>
     public static string Describe(Exception ex)
     {
+        if (ex is PixToolException tool) return tool.Detail.Message;
         int? hr = HResultOf(ex);
         string message = ex.Message;
         if (hr is null)
@@ -50,7 +87,7 @@ public static class PixErrors
         }
         else if (IsPixFacility(hr.Value))
         {
-            text += " (PIX-specific error: PIX declined the operation; for analysis features such as shader profiling, occupancy or high-frequency counters this usually means the GPU, driver or PIX build does not support it.)";
+            text += " (PIX-specific error: PIX declined the operation. This alone does not establish that the feature is unsupported.)";
         }
         return text;
     }
@@ -62,7 +99,8 @@ public static class PixErrors
         {
             return mcp;
         }
-        return new McpException($"{context}: {Describe(ex)}");
+        ErrorDto detail = ToDto(ex, context);
+        return new PixToolException(detail.Code, detail.Message, detail.Retryable, detail.NextCalls, HResultOf(ex));
     }
 
     /// <summary>Runs <paramref name="work"/>, converting failures to McpExceptions. Cancellation propagates unchanged so the transport reports it as such.</summary>
@@ -88,5 +126,7 @@ public static class PixErrors
         unavailable = true,
         feature,
         reason = Describe(ex),
+        state = IsUnsupportedHResult(HResultOf(ex)) ? "unsupported" : "unknown",
+        error = ToDto(ex),
     };
 }

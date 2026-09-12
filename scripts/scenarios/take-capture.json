@@ -1,7 +1,8 @@
 [
  ["pix_device_connect", {}],
- ["pix_device_launch", {"handle": "$pix_device_connect.handle", "exePath": "tests/D3D12TestApp/bin/D3D12TestApp.exe", "arguments": "--frames 1500"}, {"capturable": true}],
+ ["pix_device_launch", {"handle": "$pix_device_connect.handle", "exePath": "tests/D3D12TestApp/bin/D3D12TestApp.exe", "arguments": "--frames 1500 --hidden"}, {"capturable": true}],
  ["pix_device_take_gpu_capture", {"handle": "$pix_device_connect.handle", "processId": "$pix_device_launch.processId", "delaySeconds": 4, "open": false, "waitSeconds": 120}, {"status": "succeeded"}],
+ ["pix_result_read", {"resultRef": "$pix_device_take_gpu_capture.resultRef", "pointer": "/path"}],
  ["pix_device_detach", {"handle": "$pix_device_connect.handle", "terminate": true}],
  ["pix_close_all", {}]
 ]

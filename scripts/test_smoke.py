@@ -1,5 +1,6 @@
 """Run with python -m unittest discover -s scripts -p test_smoke.py."""
 import contextlib
+import base64
 import io
 import json
 import os
@@ -41,6 +42,19 @@ class SmokeTests(unittest.TestCase):
         client = self.responding(self.tool_result("bad handle", isError=True))
         with self.assertRaisesRegex(smoke.SmokeError, "tool error.*bad handle"):
             client.call("inspect")
+
+    def test_image_content_is_decoded_and_reports_actual_byte_count(self):
+        png = b"\x89PNG\r\n\x1a\n\xff"
+        client = self.responding({"result": {"content": [{"type": "image", "mimeType": "image/png", "data": base64.b64encode(png).decode("ascii")}]}})
+        self.assertEqual({"type": "image", "mimeType": "image/png", "bytes": len(png)}, client.call("preview"))
+
+    def test_malformed_image_data_fails_smoke_checks(self):
+        for invalid in ("\ufffdPNG", "%%%invalid%%%", None):
+            with self.subTest(invalid=invalid):
+                client = self.responding({"result": {"content": [{"type": "image", "mimeType": "image/png", "data": invalid}]}})
+                with self.assertRaisesRegex(smoke.SmokeError, "image content.*base64"):
+                    client.call("preview")
+                client.close()
 
     def test_failed_and_cancelled_jobs_are_failures(self):
         for status in ("failed", "cancelled"):

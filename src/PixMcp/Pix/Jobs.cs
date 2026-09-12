@@ -17,21 +17,26 @@ public sealed class Job
     private readonly List<string> _messages = new();
     private JobStatus _status = JobStatus.Queued;
     private float _progress;
-    private object? _result;
     private string? _error;
+    private ErrorDto? _errorDetail;
+    private string? _resultRef;
+    private readonly ResultStore? _results;
+    private readonly string[] _owners;
     private DateTimeOffset? _startedAt, _finishedAt;
     private bool _cancellationRequested;
     private IPixCancellationToken? _pixToken;
 
-    public Job(string id, string kind, string description) { Id = id; Kind = kind; Description = description; }
+    public Job(string id, string kind, string description, ResultStore? results = null, string? owner = null, IEnumerable<string>? owners = null)
+    { Id = id; Kind = kind; Description = description; _results = results; _owners = owner is null ? (owners ?? []).ToArray() : [owner]; }
     public string Id { get; }
     public string Kind { get; }
     public string Description { get; }
     public DateTimeOffset CreatedAt { get; } = DateTimeOffset.UtcNow;
     public JobStatus Status { get { lock (_lock) return _status; } }
     public float Progress { get { lock (_lock) return _progress; } }
-    public object? Result { get { lock (_lock) return _result; } }
+    public string? ResultRef { get { lock (_lock) return _resultRef; } }
     public string? Error { get { lock (_lock) return _error; } }
+    public ErrorDto? ErrorDetail { get { lock (_lock) return _errorDetail; } }
     public DateTimeOffset? StartedAt { get { lock (_lock) return _startedAt; } }
     public DateTimeOffset? FinishedAt { get { lock (_lock) return _finishedAt; } }
     public CancellationTokenSource Cancellation { get; } = new();
@@ -76,7 +81,8 @@ public sealed class Job
             AddMessage("Cancellation requested.");
         }
         // Never hold the status lock across callbacks or a native call.
-        Cancellation.Cancel();
+        try { Cancellation.Cancel(); }
+        catch (ObjectDisposedException) when (IsFinished) { /* Completion/pruning won the cancellation race. */ }
         CancelNative(token);
     }
 
@@ -88,7 +94,8 @@ public sealed class Job
 
     internal void Succeed(object? result)
     {
-        lock (_lock) { _result = result; _progress = 1; Finish(JobStatus.Succeeded); }
+        string? resultRef = result is null ? null : _results?.Store(result, jobId: Id, owners: _owners, operation: Kind);
+        lock (_lock) { _resultRef = resultRef; _progress = 1; Finish(JobStatus.Succeeded); }
     }
 
     internal void Fail(Exception ex)
@@ -96,6 +103,7 @@ public sealed class Job
         lock (_lock)
         {
             _error = PixErrors.Describe(ex);
+            _errorDetail = PixErrors.ToDto(ex);
             // A cancellation request alone does not prove an operation stopped.
             bool cancelled = CancellationRequested && (ex is OperationCanceledException ||
                 ex is ExternalException native && PixErrors.IsCancellationHResult(native.ErrorCode));
@@ -107,7 +115,7 @@ public sealed class Job
     {
         _finishedAt = DateTimeOffset.UtcNow;
         _status = status;
-        Completion.TrySetResult(true);
+        _pixToken = null;
     }
 
     public void SetProgress(float progress)
@@ -126,15 +134,22 @@ public sealed class Job
 
     public IReadOnlyList<string> Messages { get { lock (_lock) return _messages.ToArray(); } }
 
-    public JobDto ToDto(bool includeResult)
+    public JobDto ToDto()
     {
+        JobDto snapshot;
         lock (_lock)
         {
-            return new JobDto(Id, Kind, Description, _status.ToString().ToLowerInvariant(),
+            snapshot = new JobDto(Id, Kind, Description, _status.ToString().ToLowerInvariant(),
                 _progress, CreatedAt, _startedAt, _finishedAt,
                 _startedAt is null ? null : ((_finishedAt ?? DateTimeOffset.UtcNow) - _startedAt.Value).TotalSeconds,
-                _messages.TakeLast(20).ToArray(), _error, includeResult ? _result : null, CancellationRequested);
+                _messages.TakeLast(20).Select(m => m.Length > 500 ? m[..500] + "…" : m).ToArray(),
+                _errorDetail, _resultRef, CancellationRequested,
+                _resultRef is not null ? [ResultStore.ReadCall(_resultRef)] : !IsFinished
+                    ? [new ToolCallDto("pix_job_wait", new { jobId = Id, timeoutSeconds = 2 })] : []);
         }
+        // Never hold the job lock while checking retention; keep status/result identity atomic.
+        return snapshot.ResultRef is not null && _results?.IsAvailable(snapshot.ResultRef) == false
+            ? snapshot with { ResultRef = null, NextCalls = [] } : snapshot;
     }
 
     public ProgressSink Sink => new(this);
@@ -164,39 +179,58 @@ public sealed class JobManager
     internal JobManager(PixWorker worker, PixSession session, Func<IPixCancellationToken?> createNativeToken)
     {
         _worker = worker; _session = session; _createNativeToken = createNativeToken;
+        _session.Results.JobEvicted += id =>
+        {
+            if (_jobs.TryRemove(id, out Job? removed)) removed.Cancellation.Dispose();
+        };
     }
 
     public IReadOnlyCollection<Job> All => _jobs.Values.OrderBy(j => j.CreatedAt).ToArray();
     /// <summary>The job currently executing on the PIX thread, if any (at most one, since the worker is single-threaded).</summary>
-    public Job? Running => _jobs.Values.FirstOrDefault(j => j.Status == JobStatus.Running);
+    public Job? Running => _worker.Snapshot().Operation is string operation
+        ? _jobs.Values.FirstOrDefault(j => operation.StartsWith(j.Id + ": ", StringComparison.Ordinal)) : null;
     public Job Get(string jobId)
         => _jobs.TryGetValue(jobId, out Job? job) ? job : throw new McpException($"Unknown job '{jobId}'. Known jobs: {string.Join(", ", _jobs.Keys.OrderBy(k => k))}");
     public Job StartForHandle<T>(string kind, string description, string handleId, Func<Job, T, object?> work) where T : PixHandle
-        => Start(kind, description, job => work(job, _session.Get<T>(handleId)));
+        => Start(kind, description, job => work(job, _session.Get<T>(handleId)), handleId);
 
     /// <summary>Runs work on the PIX worker. Success remains success when cancellation arrives too late.</summary>
-    public Job Start(string kind, string description, Func<Job, object?> work)
+    public Job Start(string kind, string description, Func<Job, object?> work, string? owner = null)
+        => StartAfter(kind, description, null, work, owner);
+
+    /// <summary>A managed prerequisite may await readiness without occupying the PIX worker.</summary>
+    internal Job StartAfter(string kind, string description, Func<Job, Task>? prerequisite,
+        Func<Job, object?> work, string? owner = null)
     {
-        var job = new Job($"job-{Interlocked.Increment(ref _next)}", kind, description);
+        var job = new Job($"job-{Interlocked.Increment(ref _next)}", kind, description, _session.Results, owner, StructuredToolResults.CurrentOwners());
+        _session.Results.RegisterJobOwners(job.Id, owner is null ? StructuredToolResults.CurrentOwners() : [owner]);
         _jobs[job.Id] = job;
         Prune();
-        try
+        _ = Execute();
+        return job;
+
+        async Task Execute()
         {
-            _ = _worker.Run(() =>
+            try
             {
-                try
+                if (prerequisite is not null) await prerequisite(job).ConfigureAwait(false);
+                object? result = await _worker.Run(() =>
                 {
                     job.Begin();
                     try { job.AttachPixToken(_createNativeToken()); }
                     catch (Exception ex) { job.AddMessage("Native cancellation unavailable: " + PixErrors.Describe(ex)); }
                     job.ThrowIfCancellationRequested();
-                    job.Succeed(work(job));
-                }
-                catch (Exception ex) { job.Fail(ex); }
-            });
+                    return work(job);
+                }, job.Cancellation.Token, job.Id + ": " + description).ConfigureAwait(false);
+                job.Succeed(result);
+            }
+            catch (Exception ex) { job.Fail(ex); }
+            finally
+            {
+                try { _session.Results.MarkJobFinished(job.Id); Prune(); }
+                finally { job.Completion.TrySetResult(true); }
+            }
         }
-        catch (Exception ex) { job.Fail(ex); }
-        return job;
     }
 
     /// <summary>Forgets the oldest finished jobs beyond <see cref="MaxFinishedJobs"/>; running and queued jobs are never removed.</summary>
@@ -205,7 +239,7 @@ public sealed class JobManager
         Job[] finished = _jobs.Values.Where(j => j.IsFinished).OrderBy(j => j.FinishedAt ?? j.CreatedAt).ThenBy(j => j.CreatedAt).ToArray();
         for (int i = 0; i < finished.Length - MaxFinishedJobs; i++)
         {
-            if (_jobs.TryRemove(finished[i].Id, out Job? removed))
+            if (_session.Results.TryRemoveJob(finished[i].Id) && _jobs.TryRemove(finished[i].Id, out Job? removed))
             {
                 removed.Cancellation.Dispose();
             }
@@ -220,6 +254,6 @@ public sealed class JobManager
             try { await job.WaitAsync(TimeSpan.FromSeconds(waitSeconds), ct).ConfigureAwait(false); }
             catch (TimeoutException) { }
         }
-        return job.ToDto(includeResult: true);
+        return job.ToDto();
     }
 }

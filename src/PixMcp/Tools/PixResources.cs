@@ -15,8 +15,8 @@ public static class PixResources
     public static string Handle(PixSession session, [Description("Handle id, e.g. gpu-1 (see pix://handles).")] string handle) => Json.Serialize(session.Get(handle).Summary());
 
     [McpServerResource(UriTemplate = "pix://jobs", Name = "PIX jobs", MimeType = "application/json"), Description("Background jobs with status, progress and messages (results omitted; read pix://jobs/{jobId} or call pix_job_status).")]
-    public static string Jobs(JobManager jobs) => Json.Serialize(jobs.All.Select(j => j.ToDto(includeResult: false)).ToArray());
+    public static string Jobs(JobManager jobs) => Json.Serialize(jobs.All.Select(j => j.ToDto()).ToArray());
 
-    [McpServerResource(UriTemplate = "pix://jobs/{jobId}", Name = "PIX job", MimeType = "application/json"), Description("One job including its result once finished.")]
-    public static string Job(JobManager jobs, [Description("Job id, e.g. job-1 (see pix://jobs).")] string jobId) => Json.Serialize(jobs.Get(jobId).ToDto(includeResult: true));
+    [McpServerResource(UriTemplate = "pix://jobs/{jobId}", Name = "PIX job", MimeType = "application/json"), Description("Compact job status with a resultRef once finished; use pix_result_read for the complete result.")]
+    public static string Job(JobManager jobs, [Description("Job id, e.g. job-1 (see pix://jobs).")] string jobId) => Json.Serialize(jobs.Get(jobId).ToDto());
 }

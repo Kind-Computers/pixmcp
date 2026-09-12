@@ -24,14 +24,18 @@ public static class DeviceTools
                 ConnDesc.CreateLocal(), notifications);
             handle = session.Register(new ConnectionHandle("local", connection, notifications));
             ConnectionHandle h = handle;
-            notifications.OnAllTargetProcessesTerminated = () => h.Note("allTargetProcessesTerminated");
+            notifications.OnAllTargetProcessesTerminated = () => { h.Targets.TerminateAll(); h.Note("allTargetProcessesTerminated"); };
             notifications.OnDeviceCounterCollectionStarted = () => h.Note("counterCollectionStarted");
             notifications.OnDeviceCounterCollectionStopped = () => h.Note("counterCollectionStopped");
             notifications.OnDeviceCounterDescriptionsUpdated = () => h.Note("counterDescriptionsUpdated");
             notifications.OnNewGpuCaptureCompleted = (_, filename, _) => h.Note("gpuCaptureCompleted", new { filename });
             notifications.OnNewTimingCaptureError = (hr, message) => h.Note("timingCaptureError", new { hresult = PixErrors.Hex(hr), message });
-            notifications.OnNotifyGpuCaptureTargetProcessesStatus = statuses => h.Note("targetProcessesStatus",
-                statuses.Select(s => new { processId = s.ProcessId, name = Interop.W(s.ProcessName), unsupportedReason = s.UnsupportedReason }).ToArray());
+            notifications.OnNotifyGpuCaptureTargetProcessesStatus = statuses =>
+            {
+                foreach (var status in statuses) h.Targets.Observe(status.ProcessId, status.UnsupportedReason);
+                h.Note("targetProcessesStatus", statuses.Select(s => new { processId = s.ProcessId,
+                    name = Interop.W(s.ProcessName), unsupportedReason = s.UnsupportedReason }).ToArray());
+            };
             return DeviceInfo(h);
         }, cancellationToken);
 
@@ -98,7 +102,7 @@ public static class DeviceTools
         }
         catch (Exception ex) { adapters = PixErrors.Unavailable("adapters", ex); }
 
-        return new { handle = h.Id, metrics, adapters, launchedProcessIds = h.ProcessIds, timingCaptureInProgress = h.TimingCaptureInProgress, recentEvents = h.RecentEvents() };
+        return new { handle = h.Id, metrics, adapters, launchedProcessIds = h.ProcessIds, targets = h.Targets.Snapshot(), timingCaptureInProgress = h.TimingCaptureInProgress, recentEvents = h.RecentEvents() };
     }
 
     [McpServerTool(Name = "pix_device_processes", ReadOnly = true), Description("Pages the running processes PIX can see, with whether they use D3D12 and any reason they are unsupported for capture. Filter with nameContains (exe name) or d3d12Only, then pass processId to pix_device_attach.")]
@@ -108,7 +112,7 @@ public static class DeviceTools
         [Description("Only processes whose exe name contains this text (case-insensitive).")] string? nameContains = null,
         [Description("Only processes PIX reports as using D3D12 (default false).")] bool d3d12Only = false,
         [Description("First process (default 0).")] int offset = 0,
-        [Description("Maximum processes (default 100, max 1000).")] int limit = Paging.DefaultLimit,
+        [Description("Maximum processes (default 25, max 1000).")] int limit = Paging.DefaultLimit,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_processes", () =>
         {
@@ -139,7 +143,7 @@ public static class DeviceTools
         [Description("Only counters whose display name contains this text (case-insensitive).")] string? nameContains = null,
         [Description("Only counters in this group (name from extra.groups, case-insensitive).")] string? group = null,
         [Description("First counter (default 0).")] int offset = 0,
-        [Description("Maximum counters (default 100, max 1000).")] int limit = Paging.DefaultLimit,
+        [Description("Maximum counters (default 25, max 1000).")] int limit = Paging.DefaultLimit,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_counters", () =>
         {
@@ -222,6 +226,7 @@ public static class DeviceTools
                 target = exe;
             }
 
+            long beforeLaunch = h.Targets.Revision;
             IPixLaunchProcessResults results = PixApiExtensionsDeviceConnection.LaunchProcess<IPixLaunchProcessResults>(h.Connection, ref desc);
             uint pid = results.GetProcessId();
             PIX_PROCESS_UNSUPPORTED_REASON reason = results.GetUnsupportedReason();
@@ -229,6 +234,7 @@ public static class DeviceTools
             if (capturable)
             {
                 h.AddProcess(pid);
+                h.Targets.Track(pid, reason, beforeLaunch);
             }
             h.Note("launched", new { pid, target, unsupportedReason = reason });
             return new
@@ -237,6 +243,7 @@ public static class DeviceTools
                 processName = Interop.WOrNull(results.GetProcessName()),
                 unsupportedReason = reason,
                 capturable,
+                ready = capturable && h.Targets.Get(pid).Snapshot().Ready,
                 note = reason == PIX_PROCESS_UNSUPPORTED_REASON.PIX_PROCESS_UNSUPPORTED_REASON_NOT_USING_D3D12
                     ? "NOT_USING_D3D12 is normal right after launch; the app has not created its D3D12 device yet."
                     : capturable ? null : $"PIX cannot capture this process ({Json.EnumName(reason)}); it was not recorded as a capture target.",
@@ -264,7 +271,7 @@ public static class DeviceTools
         [Description("Device handle")] string handle,
         [Description("Only apps whose friendly name or package name contains this text (case-insensitive).")] string? nameContains = null,
         [Description("First app (default 0).")] int offset = 0,
-        [Description("Maximum apps (default 100, max 1000).")] int limit = Paging.DefaultLimit,
+        [Description("Maximum apps (default 25, max 1000).")] int limit = Paging.DefaultLimit,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_packaged_apps", () =>
         {
@@ -295,12 +302,14 @@ public static class DeviceTools
         {
             ConnectionHandle h = session.Get<ConnectionHandle>(handle);
             var desc = new PIX_ATTACH_TO_PROCESS_DESC { ProcessId = processId, ForGpuCapture = forGpuCapture };
+            long beforeAttach = h.Targets.Revision;
             IPixAttachToProcessResults results = PixApiExtensionsDeviceConnection.AttachToProcess<IPixAttachToProcessResults>(h.Connection, ref desc);
             PIX_PROCESS_UNSUPPORTED_REASON reason = results.GetUnsupportedReason();
             bool capturable = IsCapturable(reason);
             if (capturable)
             {
                 h.AddProcess(processId);
+                h.Targets.Track(processId, reason, beforeAttach);
             }
             h.Note("attached", new { processId, unsupportedReason = reason });
             return new
@@ -309,6 +318,7 @@ public static class DeviceTools
                 processName = Interop.WOrNull(results.GetProcessName()),
                 unsupportedReason = reason,
                 capturable,
+                ready = capturable && h.Targets.Get(processId).Snapshot().Ready,
                 note = capturable ? null : $"PIX cannot capture this process ({Json.EnumName(reason)}); it was not recorded as a capture target.",
             };
         }, cancellationToken);
@@ -323,20 +333,38 @@ public static class DeviceTools
         JobManager jobs,
         [Description("Device handle")] string handle,
         [Description("Process id (from pix_device_launch / pix_device_attach).")] uint processId,
-        [Description("Seconds to wait before triggering the capture, to let the app initialise (default 3).")] double delaySeconds = 3,
+        [Description("Optional additional warmup after readiness, 0 through 60 seconds (default 0).")] double delaySeconds = 0,
         [Description("Number of frames to capture (default 1).")] uint frameCount = 1,
         [Description("Open the resulting .wpix as a GPU capture handle (default true).")] bool open = true,
         [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
+        [Description("Maximum seconds to await a capturable D3D12 device, 0 through 300 (default 30). Zero checks once.")] double readinessTimeoutSeconds = 30,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            Job job = jobs.StartForHandle<ConnectionHandle>("gpu-capture", $"Take GPU capture of pid {processId}", handle, (j, h) =>
+            if (!double.IsFinite(delaySeconds) || delaySeconds is < 0 or > 60
+                || !double.IsFinite(readinessTimeoutSeconds) || readinessTimeoutSeconds is < 0 or > 300
+                || !double.IsFinite(waitSeconds) || waitSeconds is < 0 or > 3600 || frameCount == 0)
+                throw new PixToolException("invalid_arguments", "frameCount must be positive; delaySeconds must be 0–60, readinessTimeoutSeconds 0–300, and waitSeconds 0–3600, all finite.");
+            CaptureTarget target = session.Get<ConnectionHandle>(handle).Targets.Get(processId);
+            object retry = StructuredToolResults.CurrentArguments() ?? new { handle, processId, delaySeconds, frameCount, open, waitSeconds, readinessTimeoutSeconds };
+            Job job = jobs.StartAfter("gpu-capture", $"Take GPU capture of pid {processId}", async j =>
             {
-                if (delaySeconds > 0)
+                try
                 {
-                    j.AddMessage($"Waiting {delaySeconds:0.#}s for the target to initialise...");
+                    j.AddMessage("Waiting for a capturable D3D12 device...");
+                    await target.WaitReadyAsync(TimeSpan.FromSeconds(readinessTimeoutSeconds), j.Cancellation.Token).ConfigureAwait(false);
+                    if (delaySeconds > 0) j.AddMessage($"Warming up for {delaySeconds:0.#}s...");
+                    await target.WarmupAsync(TimeSpan.FromSeconds(delaySeconds), j.Cancellation.Token).ConfigureAwait(false);
                 }
+                catch (PixToolException ex) when (ex.Detail.Code == "capture_target_not_ready")
+                {
+                    throw new PixToolException(ex.Detail with { NextCalls = [new("pix_device_info", new { handle }), new("pix_device_take_gpu_capture", retry)] });
+                }
+            }, j =>
+            {
+                ConnectionHandle h = session.Get<ConnectionHandle>(handle);
+                h.Targets.Validate(target);
                 IPixGpuCaptureResult result = CaptureWithOptions(
                     processId,
                     frameCount,
@@ -346,7 +374,7 @@ public static class DeviceTools
                         j.AddMessage("Capturing...");
                         return PixApiExtensionsDeviceConnection.TakeGpuCaptureResult(h.Connection, processId)
                             ?? throw new McpException("PIX returned no GPU capture result.");
-                    }, j.Cancellation.Token, TimeSpan.FromSeconds(Math.Clamp(delaySeconds, 0, 60)));
+                    }, j.Cancellation.Token);
                 string path = Interop.W(result.GetFilename());
                 if (string.IsNullOrEmpty(path))
                 {
@@ -362,7 +390,7 @@ public static class DeviceTools
                     gpu = session.Register(new GpuCaptureHandle(path, document)).Summary();
                 }
                 return new { path, gpuCapture = gpu };
-            });
+            }, handle);
             return Json.Serialize(await jobs.WaitOrStatus(job, waitSeconds, cancellationToken).ConfigureAwait(false));
         }
         catch (Exception ex)
@@ -376,15 +404,12 @@ public static class DeviceTools
         uint frameCount,
         Action<PIX_GPU_CAPTURE_OPTIONS> applyOptions,
         Func<T> capture,
-        CancellationToken cancellationToken = default,
-        TimeSpan delay = default)
+        CancellationToken cancellationToken = default)
     {
         if (frameCount == 0)
         {
             throw new McpException("frameCount must be at least 1.");
         }
-        cancellationToken.ThrowIfCancellationRequested();
-        if (delay > TimeSpan.Zero) Task.Delay(delay, cancellationToken).GetAwaiter().GetResult();
         cancellationToken.ThrowIfCancellationRequested();
         // PIX retains these settings for subsequent captures, including single-frame requests.
         applyOptions(new PIX_GPU_CAPTURE_OPTIONS
@@ -454,38 +479,57 @@ public static class DeviceTools
         JobManager jobs,
         [Description("Device handle")] string handle,
         [Description("Open the capture as a timing handle after stopping (default true).")] bool open = true,
-        [Description("Seconds to wait inline for the job (default 30 = normally returns the result directly; 0 = return the job).")] double waitSeconds = 30,
+        [Description("Seconds to wait inline for the job (default 30). Completed status includes a resultRef; 0 returns immediately.")] double waitSeconds = 30,
         CancellationToken cancellationToken = default)
-        => Tools.RunJob(jobs, "pix_device_timing_capture_stop", () => jobs.StartForHandle<ConnectionHandle>("timing-capture-stop", $"Stop timing capture on {handle}", handle, (j, h) =>
-        {
-            string? path = h.TimingCaptureInProgress;
-            h.Connection.StopTimingCapture();
-            h.TimingCaptureInProgress = null;
-            h.Note("timingCaptureStopped", new { path });
-            object? timing = null;
-            string? openError = null;
-            if (open && path is not null)
-            {
-                try
-                {
-                    j.AddMessage("Waiting for PIX to finalise " + path);
-                    WaitForFile(path, TimeSpan.FromSeconds(10), j.Cancellation.Token);
-                    IPixTimingCaptureDocument document = session.Factory.OpenTimingCaptureDocument<IPixTimingCaptureDocument>(path);
-                    timing = session.Register(new TimingCaptureHandle(path, document)).Summary();
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex) { openError = PixErrors.Describe(ex); }
-            }
-            return new { stopped = true, path, timingCapture = timing, openError };
-        }), waitSeconds, cancellationToken);
-
-    /// <summary>Polls for a file PIX writes asynchronously; returns when it exists or the timeout elapses (the caller then reports the open error).</summary>
-    internal static void WaitForFile(string path, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        DateTime deadline = DateTime.UtcNow + timeout;
-        while (!File.Exists(path) && DateTime.UtcNow < deadline)
+        string? path = null;
+        object? timing = null;
+        return Tools.RunJob(jobs, "pix_device_timing_capture_stop", () => jobs.StartAfter("timing-capture-stop", $"Stop timing capture on {handle}", async j =>
         {
-            Task.Delay(250, cancellationToken).GetAwaiter().GetResult();
+            path = await session.Run(() =>
+            {
+                ConnectionHandle h = session.Get<ConnectionHandle>(handle);
+                string pending = h.TimingCaptureInProgress ?? throw new PixToolException("capture_not_running", "No timing capture is tracked on this connection.");
+                h.Connection.StopTimingCapture();
+                h.TimingCaptureInProgress = null;
+                h.Note("timingCaptureStopped", new { path = pending });
+                return pending;
+            }, j.Cancellation.Token, j.Id + ": stop timing capture").ConfigureAwait(false);
+            j.AddMessage("Waiting for PIX to finalise " + path);
+            try
+            {
+                timing = await WaitForReadableCaptureAsync(() => session.Run<object?>(() =>
+                {
+                    session.Get<ConnectionHandle>(handle);
+                    if (!File.Exists(path)) throw new IOException("The capture file has not been created yet.");
+                    IPixTimingCaptureDocument document = session.Factory.OpenTimingCaptureDocument<IPixTimingCaptureDocument>(path);
+                    if (open) return session.Register(new TimingCaptureHandle(path, document)).Summary();
+                    document.Close();
+                    return null;
+                }, j.Cancellation.Token, j.Id + ": finalize timing capture"), TimeSpan.FromSeconds(30), j.Cancellation.Token).ConfigureAwait(false);
+            }
+            catch (PixToolException ex) when (ex.Detail.Code == "capture_finalization_timeout")
+            {
+                throw new PixToolException(ex.Detail with { NextCalls = [new("pix_timing_open", new { path })] });
+            }
+        }, _ => new { stopped = true, path, timingCapture = timing }, handle), waitSeconds, cancellationToken);
+    }
+
+    /// <summary>Finalization is proven by a successful document open; delays never occupy the native worker.</summary>
+    internal static async Task<T> WaitForReadableCaptureAsync<T>(Func<Task<T>> open, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        long started = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try { return await open().ConfigureAwait(false); }
+            catch (Exception ex) when (ex is IOException or System.Runtime.InteropServices.ExternalException)
+            {
+                TimeSpan remaining = timeout - System.Diagnostics.Stopwatch.GetElapsedTime(started);
+                if (remaining <= TimeSpan.Zero) throw new PixToolException("capture_finalization_timeout",
+                    "PIX did not finish a readable timing capture before the deadline: " + PixErrors.Describe(ex), true);
+                await Task.Delay(remaining < TimeSpan.FromMilliseconds(250) ? remaining : TimeSpan.FromMilliseconds(250), cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 

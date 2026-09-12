@@ -86,6 +86,7 @@ public static class GpuCaptureTools
             queues = h.Queues.Select(q => q.ToDto()).ToArray(),
             totalEvents = h.Queues.Sum(q => (long)q.EventCount),
             analysis = h.AnalysisStatus(),
+            capabilities = h.CapabilitiesSnapshot(),
         };
     }
 
@@ -101,7 +102,7 @@ public static class GpuCaptureTools
         [Description("GPU capture handle")] string handle,
         [Description("Queue index from pix_gpu_queues. Omit to search all queues.")] int? queueIndex = null,
         [Description("First item to return (default 0).")] int offset = 0,
-        [Description("Maximum items to return (default 100, max 1000).")] int limit = Paging.DefaultLimit,
+        [Description("Maximum items to return (default 25, max 1000).")] int limit = Paging.DefaultLimit,
         [Description("Only events whose name contains this text (case-insensitive).")] string? nameContains = null,
         [Description("Only events whose name starts with this text.")] string? nameStartsWith = null,
         [Description("Only events whose API call data contains this text.")] string? apiCallContains = null,
@@ -109,8 +110,11 @@ public static class GpuCaptureTools
         [Description("Only direct children of this event index; requires queueIndex (event indices are per queue).")] uint? parentIndex = null,
         [Description("Only events with gpuId >= this value.")] uint? gpuIdMin = null,
         [Description("Only events with gpuId <= this value.")] uint? gpuIdMax = null,
+        [Description(EventScope.Description)] EventRef? scope = null,
         CancellationToken cancellationToken = default)
-        => Tools.Run(session, "pix_gpu_events", () =>
+    {
+        queueIndex = EventScope.ResolveQueue(session, handle, queueIndex, scope);
+        return Tools.Run(session, "pix_gpu_events", () =>
         {
             GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
             if (parentIndex.HasValue && !queueIndex.HasValue)
@@ -118,7 +122,7 @@ public static class GpuCaptureTools
                 throw new McpException("parentIndex requires queueIndex: event indices are per queue, so a parent index alone is ambiguous across queues.");
             }
             (int o, int l) = Paging.Normalize(offset, limit);
-            bool filtered = Tools.HasEventFilter(nameContains, nameStartsWith, apiCallContains, kind, parentIndex, gpuIdMin, gpuIdMax);
+            bool filtered = scope is not null || Tools.HasEventFilter(nameContains, nameStartsWith, apiCallContains, kind, parentIndex, gpuIdMin, gpuIdMax);
 
             if (queueIndex.HasValue && !filtered)
             {
@@ -126,7 +130,7 @@ public static class GpuCaptureTools
                 var page = new List<object>();
                 for (uint i = (uint)o; i < queue.EventCount && page.Count < l; i++)
                 {
-                    page.Add(h.Event(queue.Index, i).ToDto(queue.Index));
+                    page.Add(h.DescribeEvent(queue.Index, h.Event(queue.Index, i)));
                 }
                 return Paging.Page(page, queue.EventCount, o, l);
             }
@@ -138,17 +142,24 @@ public static class GpuCaptureTools
             {
                 foreach (EventRecord e in Tools.FilterEvents(h.AllEvents(qi), nameContains, nameStartsWith, apiCallContains, kind, parentIndex, gpuIdMin, gpuIdMax))
                 {
+                    if (scope is not null && !EventNavigation.IsWithin(h.AllEvents(qi), e.Index, scope.EventIndex)) continue;
                     if (total >= o && matches.Count < l)
                     {
-                        matches.Add(e.ToDto(qi));
+                        matches.Add(h.DescribeEvent(qi, e));
                     }
                     total++;
                 }
             }
             return Paging.Page(matches, total, o, l);
         }, cancellationToken);
+    }
 
-    [McpServerTool(Name = "pix_gpu_event", ReadOnly = true), Description("Details for one event, addressed by queueIndex+eventIndex or by gpuId (as reported by timing rows and Dr. PIX results): its record, the chain of parent (marker) events, and its direct children. For more children than maxChildren, page with pix_gpu_events(queueIndex, parentIndex).")]
+    [McpServerTool(Name = "pix_gpu_event", ReadOnly = true), Description("Inspect an event reference returned by event/timing queries, including its marker ancestors and direct children. Page further children with pix_gpu_events.")]
+    public static Task<string> EventByRef(PixSession session, EventRef eventRef, int maxChildren = 25,
+        CancellationToken cancellationToken = default)
+        => Event(session, eventRef.Handle, eventRef.QueueIndex, eventRef.EventIndex, maxChildren: maxChildren, cancellationToken: cancellationToken);
+
+    // Internal compatibility helper; the MCP surface accepts only an unambiguous EventRef.
     public static Task<string> Event(
         PixSession session,
         [Description("GPU capture handle")] string handle,
@@ -185,13 +196,14 @@ public static class GpuCaptureTools
 
             const int maxParents = 64;
             var parents = new List<object>();
+            var visited = new HashSet<uint> { index };
             uint p = e.ParentIndex;
-            while (p != uint.MaxValue && p < all.Length && p != index && parents.Count < maxParents)
+            while (p < all.Length && parents.Count < maxParents && visited.Add(p))
             {
-                parents.Add(all[p].ToDto(q));
+                parents.Add(h.DescribeEvent(q, all[p]));
                 p = all[p].ParentIndex;
             }
-            bool parentsTruncated = p != uint.MaxValue && p < all.Length && p != index;
+            bool parentsTruncated = p < all.Length && !visited.Contains(p);
 
             int max = Math.Clamp(maxChildren, 0, Paging.MaxLimit);
             var children = new List<object>();
@@ -202,13 +214,16 @@ public static class GpuCaptureTools
                 {
                     if (children.Count < max)
                     {
-                        children.Add(c.ToDto(q));
+                        children.Add(h.DescribeEvent(q, c));
                     }
                     childCount++;
                 }
             }
 
-            return new { @event = e.ToDto(q), parents, parentsTruncated, childCount, children, childrenTruncated = childCount > children.Count };
+            var nextCalls = new List<ToolCallDto>();
+            if (childCount > children.Count) nextCalls.Add(new("pix_gpu_events", new { handle, queueIndex = q, parentIndex = index, offset = children.Count, limit = 25 }));
+            if (parentsTruncated) nextCalls.Add(new("pix_gpu_event", new { eventRef = new EventRef(handle, q, p), maxChildren = 0 }));
+            return new { @event = h.DescribeEvent(q, e), parents, parentsTruncated, childCount, children, childrenTruncated = childCount > children.Count, nextCalls };
         }, cancellationToken);
 
     [McpServerTool(Name = "pix_gpu_api_objects", ReadOnly = true), Description("Lists D3D12 API objects recorded in the capture (heaps, resources, command queues, command allocators) with their ids and names. For resource details use pix_gpu_resources / pix_gpu_resource.")]
@@ -216,7 +231,7 @@ public static class GpuCaptureTools
         PixSession session,
         [Description("GPU capture handle")] string handle,
         [Description("First item (default 0).")] int offset = 0,
-        [Description("Maximum items (default 100, max 1000).")] int limit = Paging.DefaultLimit,
+        [Description("Maximum items (default 25, max 1000).")] int limit = Paging.DefaultLimit,
         [Description("Filter by object type: HEAP, RESOURCE, COMMAND_QUEUE, COMMAND_ALLOCATOR.")] string? type = null,
         [Description("Only objects whose name contains this text.")] string? nameContains = null,
         CancellationToken cancellationToken = default)
@@ -261,11 +276,12 @@ public static class GpuCaptureTools
         PixSession session,
         [Description("GPU capture handle")] string handle,
         [Description("Output PNG path. Defaults to <capture>.screenshot.png next to the capture file unless inline is true.")] string? outPath = null,
-        [Description("When true, returns the PNG inline as image content (only if under 4 MB).")] bool inline = false)
+        [Description("When true, returns the image inline; large PNGs get a thumbnail while the original remains retrievable.")] bool inline = false,
+        CancellationToken cancellationToken = default)
     {
         try
         {
-            (string json, byte[]? png) = await session.Run(() =>
+            var captured = await session.Run(() =>
             {
                 GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
                 IPixCapturedScreenshot screenshot = PixApiExtensionsGpuCapture.GetCapturedScreenshot(h.Document);
@@ -275,33 +291,38 @@ public static class GpuCaptureTools
                 {
                     throw new McpException($"Screenshot format {Json.EnumName(info.Format)} is not supported by the PNG encoder ({info.Width}x{info.Height}, {pixels.Length} bytes).");
                 }
-                byte[] encoded = Png.Encode(pixels, (int)info.Width, (int)info.Height, (int)info.RowPitchBytes, info.Format);
-                string? target = null;
-                if (!string.IsNullOrWhiteSpace(outPath) || !inline)
-                {
-                    target = string.IsNullOrWhiteSpace(outPath)
-                        ? Path.Combine(Path.GetDirectoryName(h.Path) ?? ".", Path.GetFileNameWithoutExtension(h.Path) + ".screenshot.png")
-                        : Path.GetFullPath(outPath);
-                    File.WriteAllBytes(target, encoded);
-                }
-                string result = Json.Serialize(new
-                {
-                    path = target,
-                    width = info.Width,
-                    height = info.Height,
-                    format = info.Format,
-                    toneMapped = Png.IsToneMapped(info.Format) ? true : (bool?)null,
-                    pngBytes = encoded.Length,
-                });
-                return (result, inline && encoded.Length < 4 * 1024 * 1024 ? encoded : null);
-            }).ConfigureAwait(false);
+                return (Info: info, Pixels: pixels, CapturePath: h.Path);
+            }, cancellationToken, "pix_gpu_screenshot").ConfigureAwait(false);
 
-            var content = new List<ContentBlock> { new TextContentBlock { Text = json } };
-            if (png is not null)
+            cancellationToken.ThrowIfCancellationRequested();
+            // Encoding, image transforms and filesystem I/O need no native PIX objects.
+            var screenshotInfo = captured.Info;
+            byte[] encoded = Png.Encode(captured.Pixels, (int)screenshotInfo.Width, (int)screenshotInfo.Height, (int)screenshotInfo.RowPitchBytes, screenshotInfo.Format);
+            string? target = null;
+            if (!string.IsNullOrWhiteSpace(outPath) || !inline)
             {
-                content.Add(new ImageContentBlock { Data = png, MimeType = "image/png" });
+                target = string.IsNullOrWhiteSpace(outPath)
+                    ? Path.Combine(Path.GetDirectoryName(captured.CapturePath) ?? ".", Path.GetFileNameWithoutExtension(captured.CapturePath) + ".screenshot.png")
+                    : Path.GetFullPath(outPath);
+                await File.WriteAllBytesAsync(target, encoded, cancellationToken).ConfigureAwait(false);
             }
-            return new CallToolResult { Content = content };
+            string? artifactRef = encoded.Length <= PreviewTools.MaxArtifactBytes ? PreviewTools.StoreArtifact(session, handle, encoded) : null;
+            RenderedImage? rendered = inline ? await ImageRenderer.Render(encoded, cancellationToken: cancellationToken).ConfigureAwait(false) : null;
+            string json = Json.Serialize(new
+            {
+                path = target, width = screenshotInfo.Width, height = screenshotInfo.Height, format = screenshotInfo.Format,
+                toneMapped = Png.IsToneMapped(screenshotInfo.Format) ? true : (bool?)null, pngBytes = encoded.Length,
+                artifactRef, artifactAvailable = artifactRef is not null,
+                artifactUnavailable = artifactRef is null ? "Original PNG exceeds the 32 MiB artifact limit; use outPath for the complete file." : null,
+                image = rendered is null ? null : new { width = rendered.Width, height = rendered.Height, resized = rendered.Resized },
+                nextCalls = artifactRef is null ? Array.Empty<ToolCallDto>() : [new ToolCallDto("pix_gpu_preview_image", new { artifactRef })],
+            });
+            var content = new List<ContentBlock> { new TextContentBlock { Text = json } };
+            if (rendered is not null)
+            {
+                content.Add(ImageContentBlock.FromBytes(rendered.Png, "image/png"));
+            }
+            return new CallToolResult { Content = content, StructuredContent = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(json) };
         }
         catch (Exception ex)
         {

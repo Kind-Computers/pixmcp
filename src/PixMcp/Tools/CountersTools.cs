@@ -39,18 +39,36 @@ public static class CountersTools
     internal static Preparation<GpuCaptureHandle> TimingPreparation(string handle)
         => new("timing", "timing", $"Collect GPU timing for {handle}", h => h.Timing is not null, (h, job) => CollectTiming(h, job));
 
-    /// <summary>Preparation for tools that need one counter set decoded for one queue.</summary>
-    internal static Preparation<GpuCaptureHandle> CounterSetPreparation(string handle, uint[] ids, int queueIndex)
+    /// <summary>One shared counter-set job collects once and materializes every queue.</summary>
+    internal static Preparation<GpuCaptureHandle> CounterSetPreparation(string handle, uint[] ids)
     {
         string key = CounterSetKey(ids);
-        return new("counters:" + key, "counters", $"Collect GPU counters [{key}] for {handle}",
-            h => h.CounterCollections.TryGetValue(key, out CounterCollectionCache? cache) && cache.RowsByQueue.ContainsKey(queueIndex),
-            (h, job) => CounterRows(CollectCounterSet(h, ids, job), h.Queue(queueIndex), job.Cancellation.Token));
+        return SharedCounterPreparation<GpuCaptureHandle>(handle, key, h => h.Queues.Select(queue => queue.Index).ToArray(),
+            h => h.CounterCollections.GetValueOrDefault(key),
+            (h, job) => CollectCounterSet(h, ids, job),
+            (h, cache, queueIndex, job) => CounterRows(cache, h.Queue(queueIndex), job.Cancellation.Token));
     }
+
+    internal static Preparation<T> SharedCounterPreparation<T>(string handle, string key,
+        Func<T, int[]> queueIndices, Func<T, CounterCollectionCache?> current,
+        Func<T, Job, CounterCollectionCache> collect, Action<T, CounterCollectionCache, int, Job> materialize) where T : PixHandle
+        => new("counters:" + key, "counters", $"Collect GPU counters [{key}] for {handle}",
+            h => current(h) is { } cache && queueIndices(h).All(cache.RowsByQueue.ContainsKey),
+            (h, job) =>
+            {
+                CounterCollectionCache cache = collect(h, job);
+                int[] queues = queueIndices(h);
+                for (int i = 0; i < queues.Length; i++)
+                {
+                    job.ThrowIfCancellationRequested();
+                    materialize(h, cache, queues[i], job);
+                    job.SetProgress((float)(i + 1) / queues.Length);
+                }
+            });
 
     private static string CounterSetKey(uint[] ids) => string.Join(",", ids);
 
-    private static void CollectTiming(GpuCaptureHandle h, Job? job)
+    internal static void CollectTiming(GpuCaptureHandle h, Job? job)
     {
         if (h.Timing is not null)
         {
@@ -84,17 +102,10 @@ public static class CountersTools
         return rows.ToArray();
     }
 
-    private static object TimingRowDto(EventTimingRow r) => new
-    {
-        queueIndex = r.QueueIndex,
-        index = r.Index,
-        gpuId = r.GpuId == uint.MaxValue ? (uint?)null : r.GpuId,
-        name = r.Name,
-        topStartNs = Ns(r.TopStart),
-        topDurationNs = Ns(r.TopDuration),
-        eopStartNs = Ns(r.EopStart),
-        eopDurationNs = Ns(r.EopDuration),
-    };
+    internal static TimingEventDto TimingRowDto(GpuCaptureHandle h, EventTimingRow r) => new(
+        new EventRef(h.Id, r.QueueIndex, r.Index), EventNavigation.MarkerPath(h.AllEvents(r.QueueIndex), r.Index),
+        r.QueueIndex, r.Index, r.GpuId == uint.MaxValue ? null : r.GpuId, r.Name,
+        Ns(r.TopStart), Ns(r.TopDuration), Ns(r.EopStart), Ns(r.EopDuration));
 
     private static ulong? Ns(ulong v) => v == GpuCaptureHandle.TimingNone ? null : v;
 
@@ -118,10 +129,10 @@ public static class CountersTools
                 timedEvents = timed.Length,
                 sumEopDurationNs = timed.Length == 0 ? 0 : timed.Aggregate(0UL, (a, r) => a + r.EopDuration),
                 spanNs = last - first,
-                slowest = timed.OrderByDescending(r => r.EopDuration).Take(10).Select(TimingRowDto).ToArray(),
+                slowest = timed.OrderByDescending(r => r.EopDuration).Take(10).Select(r => TimingRowDto(h, r)).ToArray(),
             });
         }
-        return new { handle = h.Id, queues };
+        return new { handle = h.Id, provenance = h.Provenance(), queues };
     }
 
     [McpServerTool(Name = "pix_gpu_timing_events", ReadOnly = true), Description("Per-event GPU timing rows, sortable by duration so 'the N slowest draws' is one call. Timing is collected first if needed, as a job (see waitSeconds; pix_gpu_timing_collect runs the same job explicitly).")]
@@ -131,15 +142,23 @@ public static class CountersTools
         [Description("GPU capture handle")] string handle,
         [Description("Queue index; omit for all queues.")] int? queueIndex = null,
         [Description("First item (default 0).")] int offset = 0,
-        [Description("Maximum items (default 100, max 1000).")] int limit = Paging.DefaultLimit,
+        [Description("Maximum items (default 25, max 1000).")] int limit = Paging.DefaultLimit,
         [Description("Sort key: eopDuration (default), topDuration, eopStart, index.")] string sortBy = "eopDuration",
         [Description("Sort descending (default true).")] bool descending = true,
         [Description("Only events with EOP duration >= this many nanoseconds.")] ulong minDurationNs = 0,
         [Description("Only events whose name contains this text.")] string? nameContains = null,
         [Description(Tools.KindDescription)] string? kind = null,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        [Description(EventScope.Description)] EventRef? scope = null,
         CancellationToken cancellationToken = default)
-        => Tools.RunWhenReady(session, jobs, "pix_gpu_timing_events", handle, TimingPreparation(handle), h =>
+    {
+        queueIndex = EventScope.ResolveQueue(session, handle, queueIndex, scope);
+        GpuCaptureHandle capture = session.Get<GpuCaptureHandle>(handle);
+        if (queueIndex.HasValue) capture.Queue(queueIndex.Value);
+        Tools.MatchesKind(new EventRecord(0, 0, uint.MaxValue, "", "", 0, 0), kind);
+        if (sortBy?.ToLowerInvariant() is not ("eopduration" or "topduration" or "eopstart" or "index"))
+            throw new PixToolException("invalid_arguments", "sortBy must be eopDuration, topDuration, eopStart or index.");
+        return Tools.RunWhenReady(session, jobs, "pix_gpu_timing_events", handle, TimingPreparation(handle), h =>
         {
             (int o, int l) = Paging.Normalize(offset, limit);
 
@@ -148,6 +167,8 @@ public static class CountersTools
                 : h.TimingRowsByQueue.OrderBy(kv => kv.Key).SelectMany(kv => kv.Value);
 
             rows = rows.Where(r => r.EopDuration != GpuCaptureHandle.TimingNone && r.EopDuration >= minDurationNs && Tools.Contains(r.Name, nameContains));
+            if (scope is not null)
+                rows = rows.Where(r => EventNavigation.IsWithin(h.AllEvents(scope.QueueIndex), r.Index, scope.EventIndex));
             if (!string.IsNullOrEmpty(kind))
             {
                 rows = rows.Where(r => Tools.MatchesKind(new EventRecord(r.Index, r.GpuId, uint.MaxValue, r.Name, r.ApiCallData, 0, 0), kind));
@@ -162,9 +183,10 @@ public static class CountersTools
                 _ => throw new McpException($"Unknown sortBy '{sortBy}'. Use eopDuration, topDuration, eopStart or index."),
             };
             EventTimingRow[] sorted = (descending ? rows.OrderByDescending(key) : rows.OrderBy(key)).ToArray();
-            var page = sorted.Skip(o).Take(l).Select(TimingRowDto).ToList();
-            return Paging.Page(page, sorted.Length, o, l);
+            var page = sorted.Skip(o).Take(l).Select(r => TimingRowDto(h, r)).ToList();
+            return Paging.Page(page, sorted.Length, o, l, new { provenance = h.Provenance() });
         }, waitSeconds, cancellationToken);
+    }
 
     [McpServerTool(Name = "pix_gpu_timing_tree", ReadOnly = true), Description("GPU time rolled up the marker hierarchy of one queue: lists the children of an event (top-level events when parentIndex is omitted) with inclusive time (PIX's own measurement when it has one, since PIX times markers as the span of their contents; otherwise the sum of the children), self time (inclusive minus children), timed-descendant count and share of the queue total, most expensive first. Answers 'which pass is slowest' directly; drill down by passing a child's index as parentIndex, or set depth > 1. Timing is collected first if needed, as a job (see waitSeconds).")]
     public static Task<string> TimingTreeTool(
@@ -174,60 +196,67 @@ public static class CountersTools
         [Description("Queue index (default 0).")] int queueIndex = 0,
         [Description("Event whose children to list; omit for the top level of the queue.")] uint? parentIndex = null,
         [Description("Levels of children to expand (default 1, max 4); limit applies per node at every level.")] int depth = 1,
-        [Description("Maximum children per node, most expensive first (default 50, max 1000).")] int limit = 50,
+        [Description("Maximum children per node, most expensive first (default 25, max 1000).")] int limit = Paging.DefaultLimit,
         [Description("Skip children whose inclusive time is below this many nanoseconds (default 0).")] ulong minInclusiveNs = 0,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        [Description("First direct child, in descending time order.")] int offset = 0,
+        [Description("Maximum total nodes in the expanded tree (default 100, max 1000).")] int maxNodes = 100,
         CancellationToken cancellationToken = default)
-        => Tools.RunWhenReady(session, jobs, "pix_gpu_timing_tree", handle, TimingPreparation(handle), h =>
+    {
+        GpuCaptureHandle capture = session.Get<GpuCaptureHandle>(handle);
+        QueueEntry queue = capture.Queue(queueIndex);
+        if (parentIndex.HasValue && parentIndex.Value >= queue.EventCount)
+            throw new PixToolException("invalid_arguments", $"parentIndex is outside queue {queueIndex}, which has {queue.EventCount} events.");
+        return Tools.RunWhenReady(session, jobs, "pix_gpu_timing_tree", handle, TimingPreparation(handle), h =>
         {
             TimingTreeNode[] nodes = h.TimingTreeNodes(queueIndex);
             if (parentIndex.HasValue && parentIndex.Value >= nodes.Length)
             {
                 throw new McpException($"parentIndex {parentIndex} is out of range; queue {queueIndex} has {nodes.Length} event(s).");
             }
-            int levels = Math.Clamp(depth, 1, 4);
-            int perNode = Math.Clamp(limit, 1, Paging.MaxLimit);
-            ulong total = TimingTree.Total(nodes);
-            TimingTreeNode[] children = TimingTree.Children(nodes, parentIndex).Where(c => c.InclusiveEopNs >= minInclusiveNs).ToArray();
-            return new
-            {
-                handle = h.Id,
-                queueIndex,
-                totalEopNs = total,
-                timedEvents = nodes.Count(n => n.HasOwnTiming),
-                parent = parentIndex.HasValue ? TimingTreeNodeDto(nodes, nodes[(int)parentIndex.Value], total, 0, perNode, minInclusiveNs) : null,
-                childCount = children.Length,
-                children = children.Take(perNode).Select(c => TimingTreeNodeDto(nodes, c, total, levels - 1, perNode, minInclusiveNs)).ToArray(),
-                childrenTruncated = children.Length > perNode,
-            };
+            return BuildTimingTree(h.Id, queueIndex, nodes, parentIndex, offset, limit, depth, maxNodes, minInclusiveNs, h.Provenance());
         }, waitSeconds, cancellationToken);
+    }
 
-    private static object TimingTreeNodeDto(TimingTreeNode[] nodes, TimingTreeNode n, ulong total, int depth, int limit, ulong minInclusiveNs)
+    internal static TimingTreeDto BuildTimingTree(string handle, int queueIndex, TimingTreeNode[] nodes,
+        uint? parentIndex, int offset, int limit, int depth, int maxNodes, ulong minInclusiveNs, object provenance)
     {
-        object? children = null;
-        bool? childrenTruncated = null;
-        if (depth > 0 && n.ChildCount > 0)
+        (int start, int take) = Paging.Normalize(offset, limit);
+        int budget = Math.Clamp(maxNodes, 1, 1000), initialBudget = budget;
+        ulong total = TimingTree.Total(nodes);
+        TimingTreeNode[] Children(uint? parent) => TimingTree.Children(nodes, parent).Where(c => c.InclusiveEopNs >= minInclusiveNs).ToArray();
+        ToolCallDto Next(uint? parent, int next) => new("pix_gpu_timing_tree", new
         {
-            TimingTreeNode[] kids = TimingTree.Children(nodes, n.Index).Where(c => c.InclusiveEopNs >= minInclusiveNs).ToArray();
-            children = kids.Take(limit).Select(c => TimingTreeNodeDto(nodes, c, total, depth - 1, limit, minInclusiveNs)).ToArray();
-            childrenTruncated = kids.Length > limit;
+            handle, queueIndex, parentIndex = parent, offset = next, limit = take, depth = Math.Clamp(depth, 1, 4), maxNodes = initialBudget, minInclusiveNs,
+        });
+        TimingBranchDto Branch(TimingTreeNode n, int levels)
+        {
+            budget--;
+            TimingTreeNode[] candidates = Children(n.Index);
+            var children = new List<TimingBranchDto>();
+            if (levels > 1)
+                foreach (TimingTreeNode child in candidates.Take(take))
+                {
+                    if (budget == 0) break;
+                    children.Add(Branch(child, levels - 1));
+                }
+            bool more = children.Count < candidates.Length;
+            return new(new(handle, queueIndex, n.Index), n.Index, n.Name, n.GpuId, n.MeasuredEopNs,
+                n.InclusiveEopNs, n.SelfEopNs, total == 0 ? 0 : Math.Round(100.0 * n.InclusiveEopNs / total, 2),
+                n.HasOwnTiming, n.TimedDescendants, candidates.Length, children, more,
+                more ? [Next(n.Index, children.Count)] : []);
         }
-        return new
+        TimingTreeNode[] roots = Children(parentIndex);
+        var page = new List<TimingBranchDto>();
+        foreach (TimingTreeNode child in roots.Skip(start).Take(take))
         {
-            index = n.Index,
-            name = n.Name,
-            apiCallData = string.IsNullOrEmpty(n.ApiCallData) ? null : n.ApiCallData,
-            gpuId = n.GpuId,
-            measuredEopNs = n.MeasuredEopNs,
-            inclusiveEopNs = n.InclusiveEopNs,
-            selfEopNs = n.SelfEopNs,
-            percentOfQueue = total == 0 ? 0 : Math.Round(100.0 * n.InclusiveEopNs / total, 2),
-            hasOwnTiming = n.HasOwnTiming,
-            timedDescendants = n.TimedDescendants,
-            childCount = n.ChildCount,
-            children,
-            childrenTruncated,
-        };
+            if (budget == 0) break;
+            page.Add(Branch(child, Math.Clamp(depth, 1, 4)));
+        }
+        int? nextOffset = start + page.Count < roots.Length ? start + page.Count : null;
+        return new(handle, queueIndex, total, nodes.Count(n => n.HasOwnTiming), start, roots.Length, page,
+            nextOffset, nextOffset.HasValue, initialBudget - budget, budget == 0, provenance,
+            nextOffset.HasValue ? [Next(parentIndex, nextOffset.Value)] : []);
     }
 
     // ---- GPU hardware counters ----
@@ -238,7 +267,7 @@ public static class CountersTools
         JobManager jobs,
         [Description("GPU capture handle")] string handle,
         [Description("First counter (default 0).")] int offset = 0,
-        [Description("Maximum counters (default 100, max 1000).")] int limit = Paging.DefaultLimit,
+        [Description("Maximum counters (default 25, max 1000).")] int limit = Paging.DefaultLimit,
         [Description("Only counters whose name or description contains this text (case-insensitive).")] string? nameContains = null,
         [Description("Only counters in this group (exact name from extra.groups, case-insensitive).")] string? group = null,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
@@ -315,19 +344,21 @@ public static class CountersTools
         => Tools.RunJob(jobs, "pix_gpu_counters_start", () =>
         {
             uint[] ids = NormalizeCounterIds(counterIds);
+            Preparation<GpuCaptureHandle> preparation = CounterSetPreparation(handle, ids);
             Job job = jobs.StartForHandle<GpuCaptureHandle>("counters", $"Collect GPU counters [{CounterSetKey(ids)}] for {handle}", handle, (j, h) =>
             {
-                CounterCollectionCache cache = CollectCounterSet(h, ids, j);
+                preparation.Prepare(h, j);
+                CounterCollectionCache cache = h.CounterCollections[CounterSetKey(ids)];
                 var queues = new List<object>();
                 foreach (QueueEntry queue in h.Queues)
                 {
-                    CounterEventRow[] rows = CounterRows(cache, queue, j.Cancellation.Token);
+                    CounterEventRow[] rows = cache.RowsByQueue[queue.Index];
                     queues.Add(new { queueIndex = queue.Index, eventCount = rows.Length, dataEventCount = rows.Count(r => r.HasData) });
                     j.SetProgress((float)queues.Count / h.Queues.Count);
                 }
                 return new { handle = h.Id, counters = CounterMetadata(cache), queues };
             });
-            Tools.RegisterPreparation(session, handle, "counters:" + CounterSetKey(ids), job);
+            Tools.RegisterPreparation(session, handle, preparation.Key, job);
             return job;
         }, waitSeconds, cancellationToken);
 
@@ -339,7 +370,8 @@ public static class CountersTools
     }
 
     private static object[] CounterMetadata(CounterCollectionCache cache)
-        => cache.Counters.Select(c => (object)new { id = c.Id, name = c.Name, dataType = c.DataType }).ToArray();
+        => cache.Counters.Select(c => (object)new { id = c.Id, name = c.Name, description = c.Description,
+            dataType = c.DataType, unit = "unknown", unitReason = "PIX counter metadata does not expose a separate unit field." }).ToArray();
 
     private static CounterCollectionCache CollectCounterSet(GpuCaptureHandle h, uint[] ids, Job? job)
     {
@@ -403,36 +435,56 @@ public static class CountersTools
         [Description("Counter ids to collect (from pix_gpu_counters_list). Keep the set small; each set replays the capture.")] uint[] counterIds,
         [Description("Queue index (default 0).")] int queueIndex = 0,
         [Description("First event (default 0).")] int offset = 0,
-        [Description("Maximum events (default 100, max 1000).")] int limit = Paging.DefaultLimit,
+        [Description("Maximum events (default 25, max 1000).")] int limit = Paging.DefaultLimit,
         [Description(Tools.KindDescription)] string? kind = null,
         [Description("Only events whose name contains this text.")] string? nameContains = null,
         [Description("Skip events that have no data for any requested counter (default true).")] bool onlyEventsWithData = true,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        [Description("Sort by this requested counter ID. Numeric thresholds also apply to this counter.")] uint? orderByCounterId = null,
+        [Description("Sort largest first (default true).")] bool descending = true,
+        [Description("Minimum numeric value of orderByCounterId, inclusive.")] decimal? minValue = null,
+        [Description("Maximum numeric value of orderByCounterId, inclusive.")] decimal? maxValue = null,
+        [Description("Restrict to this event and its descendants; must belong to handle and queueIndex.")] EventRef? scope = null,
+        [Description("First queue event index, inclusive.")] uint? firstEventIndex = null,
+        [Description("Last queue event index, inclusive.")] uint? lastEventIndex = null,
         CancellationToken cancellationToken = default)
     {
         uint[] ids = NormalizeCounterIds(counterIds);
+        if (orderByCounterId.HasValue && !ids.Contains(orderByCounterId.Value))
+            throw new McpException("orderByCounterId must be present in counterIds.");
+        if ((minValue.HasValue || maxValue.HasValue) && !orderByCounterId.HasValue)
+            throw new McpException("Numeric thresholds require orderByCounterId.");
+        if (minValue > maxValue || firstEventIndex > lastEventIndex)
+            throw new McpException("The minimum of a range must not exceed its maximum.");
+        if (scope is not null && (scope.Handle != handle || scope.QueueIndex != queueIndex))
+            throw new McpException("scope must belong to handle and queueIndex.");
+        GpuCaptureHandle selectedHandle = session.Get<GpuCaptureHandle>(handle);
+        QueueEntry selectedQueue = selectedHandle.Queue(queueIndex);
+        if (scope?.EventIndex >= selectedQueue.EventCount || firstEventIndex >= selectedQueue.EventCount || lastEventIndex >= selectedQueue.EventCount)
+            throw new McpException("The event scope is outside the selected queue.");
         // Validate the filter before an expensive replay, even if the queue is empty.
         Tools.MatchesKind(default(EventRecord) with { Name = string.Empty, ApiCallData = string.Empty }, kind);
-        return Tools.RunWhenReady(session, jobs, "pix_gpu_counters_collect", handle, CounterSetPreparation(handle, ids, queueIndex), h =>
+        return Tools.RunWhenReady(session, jobs, "pix_gpu_counters_collect", handle, CounterSetPreparation(handle, ids), h =>
         {
             (int o, int l) = Paging.Normalize(offset, limit);
             QueueEntry queue = h.Queue(queueIndex);
             CounterCollectionCache cache = CollectCounterSet(h, ids, null);
-            var page = new List<object>();
-            long total = 0;
-            foreach (CounterEventRow row in CounterRows(cache, queue))
+            EventRecord[] all = h.AllEvents(queueIndex);
+            int valueIndex = orderByCounterId.HasValue ? Array.FindIndex(cache.Counters, c => c.Id == orderByCounterId.Value) : -1;
+            IEnumerable<CounterEventRow> matching = CounterRows(cache, queue).Where(row =>
             {
                 EventRecord e = row.Event;
-                if (!Tools.Contains(e.Name, nameContains) || !Tools.MatchesKind(e, kind) || (onlyEventsWithData && !row.HasData)) continue;
-                if (total >= o && page.Count < l)
-                {
-                    var values = new Dictionary<string, object?>();
-                    for (int i = 0; i < cache.Counters.Length; i++) values[cache.Counters[i].Name] = row.Values[i];
-                    page.Add(new { index = e.Index, gpuId = e.GpuId == uint.MaxValue ? (uint?)null : e.GpuId, name = e.Name, values });
-                }
-                total++;
-            }
-            return Paging.Page(page, total, o, l, new { counters = CounterMetadata(cache) });
+                if (!Tools.Contains(e.Name, nameContains) || !Tools.MatchesKind(e, kind) || (onlyEventsWithData && !row.HasData)) return false;
+                if (e.Index < firstEventIndex || e.Index > lastEventIndex || (scope is not null && !EventNavigation.IsWithin(all, e.Index, scope.EventIndex))) return false;
+                return true;
+            });
+            CounterEventRow[] rows = CounterQuery.ApplyNumericQuery(matching, valueIndex, descending, minValue, maxValue).ToArray();
+            uint[] orderedIds = cache.Counters.Select(c => c.Id).ToArray();
+            CounterValueRowDto[] page = rows.Skip(o).Take(l).Select(row => new CounterValueRowDto(
+                new(handle, queueIndex, row.Event.Index), row.Event.Index, row.Event.GpuId == uint.MaxValue ? null : row.Event.GpuId,
+                row.Event.Name, EventNavigation.MarkerPath(all, row.Event.Index), CounterQuery.Values(orderedIds, row.Values))).ToArray();
+            return Paging.Page(page, rows.Length, o, l, new { counters = CounterMetadata(cache), provenance = h.Provenance(),
+                integerEncoding = "Integers outside the JavaScript safe range are decimal strings." });
         }, waitSeconds, cancellationToken);
     }
 
@@ -445,23 +497,34 @@ public static class CountersTools
         [Description("GPU capture handle")] string handle,
         [Description("Maximum sample points per series (default 200, max 5000).")] int maxPoints = 200,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        [Description("Original point offset for lossless pages; omit for evenly spaced overview samples.")] int? pointOffset = null,
         CancellationToken cancellationToken = default)
-        => Tools.RunWhenReady(session, jobs, "pix_gpu_occupancy", handle, GpuCaptureHandle.AnalysisPreparation(handle), h =>
+        => Tools.RunWhenReady(session, jobs, "pix_gpu_occupancy", handle, OccupancyPreparation(handle), h =>
         {
-            try
-            {
-                return OccupancyCore(h.GetAnalysis(), Math.Clamp(maxPoints, 2, 5000));
-            }
-            catch (Exception ex)
-            {
-                return PixErrors.Unavailable("occupancy", ex);
-            }
+            if (h.OptionalUnavailable.TryGetValue("occupancy", out object? unavailable)) return unavailable;
+            return OccupancyCore(h, Math.Clamp(maxPoints, 2, 5000), pointOffset);
         }, waitSeconds, cancellationToken);
 
-    private static unsafe object OccupancyCore(IPixGpuCaptureAnalysis analysis, int maxPoints)
+    private static Preparation<GpuCaptureHandle> OccupancyPreparation(string handle)
+        => new("occupancy", "occupancy", $"Collect GPU occupancy for {handle}",
+            h => h.OccupancyData is not null || h.OptionalUnavailable.ContainsKey("occupancy"), (h, job) =>
+            {
+                h.EnsureAnalysisStarted(job);
+                try { CollectOccupancy(h, job); h.MarkCapability("occupancy", "supported"); }
+                catch (Exception ex) when (ExplicitlyUnsupported(ex))
+                {
+                    h.OptionalUnavailable["occupancy"] = PixErrors.Unavailable("occupancy", ex);
+                    h.MarkCapability("occupancy", "unsupported", PixErrors.Describe(ex));
+                }
+            });
+
+    internal static bool ExplicitlyUnsupported(Exception ex)
+        => PixErrors.HResultOf(ex) is unchecked((int)0x80004001) or unchecked((int)0x80070032) or unchecked((int)0x887A0004);
+
+    private static void CollectOccupancy(GpuCaptureHandle h, Job job)
     {
         Guid occGuid = typeof(IPixGpuCaptureOccupancy).GUID;
-        _IPixGpuCaptureAnalysis_Extensions.GetOccupancy(analysis, in occGuid, out object occObj);
+        _IPixGpuCaptureAnalysis_Extensions.GetOccupancy(h.GetAnalysis(), in occGuid, out object occObj);
         var occupancy = (IPixGpuCaptureOccupancy)occObj;
 
         Guid colGuid = typeof(IPixCollection).GUID;
@@ -473,7 +536,14 @@ public static class CountersTools
         Guid dataGuid = typeof(IPixGpuCaptureOccupancyData).GUID;
         _IPixGpuCaptureOccupancy_Extensions.CollectOccupancy(occupancy, in dataGuid, out object dataObj);
         var data = (IPixGpuCaptureOccupancyData)dataObj;
+        job.ThrowIfCancellationRequested();
+        h.OccupancyData = new(data, types.ToArray(), stages.ToArray());
+    }
 
+    private static unsafe object OccupancyCore(GpuCaptureHandle h, int maxPoints, int? pointOffset)
+    {
+        OccupancyCache cache = h.OccupancyData!;
+        var types = cache.Types; var stages = cache.Stages; var data = cache.Data;
         var series = new List<object>();
         foreach (IPixGpuCaptureOccupancyType type in types)
         {
@@ -489,9 +559,9 @@ public static class CountersTools
                 }
                 var sampled = new List<object>();
                 uint maxSlots = 0;
-                foreach (ulong i in Sampling.Indices(count, maxPoints))
+                foreach (ulong i in SampleIndices(count, maxPoints, pointOffset))
                 {
-                    sampled.Add(new { t = points[i].TimeNanoseconds, slots = points[i].Slots });
+                    sampled.Add(new { index = i, timeNs = points[i].TimeNanoseconds, slots = points[i].Slots });
                 }
                 for (ulong i = 0; i < count; i++)
                 {
@@ -506,12 +576,16 @@ public static class CountersTools
                     pointCount = count,
                     peakSlots = maxSlots,
                     points = sampled,
+                    returnedPoints = sampled.Count,
+                    sampling = pointOffset.HasValue ? "consecutive" : "evenlySpaced",
+                    nextCalls = SampleNextCalls("pix_gpu_occupancy", h.Id, "pointOffset", count, maxPoints, pointOffset, null),
                 });
             }
         }
 
         return new
         {
+            provenance = h.Provenance(), timeOrigin = "PIX replay clock; not calibrated to application wall time",
             types = types.Select(t => new { name = Interop.W(t.GetName()), description = Interop.WOrNull(t.GetDescription()), maxSlots = t.GetMaxSlots() }).ToArray(),
             stages = stages.Select(s => new { name = Interop.W(s.GetName()), abbreviation = Interop.W(s.GetAbbreviation()) }).ToArray(),
             series,
@@ -526,22 +600,40 @@ public static class CountersTools
         [Description("Counter set index to collect (omit to only list).")] int? setIndex = null,
         [Description("Maximum samples per counter (default 200, max 5000).")] int maxSamples = 200,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        [Description("Original sample offset for lossless pages; omit for evenly spaced overview samples.")] int? sampleOffset = null,
         CancellationToken cancellationToken = default)
-        => Tools.RunWhenReady(session, jobs, "pix_gpu_hf_counters", handle, GpuCaptureHandle.AnalysisPreparation(handle), h =>
+        => Tools.RunWhenReady(session, jobs, "pix_gpu_hf_counters", handle, HfPreparation(handle, setIndex), h =>
         {
             if (setIndex < 0) throw new McpException("setIndex must be nonnegative.");
-            try
-            {
-                return HfCore(h, setIndex, Math.Clamp(maxSamples, 2, 5000));
-            }
-            catch (McpException) { throw; }
-            catch (Exception ex)
-            {
-                return PixErrors.Unavailable("highFrequencyCounters", ex);
-            }
+            if (h.OptionalUnavailable.TryGetValue("hf:" + setIndex, out object? unavailable)) return unavailable;
+            return HfCore(h, setIndex, Math.Clamp(maxSamples, 2, 5000), sampleOffset);
         }, waitSeconds, cancellationToken);
 
-    private static unsafe object HfCore(GpuCaptureHandle h, int? setIndex, int maxSamples)
+    private static Preparation<GpuCaptureHandle> HfPreparation(string handle, int? setIndex)
+    {
+        if (setIndex < 0) throw new McpException("setIndex must be nonnegative.");
+        string key = "hf:" + setIndex;
+        return new(key, "hf-counters", $"Collect high-frequency counters for {handle}",
+            h => h.OptionalUnavailable.ContainsKey(key) || (setIndex.HasValue ? h.HighFrequencyCollections.ContainsKey(setIndex.Value) : h.HighFrequencyCatalog is not null),
+            (h, job) =>
+            {
+                h.EnsureAnalysisStarted(job);
+                try
+                {
+                    h.HighFrequencyCatalog ??= HfCore(h, null, 2);
+                    if (setIndex.HasValue) HfCore(h, setIndex, 2);
+                    job.ThrowIfCancellationRequested();
+                    h.MarkCapability("highFrequencyCounters", "supported");
+                }
+                catch (Exception ex) when (ExplicitlyUnsupported(ex))
+                {
+                    h.OptionalUnavailable[key] = PixErrors.Unavailable("highFrequencyCounters", ex);
+                    h.MarkCapability("highFrequencyCounters", "unsupported", PixErrors.Describe(ex));
+                }
+            });
+    }
+
+    private static unsafe object HfCore(GpuCaptureHandle h, int? setIndex, int maxSamples, int? sampleOffset = null)
     {
         Guid hfGuid = typeof(IPixGpuCaptureHighFrequencyCounters).GUID;
         _IPixGpuCaptureAnalysis_Extensions.GetHighFrequencyCounters(h.GetAnalysis(), in hfGuid, out object hfObj);
@@ -605,12 +697,13 @@ public static class CountersTools
             samples = new
             {
                 set = cached.Set,
-                counters = cached.Counters.Select(c => HfSamplesDto(cached, c, maxSamples)).ToArray(),
+                counters = cached.Counters.Select(c => HfSamplesDto(h, setIndex.Value, cached, c, maxSamples, sampleOffset)).ToArray(),
             };
         }
 
         return new
         {
+            provenance = h.Provenance(), timeOrigin = "PIX replay clock; batch IDs identify sample collections",
             counterCount = counters.GetCount(),
             groups = Interop.Items<IPixGpuCaptureCounterCollection>(groups).Select(g => new { name = Interop.W(g.GetName()), count = g.GetCount() }).ToArray(),
             sets = setList,
@@ -618,7 +711,7 @@ public static class CountersTools
         };
     }
 
-    private static unsafe object HfSamplesDto(HfCollectionCache cache, HfCounterSamples counter, int maxSamples)
+    private static unsafe object HfSamplesDto(GpuCaptureHandle h, int setIndex, HfCollectionCache cache, HfCounterSamples counter, int maxSamples, int? sampleOffset)
     {
         if (counter.Error is not null) return new { counter = counter.Counter, unavailable = true, reason = counter.Error };
         try
@@ -630,7 +723,7 @@ public static class CountersTools
                 ref batchId, ref count, ref timestamps, ref values);
             if (count > 0 && (timestamps == null || values == null))
                 throw new InvalidOperationException("PIX returned sample counts without sample data.");
-            var sampled = Sampling.Select(count, maxSamples, i => new { t = timestamps[i], v = values[i] });
+            var sampled = SampleIndices(count, maxSamples, sampleOffset).Select(i => new { index = i, timeNs = timestamps[i], value = values[i] }).ToArray();
             // PIX owns the returned pointers for the lifetime of this data object.
             GC.KeepAlive(cache.Data);
             return new
@@ -642,8 +735,25 @@ public static class CountersTools
                 max = counter.Max,
                 average = counter.Average,
                 samples = sampled,
+                returnedSamples = sampled.Length,
+                sampling = sampleOffset.HasValue ? "consecutive" : "evenlySpaced",
+                nextCalls = SampleNextCalls("pix_gpu_hf_counters", h.Id, "sampleOffset", count, maxSamples, sampleOffset, setIndex),
             };
         }
         catch (Exception ex) { return new { counter = counter.Counter, unavailable = true, reason = PixErrors.Describe(ex) }; }
+    }
+
+    private static IEnumerable<ulong> SampleIndices(ulong count, int limit, int? offset)
+        => offset.HasValue ? Enumerable.Range(0, (int)Math.Min((ulong)limit, count > (ulong)Math.Max(0, offset.Value) ? count - (ulong)Math.Max(0, offset.Value) : 0))
+            .Select(i => (ulong)Math.Max(0, offset.Value) + (ulong)i) : Sampling.Indices(count, limit);
+
+    private static ToolCallDto[] SampleNextCalls(string tool, string handle, string offsetName, ulong count, int limit, int? offset, int? setIndex)
+    {
+        long next = offset.HasValue ? (long)offset.Value + limit : 0;
+        if ((offset.HasValue && (ulong)next >= count) || (!offset.HasValue && count <= (ulong)limit)) return [];
+        var args = new Dictionary<string, object> { ["handle"] = handle, [offsetName] = next,
+            [tool == "pix_gpu_occupancy" ? "maxPoints" : "maxSamples"] = limit };
+        if (setIndex.HasValue) args["setIndex"] = setIndex.Value;
+        return [new(tool, args)];
     }
 }

@@ -66,7 +66,7 @@ internal readonly record struct AnalysisOptions(ulong? Adapter = null, uint? Pow
     }
 }
 
-public sealed class GpuCaptureHandle : PixHandle
+public sealed partial class GpuCaptureHandle : PixHandle
 {
     public const ulong TimingNone = ulong.MaxValue;
 
@@ -335,6 +335,12 @@ public sealed class GpuCaptureHandle : PixHandle
         CollectedCounters.Clear();
         CounterCollections.Clear();
         HighFrequencyCollections.Clear();
+        OccupancyData = null;
+        HighFrequencyCatalog = null;
+        OptionalUnavailable.Clear();
+        _capabilities.Clear();
+        ResetAccessedResources();
+        ShaderIndex = null;
         DrPix = null;
         Experiments = null;
         Analysis = null;

@@ -42,6 +42,7 @@ public static class TimingCaptureTools
             }
             Job job = jobs.StartForHandle<TimingCaptureHandle>("symbols", $"Resolve symbols for {handle}", handle, (j, h) =>
             {
+                h.InvalidateQueries();
                 var settings = new TimingCaptureSymbolSettings
                 {
                     IncludeKernelSymbols = includeKernelSymbols,
@@ -51,6 +52,7 @@ public static class TimingCaptureTools
                 };
                 PixApiExtensionsTimingCapture.ResolveSymbols(h.Document, pdbSearchPath, settings, j.AddMessage, j.SetProgress);
                 h.SymbolsResolved = true;
+                h.RefreshCapturePath();
                 return h.Summary();
             });
             return Json.Serialize(await jobs.WaitOrStatus(job, waitSeconds, cancellationToken).ConfigureAwait(false));
@@ -70,13 +72,16 @@ public static class TimingCaptureTools
         => Tools.Run(session, "pix_timing_save", () =>
         {
             TimingCaptureHandle h = session.Get<TimingCaptureHandle>(handle);
+            h.InvalidateQueries();
             if (string.IsNullOrWhiteSpace(asPath))
             {
                 h.Document.Save();
+                h.RefreshCapturePath();
                 return new { saved = h.CapturePath };
             }
             string full = Path.GetFullPath(asPath);
             _IPixTimingCaptureDocument_Extensions.SaveAs(h.Document, full);
+            h.RefreshCapturePath();
             return new { saved = full };
         }, cancellationToken);
 }

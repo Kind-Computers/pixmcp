@@ -74,7 +74,7 @@ public static class Json
 /// <summary>Offset/limit paging shared by every enumeration tool.</summary>
 public static class Paging
 {
-    public const int DefaultLimit = 100;
+    public const int DefaultLimit = 25;
     public const int MaxLimit = 1000;
 
     public static (int offset, int limit) Normalize(int? offset, int? limit)

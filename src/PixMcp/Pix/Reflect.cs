@@ -15,6 +15,9 @@ namespace PixMcp.Pix;
 public static class Reflect
 {
     public static object? ToObject(object? value, int depth = 0)
+        => ConvertValue(value, new HashSet<object>(ReferenceEqualityComparer.Instance));
+
+    private static object? ConvertValue(object? value, HashSet<object> ancestors)
     {
         if (value is null)
         {
@@ -37,15 +40,15 @@ public static class Reflect
                 return value;
             // Generated array wrappers expose all elements through their spans.
             case __float_4 floats:
-                return ToObject(floats.AsReadOnlySpan().ToArray(), depth);
+                return ConvertValue(floats.AsReadOnlySpan().ToArray(), ancestors);
             case __uint_4 uints:
-                return ToObject(uints.AsReadOnlySpan().ToArray(), depth);
+                return ConvertValue(uints.AsReadOnlySpan().ToArray(), ancestors);
             case __ushort_4 ushorts:
-                return ToObject(ushorts.AsReadOnlySpan().ToArray(), depth);
+                return ConvertValue(ushorts.AsReadOnlySpan().ToArray(), ancestors);
             case __DXGI_FORMAT_8 formats:
-                return ToObject(formats.AsReadOnlySpan().ToArray(), depth);
+                return ConvertValue(formats.AsReadOnlySpan().ToArray(), ancestors);
             case __D3D12_RENDER_TARGET_BLEND_DESC_8 blends:
-                return ToObject(blends.AsReadOnlySpan().ToArray(), depth);
+                return ConvertValue(blends.AsReadOnlySpan().ToArray(), ancestors);
             case Windows.Win32.__char_128 chars:
                 return chars.ToString();
         }
@@ -55,53 +58,54 @@ public static class Reflect
         {
             return null;
         }
-        if (depth > 5)
+        // ResultStore owns output budgets. Copy complete finite data here so tails/deep fields
+        // remain retrievable instead of being irreversibly replaced by "..." or type names.
+        bool reference = !type.IsValueType;
+        if (reference && !ancestors.Add(value))
+            return new { unavailable = true, reason = "Reference cycle in reflected data.", type = type.FullName };
+        try
         {
-            return type.Name;
-        }
+            if (value is IDictionary dictionary)
+            {
+                var entries = new Dictionary<string, object?>();
+                foreach (DictionaryEntry entry in dictionary)
+                    entries[Convert.ToString(entry.Key, System.Globalization.CultureInfo.InvariantCulture) ?? ""] = ConvertValue(entry.Value, ancestors);
+                return entries;
+            }
+            if (value is IEnumerable enumerable)
+            {
+                var list = new List<object?>();
+                foreach (object? item in enumerable) list.Add(ConvertValue(item, ancestors));
+                return list;
+            }
 
-        if (value is IEnumerable enumerable && value is not IDictionary)
-        {
-            var list = new List<object?>();
-            int n = 0;
-            foreach (object? item in enumerable)
+            var dict = new Dictionary<string, object?>();
+            foreach (FieldInfo field in type.GetFields(BindingFlags.Public | BindingFlags.Instance))
             {
-                if (n++ >= 256)
+                if (IsPointer(field.FieldType)) continue;
+                object? fieldValue;
+                try { fieldValue = field.GetValue(value); }
+                catch (Exception ex) { dict[JsonNamingPolicy.CamelCase.ConvertName(field.Name.TrimStart('_'))] = new { unavailable = true, reason = ex.Message }; continue; }
+                dict[JsonNamingPolicy.CamelCase.ConvertName(field.Name.TrimStart('_'))] = ConvertValue(fieldValue, ancestors);
+            }
+            if (dict.Count == 0)
+            {
+                foreach (PropertyInfo property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
                 {
-                    list.Add("...");
-                    break;
+                    if (property.GetIndexParameters().Length > 0 || IsPointer(property.PropertyType)) continue;
+                    object? propertyValue;
+                    try { propertyValue = property.GetValue(value); }
+                    catch (Exception ex) { dict[JsonNamingPolicy.CamelCase.ConvertName(property.Name)] = new { unavailable = true, reason = ex.Message }; continue; }
+                    dict[JsonNamingPolicy.CamelCase.ConvertName(property.Name)] = ConvertValue(propertyValue, ancestors);
                 }
-                list.Add(ToObject(item, depth + 1));
             }
-            return list;
+            return dict.Count == 0 ? value.ToString() : dict;
         }
-
-        var dict = new Dictionary<string, object?>();
-        foreach (FieldInfo field in type.GetFields(BindingFlags.Public | BindingFlags.Instance))
+        finally
         {
-            if (field.FieldType.IsPointer || field.FieldType == typeof(IntPtr) || field.FieldType == typeof(UIntPtr))
-            {
-                continue;
-            }
-            object? fieldValue;
-            try { fieldValue = field.GetValue(value); }
-            catch { continue; }
-            dict[JsonNamingPolicy.CamelCase.ConvertName(field.Name.TrimStart('_'))] = ToObject(fieldValue, depth + 1);
+            if (reference) ancestors.Remove(value);
         }
-        if (dict.Count == 0)
-        {
-            foreach (PropertyInfo property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
-            {
-                if (property.GetIndexParameters().Length > 0 || property.PropertyType.IsPointer)
-                {
-                    continue;
-                }
-                object? propertyValue;
-                try { propertyValue = property.GetValue(value); }
-                catch { continue; }
-                dict[JsonNamingPolicy.CamelCase.ConvertName(property.Name)] = ToObject(propertyValue, depth + 1);
-            }
-        }
-        return dict.Count == 0 ? value.ToString() : dict;
     }
+
+    private static bool IsPointer(Type type) => type.IsPointer || type.IsByRefLike || type == typeof(IntPtr) || type == typeof(UIntPtr);
 }

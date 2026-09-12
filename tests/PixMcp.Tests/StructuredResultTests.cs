@@ -11,18 +11,18 @@ public class StructuredResultTests
     [InlineData("{\"handle\":\"gpu-1\",\"count\":2}", false)]
     [InlineData("[]", true)]
     [InlineData("[{\"handle\":\"gpu-1\"}]", true)]
-    public void AddsStructureWithoutChangingLegacyText(string json, bool array)
+    public void AddsMatchingStructureAndNormalizesArrayText(string json, bool array)
     {
         var text = new TextContentBlock { Text = json };
         var result = new CallToolResult { Content = [text] };
         StructuredToolResults.AddStructuredContent(result);
 
-        Assert.Same(text, Assert.Single(result.Content));
-        Assert.Equal(json, text.Text);
+        if (!array) Assert.Same(text, Assert.Single(result.Content));
         JsonElement structured = result.StructuredContent!.Value;
         Assert.Equal(JsonValueKind.Object, structured.ValueKind);
         JsonElement payload = array ? structured.GetProperty("items") : structured;
         Assert.True(JsonElement.DeepEquals(JsonSerializer.Deserialize<JsonElement>(json), payload));
+        Assert.True(JsonElement.DeepEquals(JsonSerializer.Deserialize<JsonElement>(((TextContentBlock)result.Content[0]).Text), structured));
     }
 
     [Fact]
@@ -58,11 +58,11 @@ public class StructuredResultTests
     }
 
     [Fact]
-    public void LeavesErrorsAndExistingStructuredResultsUntouched()
+    public void StructuresErrorsAndLeavesExistingStructuredResultsUntouched()
     {
         var error = new CallToolResult { IsError = true, Content = [new TextContentBlock { Text = "{\"error\":\"failed\"}" }] };
         StructuredToolResults.AddStructuredContent(error);
-        Assert.Null(error.StructuredContent);
+        Assert.Equal("tool_error", error.StructuredContent!.Value.GetProperty("code").GetString());
         Assert.True(error.IsError);
 
         JsonElement existing = JsonSerializer.SerializeToElement(new { authoritative = true });
@@ -85,7 +85,7 @@ public class StructuredResultTests
     [Fact]
     public void EventPageSchemaDescribesStableFieldsAndAllowsOmittedNulls()
     {
-        JsonElement schema = StructuredToolResults.SchemaFor("pix_gpu_events");
+        JsonElement schema = StructuredToolResults.CoreSchemaFor("pix_gpu_events");
         Assert.Equal("object", schema.GetProperty("type").GetString());
         string[] required = schema.GetProperty("required").EnumerateArray().Select(e => e.GetString()!).ToArray();
         Assert.Contains("total", required);
@@ -106,7 +106,7 @@ public class StructuredResultTests
     [Fact]
     public void JobSchemaIncludesCancellationRequestWithoutRequiringAnUnfinishedResult()
     {
-        JsonElement schema = StructuredToolResults.SchemaFor("pix_job_status");
+        JsonElement schema = StructuredToolResults.CoreSchemaFor("pix_job_status");
         JsonElement properties = schema.GetProperty("properties");
         Assert.Equal("boolean", properties.GetProperty("cancellationRequested").GetProperty("type").GetString());
         string[] required = schema.GetProperty("required").EnumerateArray().Select(e => e.GetString()!).ToArray();

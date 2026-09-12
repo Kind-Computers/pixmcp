@@ -14,33 +14,63 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class ShaderProfilingTools
 {
-    [McpServerTool(Name = "pix_gpu_shader_profile"), Description("Experimental: profiles the shaders executed by a range of events on one queue with PIX's shader profiler and reports, per shader stage, the hottest instructions (byte offset, sample count, stall reasons) plus the stall-type legend. Replays the range repeatedly, so it runs as a job; starts GPU analysis if needed. Needs driver support: on unsupported GPUs the job fails with PIX's error. Map offsets to code with pix_gpu_shader_code(codeType: ISA).")]
+    [McpServerTool(Name = "pix_gpu_shader_profile"), Description("Experimental shader profiling for an event range on one queue. Returns a job whose stored result includes every instruction, hottest first, plus sample/stall metadata and shader references matched by hash and stage. Read result pages with pix_result_read. Byte offsets refer to ISA, not HLSL lines; no source mapping is inferred. Requires driver support.")]
     public static Task<string> Profile(
         PixSession session,
         JobManager jobs,
-        [Description("GPU capture handle")] string handle,
-        [Description("Queue index")] int queueIndex,
-        [Description("First event index of the range (a draw/dispatch or a marker).")] uint firstEventIndex,
-        [Description("Last event index of the range (default: same as firstEventIndex).")] uint? lastEventIndex = null,
-        [Description("Maximum instructions reported per shader, hottest first (default 50, max 1000).")] int maxInstructions = 50,
+        [Description("First event of the range (a draw/dispatch or marker).")] EventRef firstEventRef,
+        [Description("Last event; defaults to firstEventRef. Must use the same capture and queue.")] EventRef? lastEventRef = null,
         [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
         CancellationToken cancellationToken = default)
-        => Tools.RunJob(jobs, "pix_gpu_shader_profile", () => jobs.StartForHandle<GpuCaptureHandle>("shader-profile",
-            $"Profile shaders of {handle} queue {queueIndex} events {firstEventIndex}..{lastEventIndex ?? firstEventIndex}", handle, (j, h) =>
+    {
+        ReferenceValidation.Event(session, firstEventRef);
+        lastEventRef ??= firstEventRef;
+        ReferenceValidation.Event(session, lastEventRef);
+        if (lastEventRef.Handle != firstEventRef.Handle || lastEventRef.QueueIndex != firstEventRef.QueueIndex ||
+            lastEventRef.EventIndex < firstEventRef.EventIndex) throw new McpException("The event range must be ordered within the same capture and queue.");
+        return Tools.RunJob(jobs, "pix_gpu_shader_profile", () => jobs.StartForHandle<GpuCaptureHandle>("shader-profile",
+            $"Profile shaders of {firstEventRef.Handle} queue {firstEventRef.QueueIndex} events {firstEventRef.EventIndex}..{lastEventRef.EventIndex}", firstEventRef.Handle, (j, h) =>
         {
-            int max = Math.Clamp(maxInstructions, 1, Paging.MaxLimit);
+            if (h.OptionalUnavailable.TryGetValue("shaderProfiling", out object? cached)) return cached;
             h.EnsureAnalysisStarted(j);
-            PIX_EVENT_INFO first = h.EventInfo(queueIndex, firstEventIndex);
-            PIX_EVENT_INFO last = h.EventInfo(queueIndex, lastEventIndex ?? firstEventIndex);
-            IPixGpuCaptureAnalysisExperimental experimental = h.GetAnalysis() as IPixGpuCaptureAnalysisExperimental
-                ?? ExperimentalCapture.GetAnalysisExperimental(h.Document);
+            PIX_EVENT_INFO first = h.EventInfo(firstEventRef.QueueIndex, firstEventRef.EventIndex);
+            PIX_EVENT_INFO last = h.EventInfo(lastEventRef.QueueIndex, lastEventRef.EventIndex);
             j.AddMessage("Profiling shaders (replaying the event range)...");
             j.ThrowIfCancellationRequested();
-            IPixShaderProfilingLiveResult result = ExperimentalAnalysis.ProfileShaderPipeline(experimental, first, last);
-            return Describe(result, max);
+            try
+            {
+                IPixGpuCaptureAnalysisExperimental experimental = h.GetAnalysis() as IPixGpuCaptureAnalysisExperimental
+                    ?? ExperimentalCapture.GetAnalysisExperimental(h.Document);
+                IPixShaderProfilingLiveResult result = ExperimentalAnalysis.ProfileShaderPipeline(experimental, first, last);
+                var identities = new List<ShaderInfoDto>();
+                var coverage = new List<object>();
+                EventRecord[] records = h.AllEvents(firstEventRef.QueueIndex);
+                foreach (EventRecord record in records)
+                {
+                    bool inRange = record.Index >= firstEventRef.EventIndex && record.Index <= lastEventRef.EventIndex;
+                    if ((!inRange && !EventNavigation.IsWithin(records, record.Index, firstEventRef.EventIndex) &&
+                        !EventNavigation.IsWithin(records, record.Index, lastEventRef.EventIndex)) ||
+                        !Tools.MatchesKind(record, "drawOrDispatch")) continue;
+                    j.ThrowIfCancellationRequested();
+                    var eventRef = new EventRef(h.Id, firstEventRef.QueueIndex, record.Index);
+                    try { identities.AddRange(PipelineTools.ReadShaders(h, eventRef)); }
+                    catch (Exception ex) { coverage.Add(new { eventRef, unavailable = true, reason = PixErrors.Describe(ex) }); }
+                }
+                h.MarkCapability("shaderProfiling", "supported");
+                return Describe(result, identities, coverage, h.Provenance(), firstEventRef, lastEventRef);
+            }
+            catch (Exception ex) when (PixErrors.ToDto(ex).Code == "unsupported_feature")
+            {
+                object unavailable = PixErrors.Unavailable("shaderProfiling", ex);
+                h.OptionalUnavailable["shaderProfiling"] = unavailable;
+                h.MarkCapability("shaderProfiling", "unsupported", PixErrors.Describe(ex));
+                return unavailable;
+            }
         }), waitSeconds, cancellationToken);
+    }
 
-    private static unsafe object Describe(IPixShaderProfilingLiveResult result, int maxInstructions)
+    private static unsafe object Describe(IPixShaderProfilingLiveResult result, IReadOnlyList<ShaderInfoDto> identities,
+        IReadOnlyList<object> coverage, ReplayProvenance provenance, EventRef firstEventRef, EventRef lastEventRef)
     {
         var stallTypes = new Dictionary<uint, (string Name, string? Description)>();
         uint stallTypeCount = result.GetStallTypeCount();
@@ -90,7 +120,7 @@ public static class ShaderProfilingTools
                 }
                 instructions.Add((instruction.GetId(), instruction.GetOffsetBytes(), samples, stalls.ToArray()));
             }
-            var hottest = instructions.OrderByDescending(i => i.Samples).ThenBy(i => i.Offset).Take(maxInstructions)
+            var hottest = instructions.OrderByDescending(i => i.Samples).ThenBy(i => i.Offset)
                 .Select(i => new
                 {
                     id = i.Id,
@@ -105,18 +135,28 @@ public static class ShaderProfilingTools
                 id = shader.GetId(),
                 stage = shader.GetStage(),
                 hash,
+                shaderRefs = MatchReferences(identities, hash, Json.EnumName(shader.GetStage())),
                 instructionCount,
                 totalSamples,
                 instructions = hottest,
-                instructionsTruncated = instructionCount > maxInstructions,
             });
         }
 
         return new
         {
+            firstEventRef,
+            lastEventRef,
+            provenance,
+            coverage,
             shaderCount,
             stallTypes = stallTypes.Select(kv => new { id = kv.Key, name = kv.Value.Name, description = kv.Value.Description }).ToArray(),
             shaders,
         };
     }
+
+    internal static IReadOnlyList<ShaderRef> MatchReferences(IEnumerable<ShaderInfoDto> identities, string? hash, string stage)
+        => string.IsNullOrEmpty(hash) ? [] : identities
+            .Where(s => s.ShaderRef is not null && string.Equals(s.Hash, hash, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(s.Stage, stage, StringComparison.OrdinalIgnoreCase))
+            .Select(s => s.ShaderRef!).Distinct().ToArray();
 }

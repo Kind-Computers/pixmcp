@@ -1,300 +1,440 @@
-# pixmcp
+﻿# pixmcp
 
-An [MCP](https://modelcontextprotocol.io/) server that exposes Microsoft's **PIX on Windows** API
-so an AI agent (Claude Code, Claude Desktop, or any MCP client) can open GPU captures, timing
-captures and DirectX dump files and ask questions about them: which draws are slowest, what
-pipeline state and resources a draw uses, what a shader's source looks like, what Dr. PIX thinks,
-or why a GPU hang happened.
+An [MCP](https://modelcontextprotocol.io/) server for Microsoft's **PIX on Windows**.
+Open GPU captures and DirectX dumps, locate expensive work, inspect pipeline state and
+resources, search shaders, compare captures, and view replay output. Version 1.0 provides
+typed navigation references, compact summaries, and retrievable result snapshots for LLMs.
 
-It wraps the same API the [microsoft/pix-samples](https://github.com/microsoft/pix-samples)
-repository demonstrates (`PixApiCsExt.experimental.dll`), and it needs no database: the capture
-file plus PIX's own engine is the queryable store. The server just keeps open documents and the
-(expensive) GPU analysis session alive in memory behind handles.
+The server wraps the experimental PIX API. Capture files remain the source of truth;
+open documents and replay sessions are process-local. Result snapshots use bounded
+memory and temporary-disk storage, and can be exported as JSON.
 
-## Prerequisites
+## Requirements and build
 
-- Windows 11 x64 with a D3D12-capable GPU.
-- A **PIX Preview build newer than 2606.15** from https://devblogs.microsoft.com/pix/download/
-  (retail PIX builds do not ship the API; 2606.18-preview is the build the server is verified
-  against). The server looks in `%ProgramFiles%\Microsoft PIX Preview\<version>` and picks the
-  newest; set `PIX_DIR` to override. An invalid explicit override is an error; the server does not
-  silently select another installation.
-- **Windows Developer Mode** enabled (required by PIX for GPU analysis / replay).
-- .NET 10 SDK (to build) and runtime (to run).
+- Windows 11 x64 and a D3D12-capable GPU.
+- PIX Preview newer than 2606.15. Development uses **2606.18-preview**; retail PIX does not
+  ship this API. Install from [Microsoft's PIX download page](https://devblogs.microsoft.com/pix/download/).
+- Windows Developer Mode for GPU replay.
+- .NET 10 SDK to build and runtime to run.
 
-## Build
+The newest installation under `%ProgramFiles%\Microsoft PIX Preview` is selected.
+Set `PIX_DIR` to a versioned installation directory to override it. An invalid explicit
+override is an error. The managed PIX DLL loads in place from that installation.
 
-```
+```powershell
 dotnet build pixmcp.sln -c Release
 dotnet test pixmcp.sln -c Release
 ```
 
-The output is `src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\PixMcp.exe`. The PIX managed
-assembly is loaded in place from the PIX install (it is never copied next to the exe), so the
-build also fails with a clear message when no compatible PIX Preview is installed.
-At runtime, missing or invalid PIX installations produce an actionable stderr message and
-exit code 1 before the MCP transport starts. `global.json` pins the .NET 10 SDK band.
+The executable is
+`src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\PixMcp.exe`.
+`scripts\publish.cmd` creates a framework-dependent `dist\PixMcp.exe`.
+The .NET runtime and PIX installation are still required. The single-file publish
+includes the SQLite native library and extracts it on first use.
 
-`scripts\publish.cmd` publishes a single framework-dependent `dist\PixMcp.exe` (about 30 MB; the
-.NET 10 runtime must be installed, PIX is still loaded from its install directory) that can be
-copied anywhere and registered with any MCP client.
+## Connect a client
 
-## Use with Claude Code
+Run the executable as a stdio MCP server, with no arguments. Logs go to stderr.
+Set `Logging__LogLevel__Default=Debug` to include PIX informational messages.
 
-The repo ships a `.mcp.json` that points at the built exe, so after building you can just run
-`claude` in this directory and approve the `pix` server. To add it to another project:
+The repository's `.mcp.json` points Claude Code at the built executable. Other projects
+can register it with:
 
 ```
-claude mcp add pix -- C:\path\to\pixmcp\src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\PixMcp.exe
+claude mcp add pix -- C:\path\to\pixmcp\dist\PixMcp.exe
 ```
 
-For other MCP clients, run the exe as a stdio server (no arguments). Logs go to stderr;
-`Logging__LogLevel__Default=Debug` in the environment also shows PIX engine informational messages.
-
-### Claude Desktop
-
-Add to `%APPDATA%\Claude\claude_desktop_config.json` (use `dist\PixMcp.exe` from
-`scripts\publish.cmd` or the built exe):
+Claude Desktop configuration:
 
 ```json
 {
   "mcpServers": {
     "pix": {
       "command": "C:\\path\\to\\pixmcp\\dist\\PixMcp.exe",
-      "env": { "PIX_DIR": "C:\\Program Files\\Microsoft PIX Preview\\2606.18-preview" }
+      "env": {
+        "PIX_DIR": "C:\\Program Files\\Microsoft PIX Preview\\2606.18-preview"
+      }
     }
   }
 }
 ```
 
-The `env` block is only needed when PIX Preview is not installed under `%ProgramFiles%`.
-
-### VS Code
-
-`.vscode/mcp.json` in a workspace (or `code --add-mcp` with the same object):
+Omit `env` when automatic discovery is sufficient. VS Code's `.vscode/mcp.json` uses:
 
 ```json
 {
   "servers": {
-    "pix": { "type": "stdio", "command": "C:\\path\\to\\pixmcp\\dist\\PixMcp.exe" }
+    "pix": {
+      "type": "stdio",
+      "command": "C:\\path\\to\\pixmcp\\dist\\PixMcp.exe"
+    }
   }
 }
 ```
 
-### Typical conversation flow
+## Investigation workflow
 
-1. `pix_info` – confirms which PIX install loaded and that Developer Mode is on.
-2. `pix_gpu_open` – returns a handle (`gpu-1`), file info, application and queue list.
-3. `pix_gpu_events` – paged, filterable event list (`kind: "draw"`, `nameContains`, `parentIndex`, ...).
-4. `pix_gpu_timing_tree` – GPU time rolled up the marker hierarchy ("which pass is slowest"), then
-   `pix_gpu_timing_events` for the slowest individual draws (both start analysis automatically).
-5. `pix_gpu_pipeline_state`, `pix_gpu_shader_code`, `pix_gpu_event_resources` – inspect one draw
-   (`pix_gpu_event` with `gpuId` maps timing rows or Dr. PIX ranges back to an event).
-6. `pix_gpu_drpix_run` – run Dr. PIX experiments over the frame.
-7. `pix_close` when done.
+1. Call `pix_info`, then `pix_gpu_open`.
+2. Call `pix_gpu_overview` for queues, capabilities, and the top measured passes/draws.
+   Use `includeTiming: false` for metadata without replay.
+3. Pass a returned `eventRef` to `pix_gpu_inspect_event` to get event context, timing,
+   pipeline state, root constants, bindings, and suggested follow-up calls.
+4. Follow `resourceRef` with `pix_gpu_resource_uses`; follow `shaderRef` with
+   `pix_gpu_shader_code` or `pix_gpu_shader_search`.
+5. Use `pix_gpu_compare` for a baseline/candidate investigation or `pix_gpu_preview`
+   to inspect a replayed render target.
+6. Close handles with `pix_close` or `pix_close_all`.
 
-Long operations (analysis start, timing and counter collection, Dr. PIX, symbol resolution, taking
-and stopping captures, capture upgrades) return a `jobId`; poll `pix_job_status`, block with
-`pix_job_wait`, or pass `waitSeconds` to the starting tool. `pix_job_cancel` requests cancellation;
-`cancellationRequested: true` does not mean the operation was interrupted. Work that completes
-before cancellation takes effect remains `succeeded` with its result. Cancelling during the capture
-initialization delay prevents capture from starting. The most recent 50 finished jobs are kept.
+References contain capture identity and are safe to pass between tools:
 
-Query tools that need GPU analysis (`pix_gpu_pipeline_state`, `pix_gpu_shader_code`,
-`pix_gpu_event_resources`, `pix_gpu_timing_events`, `pix_gpu_counters_*`, `pix_gpu_occupancy`,
-`pix_gpu_hf_counters`, `pix_gpu_drpix_experiments`) never block the PIX thread on a replay. If
-analysis (or the timing/counter data they need) is not ready they start it as a job, wait up to
-`waitSeconds` (default 60), and either answer or return
-`{ "pending": true, "jobId": "job-3", "retry": "pix_gpu_pipeline_state" }`: wait for the job with
-`pix_job_wait` and repeat the call. Concurrent callers share one job, and an explicit
-`pix_gpu_analysis_start` / `pix_gpu_timing_collect` / `pix_gpu_counters_start` job is joined the
-same way.
+```json
+{
+  "eventRef": {"handle": "gpu-1", "queueIndex": 0, "eventIndex": 42},
+  "resourceRef": {"handle": "gpu-1", "apiObjectId": "0x1234"},
+  "shaderRef": {
+    "eventRef": {"handle": "gpu-1", "queueIndex": 0, "eventIndex": 42},
+    "shaderIndex": 0
+  }
+}
+```
 
-All PIX calls run on one thread, so while a job replays the capture every other PIX tool call waits
-behind it; `pix_info`, `pix_handles` and the job tools answer regardless, and `pix_info.worker`
-shows the running job and queue depth. Requests a client abandons (timeout, cancellation) are
-dropped before they reach the PIX thread.
+Copy references from results. Event indices are queue-local; API object IDs are strings.
+A shader index refers to the shader list for that event. Names and marker paths provide
+context, while references provide identity within the open capture.
 
-`pix_gpu_analysis_start` always returns a job, including when compatible analysis is already
-running (`result.alreadyStarted: true`). To change an active analysis's adapter, power state, or
-flags, call `pix_gpu_analysis_stop` first.
+### Results, paging, and jobs
 
-## Tools
+JSON tools publish output schemas and return matching text and `structuredContent`.
+Top-level collections use an `items` object. Most pages default to **25** rows, with a
+maximum of 1,000; summaries default to ten entries. Follow `nextOffset` and executable
+`nextCalls` instead of guessing arguments.
+
+Normal JSON responses target **32 KiB**. Larger managed results become immutable
+snapshots with a `resultRef`. Read them through `pix_result_read`:
+
+```json
+{"resultRef": "result-1", "pointer": "/items", "offset": 0, "limit": 25}
+```
+
+The reader returns `kind`, `value`, window counts, and continuation calls. JSON Pointer
+selects a nested field; escape `~` as `~0` and `/` as `~1`. Arrays, objects, and strings
+can all be paged. Oversized children are represented by deferred pointers with exact
+reader calls, so nested details remain reachable.
+
+The final JSON response guard measures UTF-8 bytes and defaults to **2 MiB**. Configure
+it with `PIXMCP_MAX_RESULT_BYTES`. Snapshots use up to **256 MiB RAM** and **2 GiB temporary
+disk**, configurable with `PIXMCP_RESULT_MEMORY_BYTES` and `PIXMCP_RESULT_DISK_BYTES`.
+The store retains up to 50 transient snapshots and the latest 50 finished jobs.
+Storage pressure evicts transient results first, then eligible finished jobs with
+their results. `pix_info.results` reports storage usage, leases and evictions.
+Closing an owning capture invalidates its snapshots. Reads and exports already in
+progress can finish; subsequent access returns `result_expired`.
+Cancelling a snapshot read or export releases its lease without cancelling shared
+query jobs or invalidating the retained snapshot.
+
+`pix_result_export(resultRef, outPath, pointer="", overwrite=false)` atomically writes
+the complete selected JSON value to a file in an existing directory. Exports remain
+usable after the server exits. Temporary snapshots are cleaned up on disposal; a
+later server also reclaims abandoned sessions after verifying their ownership lock.
+
+Replay and other expensive operations run as jobs. Query preparation waits up to
+`waitSeconds` (**2 seconds** by default), then returns `pending`, `jobId`, and exact
+wait/retry calls. This budget includes waiting to enter the PIX worker queue. If the
+worker cannot admit the request in time, `worker_busy` includes the active operation
+and exact recovery calls. A zero budget accepts an idle worker immediately. Once a
+native query starts, it runs to its actual outcome. Concurrent requests share the
+same preparation. Follow returned calls, then repeat the original query.
+
+Explicit job tools return compact status. A successful job with retained output has
+`resultRef`; read it with `pix_result_read`. Status never embeds a large result.
+`pix_job_cancel` removes queued work immediately. Cancellation of running native work
+is best effort; an operation that finishes before cancellation takes effect remains succeeded.
+
+Every native PIX call runs on one worker thread. The worker owns CLI preview jobs too,
+for their entire lifetime. Session metadata and job tools remain responsive during
+native replay. `pix_info.worker` reports ordinary operations as well as jobs, including
+their start time, elapsed time, and queue depth.
+
+Errors use `code`, `message`, optional `hresult`, `retryable`, and `nextCalls`.
+Optional data includes an explicit unavailable reason. An unexpected replay failure is
+reported as a failure, rather than being remembered as unsupported hardware.
+
+### Timing and counters
+
+Timing results include replay provenance, adapter/configuration, nanosecond units, and
+whether a marker value was derived from descendants. These are PIX replay measurements.
+Summed end-of-pipe intervals are **not frame latency** and do not establish overlap
+between asynchronous queues.
+
+`pix_gpu_timing_tree` has a global `maxNodes` budget. Omitted siblings and descendants
+include continuation calls. `pix_gpu_timing_events` provides the flat sortable view.
+
+Counter queries can sort by counter ID, apply numeric thresholds, and restrict work to
+a marker scope or event range. Rows key values by counter ID; metadata carries names
+and units separately, avoiding collisions between identically named counters.
+Integers outside JavaScript's exact range are returned as decimal strings. Timing,
+counter sets, occupancy, and high-frequency collections have reusable preparation jobs;
+subsequent pages reuse collected data. Sampled high-frequency summaries also expose
+offsets for retrieving the original point sequence.
+
+### Pipeline, resources, and shaders
+
+`pix_gpu_inspect_event` combines common queries in one preparation and response.
+Root-constant bindings retrieve DWORD values where the native API supplies them;
+missing values have explicit coverage. Resource uses include event navigation and
+describe its evidence. A cached traversal of event-scoped views can recover navigation
+when the native binding API does not return a usable event identity.
+This reverse-use index is shared by all resource queries. Event enumeration, GPU timing
+events, and resource uses accept an `EventRef` scope; scope includes the selected event
+and its descendants. Event inspection preserves timing and pipeline sections when PIX
+explicitly reports binding preparation as unsupported.
+
+Standalone pipeline tools offer compact defaults and optional full sections. Resource
+views and bindings have separate paging. Shader source is line-addressable, with
+literal text search, context lines, and exact continuations. Source-node selection,
+source kind (HLSL/IL/ISA), and shader identity are explicit.
+`pix_gpu_shaders` provides a capture-wide inventory, and `pix_gpu_shader_uses` returns
+events using a shader. Returned shader references can be passed directly to code/search.
+
+### Capture comparison
+
+`pix_gpu_compare` takes `baselineHandle`, `candidateHandle`, and selected sections:
+`timings`, `shaders`, `pipeline`, and `resources`. It returns a job whose result
+summarizes changes and provides a `fullResultRef` for complete differences, unmatched
+events, ambiguity, and coverage.
+
+Queue names/types, marker paths, work kind, and available shader hashes provide
+conservative matching. Numeric IDs never establish identity across captures.
+Ambiguous matches are reported; `queuePairs` and `eventPairs` let the caller supply
+known correspondences. Timing differences are signed, and a zero baseline has no
+percentage change. Resource and pipeline comparisons exclude capture-local identities.
+
+Comparison snapshots the baseline into managed data before replaying the candidate.
+It may stop baseline analysis to make replay available for the candidate; coverage
+reports this transition. Missing sections and replay configuration remain visible.
+
+`pix_gpu_compare_changes` filters and pages the saved `fullResultRef` without replay.
+Choose `direction` (`all`, `regressions`, or `improvements`), inclusive absolute
+`minDeltaNs` and `minDeltaPercent` thresholds, and `sortBy` (`absoluteDeltaNs`, `deltaNs`,
+`deltaPercent`, or `event`). Both thresholds must match; zero means no threshold.
+Unmeasured structural changes remain visible with defaults, and missing sort values
+remain last. Use `pix_result_export` to save complete differences.
+
+### Replay previews
+
+`pix_gpu_screenshot` reads the image embedded in the capture and shares the preview
+artifact retrieval tools. `pix_gpu_preview_image` accepts a `crop` in original pixel
+coordinates and `maxDimension` for proportional resizing without upscaling.
+`pix_gpu_preview` uses the installed `pixtool.exe` to replay and export an RTV slot or
+depth target. It returns an artifact reference, dimensions, and selection metadata;
+`pix_gpu_preview_image` retrieves inline MCP image content and
+`pix_gpu_preview_bytes` pages PNG bytes.
+
+**Stop analysis on every open GPU capture first.** A conflicting request returns
+`analysis_active` with the required stop calls. Preview jobs execute exclusively on
+the PIX worker, with a hidden process, deadline, cancellation, and temporary-file cleanup.
+Each replay uses a temporary capture copy because the native document keeps the original
+open. CLI replay uses its own defaults, independently of native analysis adapter settings.
+
+Supported selectors follow pixtool's semantics: no marker selects the last instance
+with the requested resource bound; a unique exact marker name selects its last child
+with that resource bound. Use the exact name returned by event enumeration.
+This is not a promise of an exact arbitrary-event or presentation-time image.
+The input schema exposes only selectors supported by the CLI.
+Marker names containing literal double quotes or control characters are unsupported by
+the CLI argument parser; capture-end selection remains available.
+
+Artifacts are memory-resident, with a 50-item/64 MiB cache and a 32 MiB per-image limit.
+Inline images have a 4 MiB limit; oversized originals get a thumbnail automatically,
+while byte paging retains the original PNG. Closing the capture
+expires its artifacts.
+
+### Live and recorded timing captures
+
+GPU capture waits for launch/attach readiness callbacks for up to
+`readinessTimeoutSeconds` (default 30, range 0–300). `pix_device_info.targets` reports
+readiness and unsupported reasons. Optional `delaySeconds` is a warmup after readiness
+(default 0, range 0–60). Neither wait occupies the PIX worker. Cancellation, detachment,
+termination, and connection close interrupt these waits. Timing capture stop waits for
+the saved capture to become readable before reporting success.
+Windows may request UAC approval when PIX starts its timing recorder. Complete that
+desktop prompt before recording; unattended runners need the PIX service/elevation
+configured in advance.
+
+Start recorded analysis with `pix_timing_overview`, then use `pix_timing_events`,
+`pix_timing_counters_list`, and `pix_timing_counters_read`. These query the timing
+document's PixStorage database read-only; they do not replay the GPU. Times use decimal
+nanoseconds and half-open `[startNs,endNs)` intervals, defaulting to the reliable capture
+range. Rows preserve original event duration and selected-range overlap; execution and
+stall information are present when recorded.
+
+`pix_timing_hotspots` ranks sampled CPU functions and addresses;
+`pix_timing_calltree` pages caller-to-callee paths using a reusable `profileRef`.
+Inclusive and exclusive sample counts are statistical observations, not exact CPU time.
+Coverage includes samples without stacks and unresolved symbols. Symbol resolution is
+explicit through `pix_timing_resolve_symbols`; save and symbol resolution invalidate
+cached queries and profiles. Supply matching PDBs for application function names.
+
+### Dump triage
+
+`pix_dump_triage` summarizes deterministic evidence: nested incomplete events,
+page faults, resource lifetime information, breadcrumbs, and shader waves. It includes
+coverage and follow-up calls rather than claiming a definitive cause.
+
+Dump event references contain `handle`, `queueIndex`, and an `eventPath` of child indices.
+`pix_dump_event` follows those paths and pages direct children. Wave data, shader
+variables, blobs, and other large details have retrieval windows. Incomplete descendants
+are examined even when their parent reports completed.
+`pix_dump_shader_eval` accepts `laneMask` as a decimal or hexadecimal string, preserving
+all 64 bits across clients. Oversized GPU state tables retain every nested row in a result
+snapshot. Blob byte windows include exact continuation calls; later windows require
+reading the preceding bytes because the native blob API only exposes prefix reads.
+
+## Tool catalog
 
 | Area | Tools |
-|------|-------|
-| Session | `pix_info`, `pix_handles`, `pix_close`, `pix_close_all`, `pix_jobs`, `pix_job_status`, `pix_job_wait`, `pix_job_cancel`, `pix_log` |
+|---|---|
+| Session/results | `pix_info`, `pix_handles`, `pix_close`, `pix_close_all`, `pix_jobs`, `pix_job_status`, `pix_job_wait`, `pix_job_cancel`, `pix_log`, `pix_result_read`, `pix_result_export` |
+| Investigation | `pix_gpu_overview`, `pix_gpu_inspect_event`, `pix_gpu_compare`, `pix_gpu_compare_changes` |
 | GPU capture | `pix_gpu_open`, `pix_gpu_info`, `pix_gpu_queues`, `pix_gpu_events`, `pix_gpu_event`, `pix_gpu_api_objects`, `pix_gpu_screenshot` |
-| Analysis (replay) | `pix_gpu_analysis_start`, `pix_gpu_analysis_status`, `pix_gpu_analysis_adapters`, `pix_gpu_analysis_stop` |
-| Timing and counters | `pix_gpu_timing_collect`, `pix_gpu_timing_events`, `pix_gpu_timing_tree`, `pix_gpu_counters_list`, `pix_gpu_counters_start`, `pix_gpu_counters_collect`, `pix_gpu_occupancy`, `pix_gpu_hf_counters` |
-| Pipeline and shaders | `pix_gpu_pipeline_state`, `pix_gpu_shader_code`, `pix_gpu_shader_profile` (experimental) |
-| Resources | `pix_gpu_resources`, `pix_gpu_resource`, `pix_gpu_event_resources`, `pix_gpu_heap` |
+| Analysis | `pix_gpu_analysis_start`, `pix_gpu_analysis_status`, `pix_gpu_analysis_adapters`, `pix_gpu_analysis_stop` |
+| Timing/counters | `pix_gpu_timing_collect`, `pix_gpu_timing_events`, `pix_gpu_timing_tree`, `pix_gpu_counters_list`, `pix_gpu_counters_start`, `pix_gpu_counters_collect`, `pix_gpu_occupancy`, `pix_gpu_hf_counters` |
+| Pipeline/shaders | `pix_gpu_pipeline_state`, `pix_gpu_shaders`, `pix_gpu_shader_uses`, `pix_gpu_shader_code`, `pix_gpu_shader_search`, `pix_gpu_shader_profile` |
+| Resources | `pix_gpu_resources`, `pix_gpu_resource`, `pix_gpu_event_resources`, `pix_gpu_resource_uses`, `pix_gpu_heap` |
+| Preview | `pix_gpu_preview`, `pix_gpu_preview_image`, `pix_gpu_preview_bytes` |
 | Dr. PIX | `pix_gpu_drpix_experiments`, `pix_gpu_drpix_run` |
-| Timing captures | `pix_timing_open`, `pix_timing_resolve_symbols`, `pix_timing_save` |
-| Device (live) | `pix_device_connect`, `pix_device_info`, `pix_device_processes`, `pix_device_packaged_apps`, `pix_device_counters`, `pix_device_d3d_settings`, `pix_device_d3d_settings_set`, `pix_device_launch`, `pix_device_attach`, `pix_device_take_gpu_capture`, `pix_device_timing_capture_start`, `pix_device_timing_capture_stop`, `pix_device_detach` |
-| Capture files | `pix_capture_format`, `pix_capture_upgrade` |
-| DirectX dump files | `pix_dump_open`, `pix_dump_info`, `pix_dump_queues`, `pix_dump_events`, `pix_dump_page_faults`, `pix_dump_breadcrumbs`, `pix_dump_resources`, `pix_dump_gpu_state`, `pix_dump_blobs`, `pix_dump_journal`, `pix_dump_shader_waves`, `pix_dump_shader_wave`, `pix_dump_shader_eval` |
+| Timing captures | `pix_timing_open`, `pix_timing_overview`, `pix_timing_events`, `pix_timing_counters_list`, `pix_timing_counters_read`, `pix_timing_hotspots`, `pix_timing_calltree`, `pix_timing_resolve_symbols`, `pix_timing_save` |
+| Live device | `pix_device_connect`, `pix_device_info`, `pix_device_processes`, `pix_device_packaged_apps`, `pix_device_counters`, `pix_device_d3d_settings`, `pix_device_d3d_settings_set`, `pix_device_launch`, `pix_device_attach`, `pix_device_take_gpu_capture`, `pix_device_timing_capture_start`, `pix_device_timing_capture_stop`, `pix_device_detach` |
+| Capture format | `pix_capture_format`, `pix_capture_upgrade` |
+| Dump investigation | `pix_dump_open`, `pix_dump_info`, `pix_dump_triage`, `pix_dump_queues`, `pix_dump_events`, `pix_dump_event`, `pix_dump_page_faults`, `pix_dump_breadcrumbs`, `pix_dump_resources`, `pix_dump_gpu_state`, `pix_dump_blobs`, `pix_dump_journal` |
+| Dump shaders | `pix_dump_shader_waves`, `pix_dump_shader_wave`, `pix_dump_shader_wave_data`, `pix_dump_shader_variable`, `pix_dump_shader_eval` |
 
-Paged enumeration tools take `offset`/`limit` (default 100, max 1000) and return `total`,
-`count`, `items`, `nextOffset` and an optional `extra` object (for example the counter groups of
-`pix_gpu_counters_list` or the DRED data of `pix_dump_page_faults`). When PIX has no data for a
-paged query the page is empty and `extra.unavailable` says why. Enum values are returned as
-trimmed names (`GRAPHICS`, `R8G8B8A8_UNORM`). Optional fields and hardware features (occupancy,
-high-frequency counters, per-view bindings, correlated shaders) return
-`{ "unavailable": true, "feature": ..., "reason": ... }` instead of failing or silently
-disappearing. Every cap (`maxChars`, `maxRows`, `maxEvents`, children/parents/lanes) is stated in
-the parameter description and reported with a `...Truncated` flag when it cuts data.
+MCP resources `pix://handles`, `pix://handles/{handle}`, `pix://jobs`, and
+`pix://jobs/{jobId}` mirror session tables. Native experimental details remain
+extensible within typed outer schemas.
 
-A tool result larger than 2 MB of JSON is refused with a message naming the paging parameter to
-reduce (`PIXMCP_MAX_RESULT_BYTES` changes the limit); `pix_job_status` is exempt so a large job
-result stays reachable.
+## Migrating from 0.2
 
-MCP resources `pix://handles`, `pix://handles/{handle}`, `pix://jobs` and `pix://jobs/{jobId}`
-mirror the handle and job tables for clients that prefer resources over tool calls.
+Version 1.0 intentionally changes the wire contract:
 
-For large counter queries, call `pix_gpu_counters_start(handle, counterIds, waitSeconds=0)`
-and wait for its job before paging `pix_gpu_counters_collect`. The existing collect tool still
-collects synchronously if needed. Decoded rows are cached per counter set and queue until
-analysis stops; reading another page does not reread every native counter value.
+| Previous pattern | Version 1.0 |
+|---|---|
+| Separate handle/queue/event selectors for event inspection | Pass the returned `eventRef` |
+| Separate handle/object ID for resource inspection | Pass `resourceRef`; IDs stay strings |
+| Event selectors plus shader index for code | Pass `shaderRef` |
+| Shader `maxChars` prefix | Use `startLine`/`lineCount`, node paging, or search |
+| Embedded `job.result` | Read `job.resultRef` through `pix_result_read`, then use `value` |
+| Large inline JSON or an oversized-result failure | Follow `resultRef` and nested deferred pointers |
+| Top-level JSON arrays | Read the `items` wrapper |
+| Default 100-row pages / 60-second preparation waits | Default 25 rows / 2 seconds |
+| Guessed retries from text errors | Structured error codes and exact `nextCalls` |
 
-`pix_dump_breadcrumbs` defaults to an operation window around the completed-operation boundary.
-Use `nodeIndex` to select one command list and `offset` to navigate its operation history;
-`offset: 0` retrieves the original prefix view. Operation indices remain absolute.
-`pix_gpu_resource` and `pix_gpu_event_resources` accept `viewIndex`, `bindingOffset`, and
-`bindingLimit` (default 32) to retrieve bindings beyond the initial page. Each view reports
-its binding total and continuation offset. A view index is relative to the resource's views
-or the event's views, respectively.
-
-`pix_device_d3d_settings` / `pix_device_d3d_settings_set` read and change the debug layer, DRED
-and device options PIX applies to processes it launches. To turn a GPU hang into a dump file for
-the `pix_dump_*` tools: set `dred AUTO_BREADCRUMBS FORCED_ON`, `dred PAGE_FAULTS FORCED_ON` and
-`device RETAIN_DUMP_FILE true`, then `pix_device_launch` the app with
-`flags: ["GPU_CAPTURE_ENABLE_DRED_LOGGING"]` (the test app's `--hang` option provokes a timeout).
-`pix_device_packaged_apps` lists UWP/MSIX apps that `pix_device_launch` can start by
-`packageFullName`. The PIX API of this build has no system-monitor counter *collection* (the
-descriptor struct is a placeholder), so `pix_device_counters` only lists counters.
-
-`pix_gpu_heap` shows a heap's description and the placed resources on it; `pix_gpu_shader_profile`
-(experimental) replays an event range under PIX's shader profiler and reports the hottest ISA
-instructions per shader with stall reasons; `pix_dump_shader_wave` and `pix_dump_shader_eval` read
-variables, call stacks and per-lane expression values of a hung wave from a dump.
-
-`pix_gpu_timing_tree` rolls the measured end-of-pipe time of every draw/dispatch up its parent
-markers: each node reports `selfEopNs`, `inclusiveEopNs`, `percentOfQueue`, `timedDescendants`
-and `childCount`, children come most expensive first, and `depth` (max 4) or a child's index as
-`parentIndex` drills down. `pix_gpu_timing_events` remains the flat, sortable per-event view.
-
-Successful JSON tool results include `structuredContent` and advertised output schemas while
-retaining their existing JSON text. Object results have the same fields in both representations;
-legacy top-level arrays use `{ "items": [...] }` in structured content. Screenshot image blocks
-are preserved. Page, job, and event schemas describe stable fields; experimental PIX details
-remain extensible.
-
-## Troubleshooting
-
-| Symptom | Cause and fix |
-|---------|---------------|
-| The server exits with code 1 and `pixmcp: No PIX Preview install found` | Install a PIX Preview build newer than 2606.15, or set `PIX_DIR` to its versioned folder (`C:\Program Files\Microsoft PIX Preview\2606.18-preview`). Retail PIX has no API. |
-| `PIX_DIR is set to ... but it does not contain PixApiCsExt.experimental.dll` | `PIX_DIR` must point at the versioned folder, not at `Microsoft PIX Preview`. An explicit bad override is never silently replaced. |
-| A tool fails with `0x8ABC0000` or `0x8ABC0001` | Windows Developer Mode is off. The error text contains the Settings location and a `reg add` command. |
-| A query tool returns `{ "pending": true, "jobId": ... }` | GPU analysis (or timing/counter collection) is still running as that job. `pix_job_wait` on it, then repeat the call unchanged. |
-| Calls seem to hang or time out | `pix_info` (always answers) shows `worker.runningJob` and `worker.queuedCalls`. Wait for or `pix_job_cancel` the running job; abandoned requests are dropped before they run. |
-| `E_NOT_VALID_STATE (0x8007139F)` from pipeline/shader/resource tools | The event is not a draw or dispatch. Find one with `pix_gpu_events(kind: "drawOrDispatch")`. |
-| `unavailable: true` inside a result | The hardware or PIX build does not provide that feature (occupancy and high-frequency counters on many GPUs); `reason` carries PIX's message. The rest of the result is valid. |
-| `the result is N characters, above the ... limit` | Page or filter (`offset`/`limit`, `nameContains`, `max*`), or raise `PIXMCP_MAX_RESULT_BYTES`. |
-| Reopening a capture fails or analysis will not start | Close the previous handle for the same file first (`pix_close`); one analysis session per capture. |
-| A documented tool is missing from the client's tool list | The client runs a stale build. Rebuild; note that `PixMcp.exe` cannot be overwritten while a client has it running. |
-| `pix_gpu_screenshot` reports an unsupported format | Only 8-bit RGBA/BGRA and R10G10B10A2 swapchains are encoded; HDR formats are not yet supported. |
-| Timing capture tools show no CPU samples or events | The PIX API only opens, resolves symbols for and saves timing captures; it has no reader for their contents. Open the saved `.wpix` in PIX for the timeline. |
-
-## Architecture
-
-```
-src/PixMcp/
-  Program.cs            PIX discovery check, then ServerHost (must not touch Microsoft.PIX types)
-  ServerHost.cs         MCP host: stdio transport, tool/resource discovery, structured results filter
-  Pix/PixDiscovery.cs   Finds the PIX Preview install and wires assembly + native DLL resolution
-  Pix/PixWorker.cs      The single PIX thread; every native call is queued here
-  Pix/PixSession.cs     PIX factory plus the handle table (gpu-1, timing-1, dump-1, device-1)
-  Pix/Jobs.cs           Background jobs: progress, cancellation tokens, retention
-  Pix/Handles/          Per-document state: GpuCaptureHandle caches events, analysis, timing, counters
-  Pix/TimingTree.cs     GPU time rolled up the marker hierarchy
-  Pix/StructuredToolResults.cs  structuredContent and outputSchema per tool
-  Tools/Tools.cs        Run (worker + error mapping), RunJob, RunWhenReady (auto-job + pending), Try, paging
-  Tools/*Tools.cs       One static class per area; each [McpServerTool] is a thin wrapper over PIX calls
-tests/PixMcp.Tests/     xUnit: pure unit tests, worker/job lifecycle tests, stdio protocol test, opt-in integration tests
-tests/D3D12TestApp/     Tiny D3D12 app used as a capture target by the smoke scenarios
-scripts/smoke.py        Dependency-free stdio MCP client; scripts/scenarios/*.json are scripted tool sequences
-```
-
-## Design notes
-
-- **One PIX thread.** Every PIX call runs on a single dedicated worker thread (`PixWorker`);
-  the API is nano-COM without apartment marshalling and the analysis session is not
-  thread-safe. Tool calls are therefore serialized, and a long job (Dr. PIX run) blocks other
-  PIX calls until it finishes, exactly as the PIX UI would. Tools never start a replay inside a
-  request: `Tools.RunWhenReady` turns a missing prerequisite into a job and a `pending` answer.
-- **Handles.** `PixSession` owns the factory and a handle table. A GPU capture handle connects to
-  the local GPU and starts analysis on first need; `pix_close` stops analysis and disconnects
-  first, which is required for the next open of the same capture to work.
-- **Errors.** COM failures are reported with their HRESULT; the Developer Mode HRESULTs
-  (`0x8ABC0000`/`0x8ABC0001`) include the fix.
-- **Experimental surface.** `pix_dump_*` and shader source retrieval use the experimental PIX API
-  (`Microsoft.PIX.Internal`), which may change between Preview builds.
-- **Timing captures are write-only through the API.** `IPixTimingCaptureDocument` exposes only
-  open, symbol resolution and save; there is no reader for CPU samples, threads or PIX events, so
-  `pix_timing_*` prepares files for the PIX UI rather than querying them.
+Existing smoke scenarios have been migrated to the new contract.
 
 ## Testing
 
-- `dotnet test` runs unit tests. Set `PIX_TEST_CAPTURE=<path to .wpix>` to also run the
-  integration tests (and `PIX_TEST_ANALYSIS=1` to include a GPU replay). Building anything needs a
-  PIX Preview install, so `.github/workflows/ci.yml` runs only the Python harness tests on hosted
-  runners and the full build/test/smoke job on a self-hosted runner labelled `pix`, on demand.
-- `tests\D3D12TestApp\build.cmd` builds a tiny D3D12 app (needs Visual Studio 2022 C++ tools)
-  that is a convenient capture target: three triangles (one indexed, textured through a descriptor
-  table) with nested markers on the graphics queue plus a compute dispatch on an async compute
-  queue every frame. `--frames N` limits the run; `--hang [--hang-after N]` submits a
-  never-terminating dispatch to provoke a GPU timeout.
-- `scripts\smoke.py` is a dependency-free stdio MCP client; `scripts\scenarios\*.json` are
-  scripted tool sequences, e.g.
+`dotnet test` runs unit, worker/job lifecycle, schema, and stdio protocol tests.
+Set `PIX_TEST_CAPTURE` to a capture path to enable capture integration tests;
+also set `PIX_TEST_ANALYSIS=1` for replay tests. Hosted CI runs the dependency-free
+Python harness tests. The manually dispatched self-hosted `pix` job builds the fixture,
+generates captures, and then runs native tests serially. Set `PIX_TEST_TIMING_CAPTURE`
+to the generated timing capture for named marker/counter/callstack validation.
 
-  ```
-  python scripts\smoke.py src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\PixMcp.exe @scripts\scenarios\capture-and-inspect.json
-  ```
+```powershell
+python -m unittest discover -s scripts -p "test_*.py"
+tests\D3D12TestApp\build.cmd
+```
 
-  The `capture-and-inspect` scenario launches the test app under PIX, takes a capture, opens it,
-  replays it for timing, and inspects the first draw. `take-capture` only produces a capture file
-  (its path is in the `pix_device_take_gpu_capture` result); `open-capture` and `analysis-pending`
-  take that path in `PIX_TEST_CAPTURE` and exercise, respectively, the basic inspection flow and the
-  `pending`/`pix_job_wait`/retry flow of the analysis-dependent tools; `inspect-extras` covers the
-  compute queue, gpuId lookup, timing tree and inline screenshot. `provoke-hang` changes the DRED
-  settings, launches the test app with `--hang` (this **resets the GPU**, other GPU applications
-  lose their device for a moment) and restores the settings; run it only to test the dump tools.
-  Requests time out after 660 seconds by default; use `--timeout <seconds>` to change this.
-  Protocol errors, tool errors, failed/cancelled jobs, unresolved result references, and failed
-  assertions produce a nonzero exit code. A scenario step may include expected result fields:
-  `["pix_job_wait", {"jobId": "$last.jobId"}, {"status": "succeeded"}]`.
+The fixture needs Visual Studio C++ tools. It renders graphics and compute work with
+fixed markers and known root constants. `--variant baseline` is the default;
+`--variant candidate` changes a shader, root constants, resource size, and adds a pass.
+Use `--hidden` for unattended capture and `--duplicate-markers` to test ambiguity.
+`--startup-delay-ms` delays D3D12 creation to exercise readiness callbacks.
+`--timing-workload` records nested CPU markers and a custom frame counter around
+named, non-inlined functions. The build restores a pinned WinPixEventRuntime and
+keeps matching PDBs beside the executable.
 
-## Status
+Generate baseline, candidate, and symbol-resolved timing captures together:
 
-Verified on PIX 2606.18-preview with an NVIDIA RTX 4070 Ti: capture taking, event/resource
-queries, screenshot export, analysis (including the `pending`/job flow), per-event timing and the
-timing tree, hardware counters, pipeline state and root signature decoding, HLSL source retrieval,
-bound resources/views, Dr. PIX experiments, system-wide timing captures, the device tools including
-D3D settings, packaged apps and process/counter listings. Occupancy and high-frequency counters
-report `unavailable` on this hardware, and `pix_gpu_shader_profile` fails with PIX error
-`0x8ABC0007` (the profiler is not supported for this GPU/driver by this PIX build).
-`pix_gpu_heap` compiles but has not been exercised: the test app only creates committed resources,
-so its captures contain no heap objects. The DirectX dump (`pix_dump_*`) tools compile against the
-experimental API and follow the official DXDumpFileParser sample but have not been run against a
-real `.dxdmp_preview` file yet: `scripts\scenarios\provoke-hang.json` enables DRED through
-`pix_device_d3d_settings_set` and runs the test app with `--hang`, which does reset the GPU (event
-log `nvlddmkm 153`), but no dump file was produced on this machine.
+```powershell
+python scripts\capture_fixtures.py src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\PixMcp.exe
+```
+
+`scripts\smoke.py` runs scripted MCP scenarios:
+
+```powershell
+python scripts\smoke.py src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\PixMcp.exe @scripts\scenarios\capture-and-inspect.json
+```
+
+`take-capture` produces a capture. `open-capture`, `analysis-pending`, and
+`inspect-extras` accept `PIX_TEST_CAPTURE`. Tool/protocol errors, failed jobs,
+unresolved references, and failed assertions fail the scenario.
+
+Once baseline and candidate captures exist, run the investigation benchmark:
+
+```powershell
+python scripts\benchmark.py src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\PixMcp.exe --capture tests\artifacts\baseline.wpix --candidate tests\artifacts\candidate.wpix
+```
+
+It checks hotspot discovery, actual root constants, shader inventory and reverse
+uses, shader navigation/search, scoped events, timings and resource uses,
+filtered comparisons, complete JSON exports, and cropped preview thumbnails. Its JSON report
+records correctness, tool calls, decoded JSON bytes, received JSON-RPC wire bytes,
+elapsed time, and preparation jobs per task. Missing native root values with explicit
+coverage are reported as a limited task only for explicitly recognized native
+limitations. PIX does not expose its internal replay iteration count; job counts
+are not a substitute for that measurement. Generated captures/reports under
+`tests/artifacts/` are ignored by Git.
+Reports survive individual failures so independent tasks can still run. Actual failures
+return a failing exit status; `--strict` also fails on limited or skipped tasks.
+Both the benchmark and fixture generator fail on cleanup errors or an unsuccessful
+server shutdown, recording those diagnostics separately from the original results.
+The self-hosted workflow exposes this as `strict_benchmark`. Call counts and elapsed
+time remain advisory measurements.
+
+GPU hang generation is never part of the default tests or benchmark.
+The optional `provoke-hang` scenario deliberately resets the GPU and exists only
+for manual dump testing.
+
+## Limitations and troubleshooting
+
+- Enable Windows Developer Mode when PIX reports `0x8ABC0000` or `0x8ABC0001`.
+- If a query is pending, wait for its job and follow the supplied retry call.
+  `pix_info.worker` helps distinguish queued work from an idle server.
+- Stop analysis before changing adapter, power-state, or replay flags.
+- Optional occupancy, high-frequency counters, and shader profiling depend on
+  the GPU, driver, and PIX build. Explicit unsupported results are cached until analysis resets.
+- Heap inspection needs a capture containing placed-resource heaps.
+- On the tested 2606.18-preview build, root-constant value access returns
+  `E_INVALIDARG` for the fixture despite its declared four-DWORD root parameter.
+  `rootConstantCoverage` reports this limitation. The same build returns empty
+  binding-event identities; resource-use navigation falls back to event-scoped
+  views and exact captured API object arguments, with explicit evidence and coverage.
+- Dump tools follow the experimental API and have deterministic managed tests,
+  but still need validation against a real `.dxdmp_preview` file.
+- Timing queries depend on the experimental PixStorage schema. Missing tables or
+  unavailable recordings return explicit coverage. CPU sampling requires stacks to
+  be recorded for calltree attribution and matching symbols for function names.
+- The embedded screenshot encoder supports common 8/10-bit and HDR swapchains;
+  supported HDR formats are tone-mapped to sRGB and reported as `toneMapped`.
+- A running MCP client locks the server executable. Close it before rebuilding.
+- All handles, jobs, result references, and preview artifacts are process-local.
+
+## Architecture
+
+`PixWorker` owns all native calls. `PixSession` owns document handles and detached
+results; GPU handles cache events and preparations. `Jobs` tracks cancellation,
+progress, and retention. `StructuredToolResults` provides output schemas, errors,
+and response budgets; `ResultStore` implements leased, bounded retrieval and exports.
+Readiness waits run outside the worker. Timing SQL runs in cancellable preparation
+jobs with private, read-only SQLite connections closed before native document changes.
+Tools compose these primitives into small, navigable investigations.
+
+`Program.cs` must not directly reference Microsoft.PIX types before discovery
+loads the installed assembly. Expensive native preparation belongs in a job,
+using `Tools.RunWhenReady` for queries that depend on it.
 
 ## License
 
-Licensed under the [MIT License](LICENSE).
-
-PIX installation discovery includes adaptations from Microsoft's PIX samples;
+[MIT](LICENSE). PIX discovery includes adaptations from Microsoft's samples;
 see [third-party notices](THIRD_PARTY_NOTICES.md).

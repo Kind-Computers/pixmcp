@@ -4,7 +4,7 @@ using Microsoft.PIX.Internal;
 
 namespace PixMcp.Pix.Handles;
 
-public sealed class TimingCaptureHandle : PixHandle
+public sealed partial class TimingCaptureHandle : PixHandle
 {
     public TimingCaptureHandle(string path, IPixTimingCaptureDocument document) : base(path)
     {
@@ -15,7 +15,7 @@ public sealed class TimingCaptureHandle : PixHandle
 
     public override string Kind => "timing";
     public IPixTimingCaptureDocument Document { get; private set; }
-    public string CapturePath { get; }
+    public string CapturePath { get; private set; }
     public string PixStoragePath { get; }
     public bool SymbolsResolved { get; set; }
 
@@ -32,6 +32,7 @@ public sealed class TimingCaptureHandle : PixHandle
 
     public override void Close(List<string> warnings)
     {
+        InvalidateQueries();
         try { Document.Close(); }
         catch (Exception ex) { warnings.Add("Close: " + PixErrors.Describe(ex)); }
         Document = null!;
@@ -77,6 +78,7 @@ public sealed class ConnectionHandle : PixHandle
     public override string Kind => "device";
     public IPixConnectionDocument Connection { get; private set; }
     public DelegateConnectionNotifications Notifications { get; }
+    public CaptureTargets Targets { get; } = new();
     // Mutated on the PIX thread and by PIX notification callbacks; read by pix_handles/pix_info
     // off the worker, so every access goes through the lock.
     private readonly List<object> _events = new();
@@ -104,7 +106,7 @@ public sealed class ConnectionHandle : PixHandle
     }
 
     public void AddProcess(uint processId) { lock (_events) _processIds.Add(processId); }
-    public void ClearProcesses() { lock (_events) _processIds.Clear(); }
+    public void ClearProcesses() { Targets.Clear(); lock (_events) _processIds.Clear(); }
     /// <summary>Snapshot of the process ids launched or attached through this connection.</summary>
     public uint[] ProcessIds { get { lock (_events) return _processIds.ToArray(); } }
 
@@ -115,12 +117,14 @@ public sealed class ConnectionHandle : PixHandle
         path = Path,
         openedAt = OpenedAt,
         launchedProcessIds = ProcessIds,
+        targets = Targets.Snapshot(),
         timingCaptureInProgress = TimingCaptureInProgress,
         recentEvents = RecentEvents(),
     };
 
     public override void Close(List<string> warnings)
     {
+        Targets.Clear();
         if (TimingCaptureInProgress is not null)
         {
             try { Connection.StopTimingCapture(); }

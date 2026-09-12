@@ -90,7 +90,7 @@ public class IntegrationTests : IDisposable
         JsonElement opened = Parse(await GpuCaptureTools.Open(_session, CapturePath!));
         string handle = opened.GetProperty("handle").GetString()!;
 
-        JsonElement counters = Parse(await CountersTools.CountersList(_session, _jobs, handle, waitSeconds: 600)).GetProperty("counters");
+        JsonElement counters = Parse(await CountersTools.CountersList(_session, _jobs, handle, waitSeconds: 600)).GetProperty("items");
         Skip.If(counters.GetArrayLength() == 0, "No hardware counters available on this GPU");
         uint counterId = counters[0].GetProperty("id").GetUInt32();
 
@@ -131,7 +131,7 @@ public class IntegrationTests : IDisposable
 
         JsonElement run = Parse(await DrPixTools.Run(_session, _jobs, handle, new[] { experimentId }, waitSeconds: 600));
         Assert.Equal("succeeded", run.GetProperty("status").GetString());
-        JsonElement result = run.GetProperty("result");
+        JsonElement result = Parse(ResultTools.Read(_session, run.GetProperty("resultRef").GetString()!)).GetProperty("value");
         Assert.Equal(1, result.GetProperty("experimentsRun").GetInt32());
         JsonElement experimentResult = Assert.Single(result.GetProperty("results").EnumerateArray());
         Assert.Equal(experimentId, experimentResult.GetProperty("guid").GetString());

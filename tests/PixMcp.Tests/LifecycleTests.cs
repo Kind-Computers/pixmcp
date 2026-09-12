@@ -27,7 +27,7 @@ public sealed class LifecycleTests
         Assert.Equal(JobStatus.Cancelled, job.Status);
         Assert.False(executed);
         Assert.Equal(0, fixture.TokensCreated);
-        Assert.True(job.ToDto(true).CancellationRequested);
+        Assert.True(job.ToDto().CancellationRequested);
         Assert.Null(job.StartedAt);
     }
 
@@ -58,9 +58,10 @@ public sealed class LifecycleTests
         fixture.Jobs.Cancel(job);
         gate.Release.Set();
         await Finished(job);
-        JobDto result = job.ToDto(true);
+        JobDto result = job.ToDto();
         Assert.Equal("succeeded", result.Status);
-        Assert.Equal("saved.wpix", result.Result);
+        Assert.NotNull(result.ResultRef);
+        Assert.Equal("saved.wpix", fixture.Session.Results.Read(result.ResultRef).Value);
         Assert.True(result.CancellationRequested);
         Assert.NotNull(result.FinishedAt);
         Assert.Equal(1, result.Progress);
@@ -100,11 +101,14 @@ public sealed class LifecycleTests
         using var fixture = new Fixture();
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         bool configured = false, captured = false;
-        Job job = fixture.Jobs.Start("gpu-capture", "delayed capture", j =>
+        Job job = fixture.Jobs.StartAfter("gpu-capture", "delayed capture", async j =>
         {
             entered.SetResult();
+            await Task.Delay(TimeSpan.FromMinutes(1), j.Cancellation.Token);
+        }, j =>
+        {
             return DeviceTools.CaptureWithOptions(42, 1, _ => configured = true, () => captured = true,
-                j.Cancellation.Token, TimeSpan.FromMinutes(1));
+                j.Cancellation.Token);
         });
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         fixture.Jobs.Cancel(job);

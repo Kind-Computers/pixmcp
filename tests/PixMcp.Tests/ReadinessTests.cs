@@ -57,12 +57,12 @@ public sealed class ReadinessTests
         FakeHandle handle = await fixture.Worker.Run(() => fixture.Session.Register(new FakeHandle { PrepareGate = gate }));
         Task<string> first = ToolHelpers.RunWhenReady(fixture.Session, fixture.Jobs, "pix_test", handle.Id, Preparation(handle.Id), h => new { n = 1 }, 5, CancellationToken.None);
         await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Task<string> second = ToolHelpers.RunWhenReady(fixture.Session, fixture.Jobs, "pix_test", handle.Id, Preparation(handle.Id), h => new { n = 2 }, 5, CancellationToken.None);
-        // The second caller's readiness probe queues behind the running preparation; release once it is enqueued.
-        while (fixture.Worker.PendingCount == 0) await Task.Delay(10);
+        Task<string> second = ToolHelpers.RunWhenReady(fixture.Session, fixture.Jobs, "pix_test", handle.Id, Preparation(handle.Id), h => new { n = 2 }, 0, CancellationToken.None);
+        JsonElement pending = JsonDocument.Parse(await second.WaitAsync(TimeSpan.FromSeconds(1))).RootElement;
+        Assert.True(pending.GetProperty("pending").GetBoolean());
+        Assert.Equal(0, fixture.Worker.PendingCount);
         gate.Release.Set();
         Assert.Equal(1, JsonDocument.Parse(await first).RootElement.GetProperty("n").GetInt32());
-        Assert.Equal(2, JsonDocument.Parse(await second).RootElement.GetProperty("n").GetInt32());
         Assert.Single(fixture.Jobs.All);
         Assert.Equal(1, handle.Prepared);
     }
@@ -72,7 +72,7 @@ public sealed class ReadinessTests
     {
         using var fixture = new Fixture();
         FakeHandle handle = await fixture.Worker.Run(() => fixture.Session.Register(new FakeHandle { FailPreparation = true }));
-        McpException error = await Assert.ThrowsAsync<McpException>(() => ToolHelpers.RunWhenReady(fixture.Session, fixture.Jobs, "pix_test", handle.Id, Preparation(handle.Id),
+        PixToolException error = await Assert.ThrowsAsync<PixToolException>(() => ToolHelpers.RunWhenReady(fixture.Session, fixture.Jobs, "pix_test", handle.Id, Preparation(handle.Id),
             h => new { }, 5, CancellationToken.None));
         Assert.Contains("failed", error.Message);
         Assert.Contains("replay broke", error.Message);
@@ -102,10 +102,10 @@ public sealed class ReadinessTests
         FakeHandle handle = await fixture.Worker.Run(() => fixture.Session.Register(new FakeHandle { PrepareGate = gate }));
         Job explicitJob = ToolHelpers.StartPreparation(fixture.Session, fixture.Jobs, handle.Id, Preparation(handle.Id));
         await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Task<string> query = ToolHelpers.RunWhenReady(fixture.Session, fixture.Jobs, "pix_test", handle.Id, Preparation(handle.Id), h => new { joined = true }, 5, CancellationToken.None);
-        while (fixture.Worker.PendingCount == 0) await Task.Delay(10);
+        Task<string> query = ToolHelpers.RunWhenReady(fixture.Session, fixture.Jobs, "pix_test", handle.Id, Preparation(handle.Id), h => new { joined = true }, 0, CancellationToken.None);
+        Assert.True(JsonDocument.Parse(await query.WaitAsync(TimeSpan.FromSeconds(1))).RootElement.GetProperty("pending").GetBoolean());
         gate.Release.Set();
-        Assert.True(JsonDocument.Parse(await query).RootElement.GetProperty("joined").GetBoolean());
+        await explicitJob.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
         Assert.Same(explicitJob, Assert.Single(fixture.Jobs.All));
     }
 
@@ -150,7 +150,7 @@ public sealed class ReadinessTests
     [Fact]
     public void PendingSchemasDescribeBothShapes()
     {
-        JsonElement schema = StructuredToolResults.SchemaFor("pix_gpu_timing_events");
+        JsonElement schema = StructuredToolResults.CoreSchemaFor("pix_gpu_timing_events");
         Assert.Equal("object", schema.GetProperty("type").GetString());
         JsonElement[] alternatives = schema.GetProperty("anyOf").EnumerateArray().ToArray();
         Assert.Equal(2, alternatives.Length);
@@ -168,6 +168,18 @@ public sealed class ReadinessTests
         var marker = new EventRecord(0, 1, uint.MaxValue, "Triangle", "DrawInstanced(3, 1, 0, 0)", 0, 0);
         Assert.True(ToolHelpers.MatchesKind(marker, "draw"));
         Assert.False(ToolHelpers.MatchesKind(marker with { ApiCallData = string.Empty }, "draw"));
+    }
+
+    [Theory]
+    [InlineData("Triangle pass", uint.MaxValue)]
+    [InlineData("<deprecated - use pix3.h instead> Frame", uint.MaxValue)]
+    [InlineData("<deprecated - use pix3.h instead> Hello PixMcp!!!", 7u)]
+    public void NativeMarkerLabelsMatchWithOrWithoutGpuIdentity(string name, uint gpuId)
+    {
+        var marker = new EventRecord(0, gpuId, uint.MaxValue, name, string.Empty, 0, 0);
+        Assert.True(ToolHelpers.MatchesKind(marker, "marker"));
+        Assert.False(ToolHelpers.MatchesKind(marker with { Name = "DrawIndexedInstanced", ApiCallData = "DrawIndexedInstanced(3, 1, 0, 0, 0)" }, "marker"));
+        Assert.True(ToolHelpers.MatchesKind(marker with { Name = "PIXBeginEvent", ApiCallData = "some legacy marker text" }, "marker"));
     }
 
     [Fact]

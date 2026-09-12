@@ -24,11 +24,12 @@ public static class SessionTools
         string? probeError = null;
         if (probe)
         {
-            try { await session.Run(() => session.Factory, cancellationToken).ConfigureAwait(false); }
+            try { await session.Run(() => session.Factory, cancellationToken, "pix_info: factory probe").ConfigureAwait(false); }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { probeError = PixErrors.Describe(ex); }
         }
         Job? running = jobs.Running;
+        WorkerSnapshot worker = session.Worker.Snapshot();
         return Json.Serialize(new
         {
             pix = new
@@ -51,12 +52,16 @@ public static class SessionTools
             },
             worker = new
             {
-                busy = running is not null || session.Worker.PendingCount > 0,
+                busy = worker.Busy,
                 runningJob = running?.Id,
-                queuedCalls = session.Worker.PendingCount,
+                queuedCalls = worker.QueuedCalls,
+                operation = worker.Operation,
+                startedAt = worker.StartedAt,
+                elapsedSeconds = worker.ElapsedSeconds,
             },
+            results = session.Results.Summary(),
             handles = session.Handles.Select(h => h.Summary()).ToArray(),
-            jobs = jobs.All.Select(j => j.ToDto(includeResult: false)).ToArray(),
+            jobs = jobs.All.Select(j => j.ToDto()).ToArray(),
         });
     }
 
@@ -85,16 +90,16 @@ public static class SessionTools
         => Tools.Run(session, "pix_close_all", () => session.CloseAll(), cancellationToken);
 
     [McpServerTool(Name = "pix_jobs", ReadOnly = true), Description("Lists background jobs (analysis start, timing/counter collection, Dr. PIX runs, symbol resolution, captures) and their status. Only the most recent finished jobs are retained.")]
-    public static string Jobs(JobManager jobs) => Json.Serialize(jobs.All.Select(j => j.ToDto(includeResult: false)).ToArray());
+    public static string Jobs(JobManager jobs) => Json.Serialize(jobs.All.Select(j => j.ToDto()).ToArray());
 
-    [McpServerTool(Name = "pix_job_status", ReadOnly = true), Description("Returns a job's status, progress, recent status messages, and its result once finished.")]
+    [McpServerTool(Name = "pix_job_status", ReadOnly = true), Description("Returns compact job status, progress, recent messages and a resultRef once finished. Read the result with the exact pix_result_read nextCall.")]
     public static string JobStatus(JobManager jobs, [Description("Job id, e.g. job-1")] string jobId)
     {
         Job job = jobs.Get(jobId);
-        return Json.Serialize(job.ToDto(includeResult: true));
+        return Json.Serialize(job.ToDto());
     }
 
-    [McpServerTool(Name = "pix_job_wait", ReadOnly = true), Description("Blocks until a job finishes or the timeout elapses, then returns its status and result.")]
+    [McpServerTool(Name = "pix_job_wait", ReadOnly = true), Description("Blocks until a job finishes or the timeout elapses, then returns compact status and a resultRef. Job payloads are retrieved with pix_result_read.")]
     public static async Task<string> JobWait(
         JobManager jobs,
         [Description("Job id, e.g. job-1")] string jobId,
@@ -114,7 +119,7 @@ public static class SessionTools
             throw new McpException($"Job {jobId} already finished with status {job.Status}.");
         }
         jobs.Cancel(job);
-        return Json.Serialize(job.ToDto(includeResult: false));
+        return Json.Serialize(job.ToDto());
     }
 
     [McpServerTool(Name = "pix_log", ReadOnly = true), Description("Returns recent PIX engine log messages (warnings/errors reported by PIX itself). Useful when a call fails without a clear reason.")]

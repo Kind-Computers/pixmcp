@@ -28,6 +28,7 @@ public sealed class PixSession : IDisposable
     }
 
     public PixWorker Worker => _worker;
+    public ResultStore Results { get; } = new();
     public PixLog Log { get; }
     public bool FactoryCreated => _factory is not null;
 
@@ -57,7 +58,8 @@ public sealed class PixSession : IDisposable
         }
     }
 
-    public Task<T> Run<T>(Func<T> work, CancellationToken cancellationToken = default) => _worker.Run(work, cancellationToken);
+    public Task<T> Run<T>(Func<T> work, CancellationToken cancellationToken = default, string? operation = null)
+        => _worker.Run(work, cancellationToken, operation);
 
     public T Register<T>(T handle) where T : PixHandle
     {
@@ -119,6 +121,8 @@ public sealed class PixSession : IDisposable
     {
         PixHandle handle = Get(handleId);
         _handles.TryRemove(handle.Id, out _);
+        Results.InvalidateOwner(handle.Id);
+        PixMcp.Tools.PreviewTools.ForgetCapture(this, handle.Id);
         var warnings = new List<string>();
         try { handle.Close(warnings); }
         catch (Exception ex) { warnings.Add(PixErrors.Describe(ex)); }
@@ -153,5 +157,6 @@ public sealed class PixSession : IDisposable
         {
             _logger.LogWarning(ex, "Error while closing PIX handles at shutdown.");
         }
+        finally { Results.Dispose(); }
     }
 }
