@@ -42,6 +42,7 @@ public static class SessionTools
                 probeError,
             },
             developerModeEnabled = DeveloperModeEnabled(),
+            pixdiff = PixDiffDiscovery.Info(),
             process = new
             {
                 pid = Environment.ProcessId,

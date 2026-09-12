@@ -21,6 +21,34 @@ public static class TimingQueryTools
             db => db.Overview(handle, processId, offset, limit), waitSeconds, cancellationToken);
     }
 
+    [McpServerTool(Name = "pix_timing_submissions", ReadOnly = true), Description("Pages recorded queue submissions correlated directly to their GPU execution. Returns the submitting thread, CPU submit timestamp, GPU start/end and validated latency. This is queue submission correlation, not individual draw or named-marker correlation. Zero or inconsistent GPU timing remains explicitly unavailable. Submission references expire on save, symbol resolution or close.")]
+    public static Task<string> Submissions(PixSession session, JobManager jobs, string handle,
+        [Description("Exact submission reference returned by this tool; omit process/thread/queue/time filters when supplied.")] string? submissionRef = null,
+        uint? processId = null, uint? threadId = null, string? queueId = null,
+        [Description("Optional decimal nanoseconds. The [startNs,endNs) interval selects CPU submission timestamps; original GPU timing is retained outside the selection. Defaults to the reliable capture interval.")] string? startNs = null,
+        string? endNs = null, int offset = 0, int limit = 25,
+        [Description(WaitDescription)] double waitSeconds = 2, CancellationToken cancellationToken = default)
+    {
+        TimingDatabase.ValidatePage(offset, limit);
+        long? start = TimingDatabase.ParseNs(startNs, nameof(startNs)), end = TimingDatabase.ParseNs(endNs, nameof(endNs));
+        return Query(session, jobs, "pix_timing_submissions", handle,
+            new { query = "submissions", submissionRef, processId, threadId, queueId, start, end, offset, limit },
+            (db, generation) => db.Submissions(handle, generation, submissionRef, processId, threadId, queueId, start, end, offset, limit), waitSeconds, cancellationToken);
+    }
+
+    [McpServerTool(Name = "pix_timing_thread_switches", ReadOnly = true), Description("Pages recorded switch-in/out scheduling evidence for one capture-local thread lifetime. Switch-out rows include the raw wait-reason code and the stack recorded at that exact timestamp when present; unresolved addresses remain visible. These records do not establish blocked duration, waited-on objects, or the cause of a GPU gap.")]
+    public static Task<string> ThreadSwitches(PixSession session, JobManager jobs, string handle,
+        [Description("Capture-local threadRowId from pix_timing_overview or pix_timing_submissions; not an OS thread ID.")] string threadRowId,
+        [Description(TimeDescription)] string? startNs = null, string? endNs = null, int offset = 0, int limit = 25,
+        [Description(WaitDescription)] double waitSeconds = 2, CancellationToken cancellationToken = default)
+    {
+        TimingDatabase.ValidatePage(offset, limit); TimingDatabase.ParseId(threadRowId, nameof(threadRowId));
+        long? start = TimingDatabase.ParseNs(startNs, nameof(startNs)), end = TimingDatabase.ParseNs(endNs, nameof(endNs));
+        return Query(session, jobs, "pix_timing_thread_switches", handle,
+            new { query = "thread-switches", threadRowId, start, end, offset, limit },
+            db => db.ThreadSwitches(handle, threadRowId, start, end, offset, limit), waitSeconds, cancellationToken);
+    }
+
     [McpServerTool(Name = "pix_timing_events", ReadOnly = true), Description("Pages recorded PIX CPU/GPU executions with event names, lanes, original durations and overlap with the selected [startNs,endNs) interval. Event IDs identify marker definitions within this timing capture, not GPU-capture EventRefs. Nested event durations overlap and must not be summed into frame latency.")]
     public static Task<string> Events(PixSession session, JobManager jobs, string handle,
         [Description("cpu, gpu, or all (default all).")] string domain = "all", uint? processId = null, uint? threadId = null,
@@ -136,6 +164,10 @@ public static class TimingQueryTools
 
     private static Task<string> Query(PixSession session, JobManager jobs, string tool, string handle, object key,
         Func<TimingDatabase, object> query, double waitSeconds, CancellationToken cancellationToken, Func<string, int, object>? project = null)
+        => Query(session, jobs, tool, handle, key, (database, _) => query(database), waitSeconds, cancellationToken, project);
+
+    private static Task<string> Query(PixSession session, JobManager jobs, string tool, string handle, object key,
+        Func<TimingDatabase, int, object> query, double waitSeconds, CancellationToken cancellationToken, Func<string, int, object>? project = null)
         => PixErrors.Guard(tool, async () =>
         {
             cancellationToken.ThrowIfCancellationRequested();

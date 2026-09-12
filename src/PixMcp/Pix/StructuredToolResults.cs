@@ -156,12 +156,16 @@ internal static class StructuredToolResults
     {
         "pix_gpu_analysis_start" or "pix_gpu_timing_collect" or "pix_gpu_counters_start"
             or "pix_gpu_drpix_run" or "pix_timing_resolve_symbols" or "pix_device_take_gpu_capture"
-            or "pix_device_timing_capture_stop" or "pix_capture_upgrade" or "pix_gpu_shader_profile" or "pix_gpu_compare" or "pix_gpu_preview" or "pix_job_status" or "pix_job_wait" or "pix_job_cancel" => JobSchema,
+            or "pix_device_timing_capture_stop" or "pix_capture_upgrade" or "pix_gpu_shader_profile" or "pix_gpu_compare" or "pix_gpu_preview"
+            or "pix_gpu_export_cpp" or "pix_csv_compare" or "pix_job_status" or "pix_job_wait" or "pix_job_cancel" => JobSchema,
         "pix_result_read" => ResultReadSchema,
         "pix_result_export" => Export<ResultExportDto>(),
         "pix_gpu_compare_changes" => Export<ComparisonChangesDto>(),
+        "pix_csv_pass_candidates" => Export<CsvPassCandidatesDto>(),
         "pix_timing_overview" => AnyOf(Export<TimingOverviewDto>(), PendingSchema),
         "pix_timing_events" => AnyOf(Export<TimingEventsDto>(), PendingSchema),
+        "pix_timing_submissions" => AnyOf(Export<TimingSubmissionsDto>(), PendingSchema),
+        "pix_timing_thread_switches" => AnyOf(Export<TimingThreadSwitchesDto>(), PendingSchema),
         "pix_timing_counters_list" => AnyOf(Export<TimingCountersDto>(), PendingSchema),
         "pix_timing_counters_read" => AnyOf(Export<TimingCounterSamplesDto>(), PendingSchema),
         "pix_timing_hotspots" => AnyOf(Export<TimingHotspotsDto>(), PendingSchema),
@@ -175,6 +179,7 @@ internal static class StructuredToolResults
         "pix_gpu_pipeline_state" => AnyOf(Export<PipelineStateDto>(), PendingSchema),
         "pix_gpu_inspect_event" => AnyOf(Export<EventInspectionDto>(), PendingSchema),
         "pix_gpu_shader_code" => AnyOf(Export<ShaderCodeDto>(), PendingSchema),
+        "pix_gpu_shader_diagnostics" => AnyOf(Export<ShaderDiagnosticsDto>(), PendingSchema),
         "pix_gpu_shader_search" => AnyOf(Export<ShaderSearchDto>(), PendingSchema),
         "pix_gpu_shaders" => AnyOf(Export<ShaderInventoryDto>(), PendingSchema),
         "pix_gpu_shader_uses" => AnyOf(Export<ShaderUsesDto>(), PendingSchema),
@@ -274,6 +279,7 @@ internal static class StructuredToolResults
         ("pix_gpu_resources", "dimension") => ["BUFFER", "TEXTURE1D", "TEXTURE2D", "TEXTURE3D"],
         ("pix_gpu_api_objects", "type") => ["HEAP", "RESOURCE", "COMMAND_QUEUE", "COMMAND_ALLOCATOR"],
         ("pix_device_d3d_settings_set", "category") => ["debugLayer", "dred", "device"],
+        ("pix_csv_compare", "stat") => ["mean", "median", "p95"],
         ("pix_gpu_timing_events", "sortBy") => ["eopDuration", "topDuration", "eopStart", "index"],
         (_, "kind") when tool.StartsWith("pix_gpu_") => ["draw", "dispatch", "drawOrDispatch", "executeIndirect", "copy", "clear", "barrier", "present", "marker"],
         _ => null,
@@ -282,6 +288,7 @@ internal static class StructuredToolResults
     private static (double? min, double? max) Bounds(string tool, string name) => (tool, name) switch
     {
         ("pix_gpu_preview_bytes", "limit") => (1, 16384),
+        ("pix_gpu_preview" or "pix_gpu_export_cpp" or "pix_csv_compare", "timeoutSeconds") => (1, 3600),
         ("pix_gpu_shader_search", "nodeIndex") => (0, null),
         ("pix_gpu_shader_search", "contextLines") => (0, 20),
         (_, "startLine") => (1, null),

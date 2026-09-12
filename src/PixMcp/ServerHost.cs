@@ -48,6 +48,7 @@ internal static class ServerHost
                     "a timing capture with pix_timing_open, or a DirectX dump (.dxdmp_preview) with pix_dump_open. " +
                     "Start with pix_gpu_overview, then pass eventRef to pix_gpu_inspect_event. " +
                     "Follow resourceRef with pix_gpu_resource_uses and shaderRef with pix_gpu_shader_code or pix_gpu_shader_search. " +
+                    "Use pix_gpu_shader_diagnostics for HLSL/IL/ISA node availability and PDB hash evidence when source is missing. " +
                     "Use pix_gpu_shaders and pix_gpu_shader_uses for shader inventory and reverse navigation. " +
                     "Use pix_gpu_compare for baseline/candidate differences, then pix_gpu_compare_changes to filter its saved fullResultRef without replay. " +
                     "Use pix_dump_triage for crash evidence. " +
@@ -66,7 +67,15 @@ internal static class ServerHost
                     "Recorded timing captures use pix_timing_overview, pix_timing_events, pix_timing_counters_list/read, " +
                     "pix_timing_hotspots and pix_timing_calltree without GPU replay. Times are nanoseconds with exclusive interval ends. " +
                     "CPU samples are statistical counts, not exact CPU time; inspect stack/symbol coverage and explicitly resolve symbols when needed. " +
+                    "Use pix_timing_submissions for recorded CPU queue submission to GPU execution correlation, then follow threadRowId " +
+                    "with pix_timing_thread_switches for exact recorded scheduling transitions and switch-out stacks. These do not establish " +
+                    "arbitrary draw correlation or the cause of GPU idle time. Enable contextSwitchStacks and captureSysmonCounters " +
+                    "explicitly when taking a timing capture for this workflow. " +
                     "pix_gpu_preview uses pixtool and requires all connected analyses to be stopped first. " +
+                    "pix_gpu_export_cpp also uses pixtool with that coordination; it exports to a new directory and keeps generated files. " +
+                    "pix_csv_compare uses optional pixdiff to compare recorded Unreal CSVs (candidate minus baseline, median by default). " +
+                    "Read the saved resultRef and use pix_csv_pass_candidates to locate possible PIX markers by CSV pass name. " +
+                    "CSV comparisons run independently of the PIX worker. Name matches do not establish identity or make CSV and replay timings equivalent. " +
                     "pix_gpu_preview_image retrieves preview or screenshot artifacts with optional crop/maxDimension; byte retrieval preserves originals. " +
                     "Live GPU capture waits for target readiness (default 30 seconds) with optional warmup (default zero). " +
                     "Cancellation is best effort; cancellationRequested does not mean an operation was interrupted. " +

@@ -14,6 +14,8 @@ internal sealed partial class TimingDatabase
         Capability("cpuEvents", "PixCpuExecution", "BeginTimestamp", "EndTimestamp", "ThreadRowId", "EventId");
         Capability("gpuEvents", "PixGpuExecution", "BeginTimestamp", "EndTimestamp", "ApiCommandQueueId", "EventId");
         Capability("cpuExecutionTiming", "PixCpuExecutionTimes", "EventId", "BeginTimestamp", "EndTimestamp", "Execution", "Stall");
+        Capability("submissions", "ApiQueueExecution", "Id", "ApiCommandQueueId", "ThreadId", "SubmitTimestamp", "BeginTimestamp", "EndTimestamp");
+        Capability("threadSwitches", "ContextSwitch", "Core", "Timestamp", "FromProcThreadId", "ToProcThreadId", "FromThreadWaitReason");
         Capability("counters", "PixCounters", "CounterId", "Timestamp", "Value");
         Capability("samples", "CpuSample", "Core", "Timestamp", "ProcThreadId");
         Capability("stacks", "Stacks", "Id", "NumFrames", "Addresses");
@@ -53,6 +55,7 @@ internal sealed partial class TimingDatabase
         {
             new("pix_timing_events", new { handle, processId }), new("pix_timing_counters_list", new { handle, processId }),
             new("pix_timing_hotspots", new { handle, processId }),
+            new("pix_timing_submissions", new { handle, processId }),
         };
         if (offset + limit < Math.Max(processTotal, Math.Max(threadTotal, queueTotal)))
             calls.Add(new("pix_timing_overview", new { handle, processId, offset = offset + limit, limit }));

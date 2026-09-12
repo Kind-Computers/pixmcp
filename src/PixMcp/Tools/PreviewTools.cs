@@ -2,7 +2,6 @@ using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using System.Text;
 using System.Text.Json;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -35,13 +34,8 @@ public static class PreviewTools
         session.Get<GpuCaptureHandle>(handle);
         return Tools.RunJob(jobs, "pix_gpu_preview", () => jobs.StartForHandle<GpuCaptureHandle>("preview", $"Preview {handle}", handle, (job, capture) =>
         {
-            string[] connected = session.Handles.OfType<GpuCaptureHandle>().Where(h => h.AnalysisConnected || h.AnalysisStarted).Select(h => h.Id).ToArray();
-            if (connected.Length > 0)
-                throw new PixToolException("analysis_active", $"Stop connected GPU analyses before CLI replay: {string.Join(", ", connected)}.", true,
-                    connected.Select(id => new ToolCallDto("pix_gpu_analysis_stop", new { handle = id })).ToArray());
-            string executable = Path.Combine(PixDiscovery.InstallDir ?? string.Empty, "pixtool.exe");
-            if (!File.Exists(executable))
-                throw new PixToolException("preview_unavailable", "The installed PIX runtime does not contain pixtool.exe.");
+            PixToolProcess.EnsureReplayAvailable(session);
+            string executable = PixToolProcess.Executable("preview", PixDiscovery.InstallDir);
             if (markerName is not null)
             {
                 var markers = capture.Queues.SelectMany(q => capture.AllEvents(q.Index))
@@ -55,24 +49,9 @@ public static class PreviewTools
             string replayCapture = Path.Combine(folder, "capture" + Path.GetExtension(capture.Path));
             try
             {
-                // PIX documents hold an exclusive engine lock on the original path; the CLI must open its own copy.
-                using (var source = new FileStream(capture.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                using (var destination = new FileStream(replayCapture, FileMode.CreateNew, FileAccess.Write))
-                {
-                    byte[] buffer = new byte[1024 * 1024];
-                    int copied;
-                    while ((copied = source.Read(buffer)) > 0)
-                    {
-                        job.ThrowIfCancellationRequested();
-                        destination.Write(buffer, 0, copied);
-                    }
-                }
+                PixToolProcess.CopyCapture(capture.Path, replayCapture, job.ThrowIfCancellationRequested);
                 ProcessStartInfo start = BuildStartInfo(executable, replayCapture, output, markerName, target, rtvIndex);
-                // pixtool has its own raw command-line parser: option values need quotes after '='.
-                // ArgumentList quotes the entire option, which this CLI rejects when the value has spaces.
-                string arguments = FormatPixToolArguments(start.ArgumentList);
-                start.ArgumentList.Clear();
-                start.Arguments = arguments;
+                PixToolProcess.PrepareArguments(start);
                 job.AddMessage("Replaying with pixtool defaults; native analysis adapter and power settings do not apply.");
                 RunProcess(start, TimeSpan.FromSeconds(timeoutSeconds), job.Cancellation.Token, job.AddMessage);
                 job.ThrowIfCancellationRequested();
@@ -157,72 +136,17 @@ public static class PreviewTools
 
     internal static ProcessStartInfo BuildStartInfo(string executable, string capture, string output, string? markerName, PreviewTarget target, int rtvIndex)
     {
-        var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (string arg in new[] { "--output=quiet", "--log=off", "open-capture", capture, "save-resource", output }) start.ArgumentList.Add(arg);
+        var start = PixToolProcess.StartInfo(executable, ["--output=quiet", "--log=off", "open-capture", capture, "save-resource", output]);
         start.ArgumentList.Add(target == PreviewTarget.Depth ? "--depth" : $"--rtv={rtvIndex}");
         if (markerName is not null) start.ArgumentList.Add("--marker=" + markerName);
         return start;
     }
 
     internal static string FormatPixToolArguments(IEnumerable<string> arguments)
-        => string.Join(' ', arguments.Select(argument =>
-        {
-            int separator = argument.StartsWith("--", StringComparison.Ordinal) ? argument.IndexOf('=') : -1;
-            return separator < 0 ? QuoteWindowsArgument(argument) : argument[..(separator + 1)] + QuoteWindowsArgument(argument[(separator + 1)..]);
-        }));
-
-    private static string QuoteWindowsArgument(string value)
-    {
-        if (value.Length > 0 && !value.Any(c => char.IsWhiteSpace(c) || c == '"')) return value;
-        var quoted = new StringBuilder("\"");
-        int backslashes = 0;
-        foreach (char c in value)
-        {
-            if (c == '\\') { backslashes++; continue; }
-            quoted.Append('\\', c == '"' ? backslashes * 2 + 1 : backslashes).Append(c);
-            backslashes = 0;
-        }
-        return quoted.Append('\\', backslashes * 2).Append('"').ToString();
-    }
+        => PixToolProcess.FormatArguments(arguments);
 
     internal static void RunProcess(ProcessStartInfo start, TimeSpan timeout, CancellationToken cancellation, Action<string> diagnostic)
-    {
-        using var process = new Process { StartInfo = start };
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        deadline.CancelAfter(timeout);
-        cancellation.ThrowIfCancellationRequested();
-        if (!process.Start()) throw new PixToolException("preview_start_failed", "Could not start pixtool.");
-        Task<string> stdout = Drain(process.StandardOutput);
-        Task<string> stderr = Drain(process.StandardError);
-        try
-        {
-            process.WaitForExitAsync(deadline.Token).GetAwaiter().GetResult();
-        }
-        catch (OperationCanceledException)
-        {
-            try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
-            finally { process.WaitForExit(); }
-            if (cancellation.IsCancellationRequested) throw new OperationCanceledException(cancellation);
-            throw new PixToolException("preview_timeout", "pixtool exceeded the preview timeout and was terminated.", true);
-        }
-        finally
-        {
-            diagnostic(stdout.GetAwaiter().GetResult());
-            diagnostic(stderr.GetAwaiter().GetResult());
-        }
-        if (process.ExitCode != 0) throw new PixToolException("preview_failed", $"pixtool exited with code {process.ExitCode}; see bounded job diagnostics.");
-    }
-
-    private static async Task<string> Drain(StreamReader reader)
-    {
-        const int max = 4096;
-        var text = new StringBuilder();
-        var buffer = new char[1024];
-        int count;
-        while ((count = await reader.ReadAsync(buffer).ConfigureAwait(false)) != 0)
-            if (text.Length < max) text.Append(buffer, 0, Math.Min(count, max - text.Length));
-        return text.ToString();
-    }
+        => PixToolProcess.Run(start, timeout, cancellation, diagnostic, "preview");
 
     internal static (uint Width, uint Height) PngDimensions(byte[] png)
     {

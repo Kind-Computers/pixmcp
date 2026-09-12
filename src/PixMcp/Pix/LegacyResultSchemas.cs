@@ -96,7 +96,8 @@ internal static class LegacyResultSchemas
     private sealed record WorkerStatus(bool Busy, string? RunningJob, int QueuedCalls, string? Operation,
         DateTimeOffset? StartedAt, double? ElapsedSeconds);
     private sealed record SessionInfo(PixInstall Pix, bool? DeveloperModeEnabled, ServerProcess Process,
-        WorkerStatus Worker, ResultStoreSummary Results, IReadOnlyList<HandleSummary> Handles, IReadOnlyList<JobDto> Jobs);
+        WorkerStatus Worker, ResultStoreSummary Results, IReadOnlyList<HandleSummary> Handles, IReadOnlyList<JobDto> Jobs,
+        PixDiffInfoDto Pixdiff);
     private sealed record TimingCapture(string Handle, string Kind, string Path, DateTimeOffset OpenedAt,
         string CapturePath, string PixStoragePath, bool SymbolsResolved);
     private sealed record SavedResult(string Saved);
@@ -109,7 +110,7 @@ internal static class LegacyResultSchemas
     private sealed record SystemCounter(uint Id, string Name, string? InternalName, string Group, string? Units,
         string? Description, double Min, double Max, bool IsDefault, string ProcessType);
     private sealed record PackagedApp(string PackageFullName, string ApplicationId, string? FriendlyName, string Architecture, string UnsupportedReason);
-    private sealed record CaptureStarted(bool Started, string Path);
+    private sealed record CaptureStarted(bool Started, string Path, TimingCaptureSettingsDto Settings);
     private sealed record DetachedResult(bool Detached, bool Terminated);
     private sealed record D3dSettings(IReadOnlyList<object?> DebugLayer, IReadOnlyList<object?> Dred, IReadOnlyList<object?> Device);
     private sealed record SettingChanged(bool Changed, string Category, object Result);

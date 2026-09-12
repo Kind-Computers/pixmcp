@@ -163,7 +163,7 @@ public sealed class Job
     }
 }
 
-public sealed class JobManager
+public sealed class JobManager : IDisposable
 {
     /// <summary>Finished jobs kept for pix_job_status; older ones are forgotten so results and native tokens are not retained forever.</summary>
     public const int MaxFinishedJobs = 50;
@@ -172,6 +172,9 @@ public sealed class JobManager
     private readonly PixWorker _worker;
     private readonly PixSession _session;
     private readonly Func<IPixCancellationToken?> _createNativeToken;
+    private readonly object _managedGate = new();
+    private readonly Dictionary<string, Job> _managedJobs = new();
+    private bool _disposed;
     private int _next;
 
     public JobManager(PixWorker worker, PixSession session)
@@ -197,6 +200,57 @@ public sealed class JobManager
     /// <summary>Runs work on the PIX worker. Success remains success when cancellation arrives too late.</summary>
     public Job Start(string kind, string description, Func<Job, object?> work, string? owner = null)
         => StartAfter(kind, description, null, work, owner);
+
+    /// <summary>Runs managed work independently of the PIX worker and native factory.</summary>
+    internal Job StartManaged(string kind, string description, Func<Job, Task<object?>> work)
+    {
+        var job = new Job($"job-{Interlocked.Increment(ref _next)}", kind, description, _session.Results);
+        lock (_managedGate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _session.Results.RegisterJobOwners(job.Id, []);
+            _jobs[job.Id] = job;
+            _managedJobs[job.Id] = job;
+        }
+        Prune();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                job.Begin();
+                job.Succeed(await work(job).ConfigureAwait(false));
+            }
+            catch (Exception ex) { job.Fail(ex); }
+            finally
+            {
+                try { _session.Results.MarkJobFinished(job.Id); Prune(); }
+                finally
+                {
+                    job.Completion.TrySetResult(true);
+                    lock (_managedGate) _managedJobs.Remove(job.Id);
+                }
+            }
+        });
+        return job;
+    }
+
+    /// <summary>Cancel and drain managed helpers before the session releases its result store.</summary>
+    public void Dispose()
+    {
+        Job[] active;
+        lock (_managedGate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            active = _managedJobs.Values.ToArray();
+        }
+        foreach (Job job in active)
+        {
+            try { if (!job.IsFinished) job.RequestCancellation(); }
+            catch (McpException) when (job.IsFinished) { }
+        }
+        Task.WhenAll(active.Select(j => j.Completion.Task)).GetAwaiter().GetResult();
+    }
 
     /// <summary>A managed prerequisite may await readiness without occupying the PIX worker.</summary>
     internal Job StartAfter(string kind, string description, Func<Job, Task>? prerequisite,

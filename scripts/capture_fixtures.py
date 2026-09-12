@@ -32,8 +32,9 @@ def generate(client, app, output_dir, timing_seconds=3, startup_delay_ms=1500, s
 
     connection = query("pix_device_connect")["handle"]
 
-    def launch(arguments):
-        result = query("pix_device_launch", handle=connection, exePath=str(app), arguments=arguments)
+    def launch(arguments, under_gpu_capture=True):
+        result = query("pix_device_launch", handle=connection, exePath=str(app), arguments=arguments,
+                       underGpuCapture=under_gpu_capture)
         if not result.get("capturable") or not result.get("processId"):
             raise SmokeError(f"Fixture process cannot be captured: {result}")
         report["activeProcessId"] = result["processId"]
@@ -85,11 +86,12 @@ def generate(client, app, output_dir, timing_seconds=3, startup_delay_ms=1500, s
         primary_error = None
         try:
             # Launch/attach before capture start so the selected process has CPU sample stacks.
-            pid = launch("--hidden --frames 100000 --timing-workload")
+            pid = launch("--hidden --frames 100000 --timing-workload", under_gpu_capture=False)
             path = output_dir / "timing.wpix"
             query("pix_device_timing_capture_start", handle=connection, outputPath=str(path),
                         cpuSamples=True, cpuSamplesPerSecond=1000, cpuSampleStacks=True,
-                        contextSwitches=True, pixEvents=True, gpuTiming=True,
+                        contextSwitches=True, contextSwitchStacks=True, captureSysmonCounters=True,
+                        pixEvents=True, gpuTiming=True,
                         maxFileSizeMb=256, durationSeconds=0)
             active = True
             sleep(timing_seconds)

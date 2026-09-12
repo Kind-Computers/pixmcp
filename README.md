@@ -196,6 +196,13 @@ source kind (HLSL/IL/ISA), and shader identity are explicit.
 `pix_gpu_shaders` provides a capture-wide inventory, and `pix_gpu_shader_uses` returns
 events using a shader. Returned shader references can be passed directly to code/search.
 
+When shader source is missing, call `pix_gpu_shader_diagnostics(shaderRef)`. It checks
+HLSL, IL and ISA node availability for that shader and reports its PDB hash when present.
+`codeTypes` can select a subset. Each probe distinguishes absent data from a native
+failure and includes source-retrieval calls when available. A PDB hash identifies the
+expected symbols; it does not establish that PIX found a matching PDB. Diagnostics do
+not load source text, search local PDB directories, or scan other shaders.
+
 ### Capture comparison
 
 `pix_gpu_compare` takes `baselineHandle`, `candidateHandle`, and selected sections:
@@ -249,6 +256,47 @@ Inline images have a 4 MiB limit; oversized originals get a thumbnail automatica
 while byte paging retains the original PNG. Closing the capture
 expires its artifacts.
 
+### Export a capture to C++
+
+`pix_gpu_export_cpp(handle, outputDirectory)` runs the installed `pixtool` as a job and
+returns the generated project's directory and `CMakeLists.txt` path through the job's
+`resultRef`. The destination must not exist and its parent must already exist. Export
+never overwrites existing output. The default timeout is 1,800 seconds (maximum 3,600).
+
+As with previews, stop all connected GPU analyses before export. CLI jobs use an owned
+capture copy, run exclusively on the PIX worker, and support cancellation and timeouts.
+Failed or cancelled exports retain partial output with its location in job diagnostics.
+Generated files survive capture close and server shutdown. Building or running the
+project is a separate action.
+
+`useWinPixEventRuntime`, `useAgilitySdk`, and `useReplayTimeExecuteIndirectBuffers` are
+false by default. The first two opt into the CLI's package/license options. Export uses
+the CLI's runtime and defaults independently of native analysis adapter/power settings.
+
+### Unreal CSV comparisons
+
+Install the companion `pixdiff` from the `pix_tutorial` project with JSON output support.
+The server discovers `PIXMCP_PIXDIFF_PATH`, then `pixdiff.exe` beside the server, then PATH.
+An invalid explicit override is an error. `pix_info.pixdiff` reports discovery without
+launching the helper; all other PIX tools work when the helper is absent.
+
+Call `pix_csv_compare(baselinePath, candidatePath)` to compare recorded per-pass GPU
+milliseconds. Its default statistic is `median`, with `mean` and `p95` also supported.
+Positive deltas mean the candidate is slower. Rows sort by absolute delta, so improvements
+may appear before regressions. Results retain complete measured and missing or unmeasured
+pass lists, sample counts, frame counts, and the `GPU/Total` aggregate when present. Zero
+baselines have no percentage delta. The helper's text output keeps its existing mean/top-30 defaults;
+`pixdiff candidate.csv baseline.csv --format=json --stat median` emits complete JSON.
+
+Comparison runs as a managed job without occupying the PIX worker. Read the saved
+`resultRef` with `pix_result_read` or export it with `pix_result_export`; paging never
+reopens the source CSVs. `pix_csv_pass_candidates(resultRef, passName, handle)` searches
+an explicitly selected GPU capture for possible marker matches. Exact names rank first;
+substring matches and duplicate names remain visible with their event references and
+follow-up calls. `GPU/Total` links to the capture overview instead of a marker.
+These are name-based candidates. CSV recordings and GPU replay measurements retain
+separate provenance and do not establish capture identity or directly comparable timing.
+
 ### Live and recorded timing captures
 
 GPU capture waits for launch/attach readiness callbacks for up to
@@ -260,6 +308,12 @@ the saved capture to become readable before reporting success.
 Windows may request UAC approval when PIX starts its timing recorder. Complete that
 desktop prompt before recording; unattended runners need the PIX service/elevation
 configured in advance.
+
+`pix_device_timing_capture_start` accepts `contextSwitchStacks` and `captureSysmonCounters`
+(both default false). Enable both for the tutorial's CPU/GPU investigation. Switch stacks
+require `contextSwitches=true`; the start response includes effective capture settings.
+Launch Unreal with `-PIX -statnamedevents` for timing capture and keep GPU-capture
+injection (`-attachPIX`, or `underGpuCapture=true`) for separate GPU-capture runs.
 
 Start recorded analysis with `pix_timing_overview`, then use `pix_timing_events`,
 `pix_timing_counters_list`, and `pix_timing_counters_read`. These query the timing
@@ -274,6 +328,22 @@ Inclusive and exclusive sample counts are statistical observations, not exact CP
 Coverage includes samples without stacks and unresolved symbols. Symbol resolution is
 explicit through `pix_timing_resolve_symbols`; save and symbol resolution invalidate
 cached queries and profiles. Supply matching PDBs for application function names.
+
+Use `pix_timing_submissions` to follow a recorded CPU queue submission to its GPU
+execution. Its time filter selects submission timestamps in `[startNs,endNs)`, retaining
+GPU start/end times outside that selection. Valid intervals include submission-to-GPU
+latency and GPU duration; missing, zero-duration, or inconsistent execution timestamps
+have explicit coverage instead. Pass the returned `submissionRef` back to the tool for
+an exact lookup without lane/time filters. References expire on save, symbol resolution,
+or close. This is queue-submission correlation; individual draws and named markers are
+not inferred from names or nearby timestamps.
+
+Follow a returned `threadRowId` with `pix_timing_thread_switches` to inspect recorded
+switch-in/out transitions within that thread's lifetime. Switch-out rows include raw
+wait-reason codes and exact-timestamp stacks when recorded. Missing stacks and unresolved
+symbols remain distinct. A transition does not identify a waited-on object or establish
+blocked duration or the cause of a GPU gap. These queries do not calculate GPUView's
+hardware-queue busy percentage.
 
 ### Dump triage
 
@@ -299,11 +369,13 @@ reading the preceding bytes because the native blob API only exposes prefix read
 | GPU capture | `pix_gpu_open`, `pix_gpu_info`, `pix_gpu_queues`, `pix_gpu_events`, `pix_gpu_event`, `pix_gpu_api_objects`, `pix_gpu_screenshot` |
 | Analysis | `pix_gpu_analysis_start`, `pix_gpu_analysis_status`, `pix_gpu_analysis_adapters`, `pix_gpu_analysis_stop` |
 | Timing/counters | `pix_gpu_timing_collect`, `pix_gpu_timing_events`, `pix_gpu_timing_tree`, `pix_gpu_counters_list`, `pix_gpu_counters_start`, `pix_gpu_counters_collect`, `pix_gpu_occupancy`, `pix_gpu_hf_counters` |
-| Pipeline/shaders | `pix_gpu_pipeline_state`, `pix_gpu_shaders`, `pix_gpu_shader_uses`, `pix_gpu_shader_code`, `pix_gpu_shader_search`, `pix_gpu_shader_profile` |
+| Pipeline/shaders | `pix_gpu_pipeline_state`, `pix_gpu_shaders`, `pix_gpu_shader_uses`, `pix_gpu_shader_code`, `pix_gpu_shader_search`, `pix_gpu_shader_diagnostics`, `pix_gpu_shader_profile` |
 | Resources | `pix_gpu_resources`, `pix_gpu_resource`, `pix_gpu_event_resources`, `pix_gpu_resource_uses`, `pix_gpu_heap` |
 | Preview | `pix_gpu_preview`, `pix_gpu_preview_image`, `pix_gpu_preview_bytes` |
+| C++ export | `pix_gpu_export_cpp` |
+| Unreal CSV | `pix_csv_compare`, `pix_csv_pass_candidates` |
 | Dr. PIX | `pix_gpu_drpix_experiments`, `pix_gpu_drpix_run` |
-| Timing captures | `pix_timing_open`, `pix_timing_overview`, `pix_timing_events`, `pix_timing_counters_list`, `pix_timing_counters_read`, `pix_timing_hotspots`, `pix_timing_calltree`, `pix_timing_resolve_symbols`, `pix_timing_save` |
+| Timing captures | `pix_timing_open`, `pix_timing_overview`, `pix_timing_events`, `pix_timing_submissions`, `pix_timing_thread_switches`, `pix_timing_counters_list`, `pix_timing_counters_read`, `pix_timing_hotspots`, `pix_timing_calltree`, `pix_timing_resolve_symbols`, `pix_timing_save` |
 | Live device | `pix_device_connect`, `pix_device_info`, `pix_device_processes`, `pix_device_packaged_apps`, `pix_device_counters`, `pix_device_d3d_settings`, `pix_device_d3d_settings_set`, `pix_device_launch`, `pix_device_attach`, `pix_device_take_gpu_capture`, `pix_device_timing_capture_start`, `pix_device_timing_capture_stop`, `pix_device_detach` |
 | Capture format | `pix_capture_format`, `pix_capture_upgrade` |
 | Dump investigation | `pix_dump_open`, `pix_dump_info`, `pix_dump_triage`, `pix_dump_queues`, `pix_dump_events`, `pix_dump_event`, `pix_dump_page_faults`, `pix_dump_breadcrumbs`, `pix_dump_resources`, `pix_dump_gpu_state`, `pix_dump_blobs`, `pix_dump_journal` |
@@ -369,6 +441,10 @@ python scripts\smoke.py src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\P
 `take-capture` produces a capture. `open-capture`, `analysis-pending`, and
 `inspect-extras` accept `PIX_TEST_CAPTURE`. Tool/protocol errors, failed jobs,
 unresolved references, and failed assertions fail the scenario.
+
+`tutorial-gpu-extras` also accepts `PIX_TEST_CAPTURE` and a new destination directory
+through `PIX_TEST_CPP_OUTPUT`. It verifies C++ export, shader diagnostics, and preview
+rendering in sequence. The destination's parent must already exist.
 
 Once baseline and candidate captures exist, run the investigation benchmark:
 

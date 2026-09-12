@@ -437,9 +437,15 @@ public static class DeviceTools
         [Description("Capture file I/O events (default false).")] bool fileIo = false,
         [Description("Maximum capture file size in MB (default 1024).")] uint maxFileSizeMb = 1024,
         [Description("Automatic capture duration in seconds (0 = until stopped).")] uint durationSeconds = 0,
+        [Description("Record context-switch callstacks; requires contextSwitches=true (default false).")] bool contextSwitchStacks = false,
+        [Description("Record System Monitor counters such as GPU utilization and memory usage (default false).")] bool captureSysmonCounters = false,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_timing_capture_start", () =>
         {
+            var settings = new TimingCaptureSettingsDto(cpuSamples, cpuSamplesPerSecond,
+                cpuSamples && cpuSampleStacks, contextSwitches, contextSwitchStacks, pixEvents,
+                gpuTiming, gpuMemoryUsage, fileIo, maxFileSizeMb, durationSeconds, captureSysmonCounters);
+            var (options, parts) = TimingCaptureOptions.Create(settings);
             ConnectionHandle h = session.Get<ConnectionHandle>(handle);
             if (h.TimingCaptureInProgress is not null)
             {
@@ -447,30 +453,10 @@ public static class DeviceTools
             }
             string full = Path.GetFullPath(outputPath);
             Directory.CreateDirectory(Path.GetDirectoryName(full) ?? ".");
-            PIX_EVENT_COLLECTION_LEVEL Level(bool on, bool stacks) => !on ? PIX_EVENT_COLLECTION_LEVEL.PIX_EVENT_COLLECTION_LEVEL_NONE
-                : stacks ? PIX_EVENT_COLLECTION_LEVEL.PIX_EVENT_COLLECTION_LEVEL_ENABLED_WITH_STACKS : PIX_EVENT_COLLECTION_LEVEL.PIX_EVENT_COLLECTION_LEVEL_ENABLED;
-            var options = new PIX_TIMING_CAPTURE_OPTIONS
-            {
-                CapturePixEvents = pixEvents,
-                CaptureContextSwitchAndReadyThread = Level(contextSwitches, false),
-                CaptureCpuSamples = Level(cpuSamples, cpuSampleStacks),
-                CaptureTrackedFunctions = false,
-                CaptureGpuTiming = gpuTiming,
-                CaptureGpuMemoryUsage = gpuMemoryUsage,
-                MaximumCaptureFileSizeMb = maxFileSizeMb,
-                CpuSamplesPerSecond = cpuSamplesPerSecond,
-                CaptureFileIO = Level(fileIo, false),
-                MergeKernelImages = false,
-                CaptureStacksForAllProcesses = false,
-                CaptureVirtualAllocEvents = PIX_EVENT_COLLECTION_LEVEL.PIX_EVENT_COLLECTION_LEVEL_NONE,
-                CaptureHeapAllocEvents = PIX_EVENT_COLLECTION_LEVEL.PIX_EVENT_COLLECTION_LEVEL_NONE,
-                CapturePixMemEvents = PIX_EVENT_COLLECTION_LEVEL.PIX_EVENT_COLLECTION_LEVEL_NONE,
-                CaptureDuration = durationSeconds,
-            };
-            PixApiExtensionsDeviceConnection.StartTimingCapture(h.Connection, full, options, Array.Empty<PIX_TIMING_CAPTURE_OPTION_PART>());
+            PixApiExtensionsDeviceConnection.StartTimingCapture(h.Connection, full, options, parts);
             h.TimingCaptureInProgress = full;
-            h.Note("timingCaptureStarted", new { path = full });
-            return new { started = true, path = full };
+            h.Note("timingCaptureStarted", new { path = full, settings });
+            return new { started = true, path = full, settings };
         }, cancellationToken);
 
     [McpServerTool(Name = "pix_device_timing_capture_stop"), Description("Stops the in-progress timing capture and optionally opens the resulting file as a timing capture handle. PIX finalises the file asynchronously, so this runs as a job (waited for inline by default).")]

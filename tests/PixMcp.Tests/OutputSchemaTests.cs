@@ -96,6 +96,32 @@ public sealed class OutputSchemaTests
         Visit(root);
     }
 
+    [Fact]
+    public void TutorialToolsDescribeNestedCoverageAndNavigation()
+    {
+        var range = new TimingRangeDto("100", "200", "100", "300");
+        var calls = Array.Empty<ToolCallDto>();
+        var submission = new TimingSubmissionDto("1", "submission:timing-1:0:1", "2", "Graphics", "3", 42, 7,
+            "Render", "110", "150", "190", "40", "40", new("available"), new("available"), calls);
+        Validate("pix_timing_submissions", new TimingSubmissionsDto("timing-1", range,
+            new(1, 0, 1, null, [submission], null), calls));
+        var transition = new TimingThreadSwitchDto("120", "switchOut", 0, 42, 8, 5,
+            new("missing", [], "unavailable", "No recorded stack."));
+        Validate("pix_timing_thread_switches", new TimingThreadSwitchesDto("timing-1", range,
+            new("3", 42, 7, "Render", 1), "0", null, new(1, 0, 1, null, [transition], null), calls));
+        var shader = new ShaderRef(new("gpu-1", 0, 4), 0);
+        Validate("pix_gpu_shader_diagnostics", new ShaderDiagnosticsDto(shader, "1", "PS", new("absent", null),
+            [new("HLSL", "absent", 0), new("ISA", "unavailable", null, "Driver unavailable", "unsupported_feature")], [], calls));
+        var pass = new CsvPassDto("GPU/BasePass", 1, 2, 1, 100, true, true, 10, 10);
+        Validate("pix_csv_pass_candidates", new CsvPassCandidatesDto("result-1", pass.Name, "gpu-1", "BasePass",
+            "name-based candidates", false, pass, 0, 0, 0, null, [], null, calls));
+        Validate("pix_device_timing_capture_start", new { started = true, path = "capture.wpix",
+            settings = new TimingCaptureSettingsDto(true, 1000, true, true, true, true, true, false, false, 1024, 0, true) });
+        var job = new Job("job-1", "export-cpp", "Export frame").ToDto();
+        Validate("pix_gpu_export_cpp", job);
+        Validate("pix_csv_compare", job);
+    }
+
     private static void Validate(string tool, object value)
     {
         JsonElement schema = StructuredToolResults.SchemaFor(tool);

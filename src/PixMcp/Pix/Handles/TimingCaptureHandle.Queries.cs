@@ -12,6 +12,9 @@ public sealed partial class TimingCaptureHandle
     private int _queryGeneration;
 
     internal Job QueryJob(JobManager jobs, ResultStore results, string tool, object arguments, Func<TimingDatabase, object> query, out int queryGeneration)
+        => QueryJob(jobs, results, tool, arguments, (database, _) => query(database), out queryGeneration);
+
+    internal Job QueryJob(JobManager jobs, ResultStore results, string tool, object arguments, Func<TimingDatabase, int, object> query, out int queryGeneration)
     {
         string key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Serialize(arguments))));
         lock (_queryGate)
@@ -29,7 +32,7 @@ public sealed partial class TimingCaptureHandle
                 RequireQueryGeneration(generation);
                 j.AddMessage("Reading recorded timing data through PixStorage SQLite.");
                 using var database = new TimingDatabase(handle.CapturePath, handle.PixStoragePath, j.Cancellation.Token);
-                return query(database);
+                return query(database, generation);
             });
             _queryJobs.Add(key, job); _queryOrder.AddLast(key);
             // Only metadata and result references are retained; query data stays in ResultStore.
