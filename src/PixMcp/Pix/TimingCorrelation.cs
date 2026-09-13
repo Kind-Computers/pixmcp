@@ -110,7 +110,15 @@ internal static class TimingCorrelation
         var other => other,
     };
 
-    /// <summary>Pairs each GPU capture queue with an unused recorded queue of the same type, preferring an equal name.</summary>
+    /// <summary>GPU captures name queues "Graphics Queue 0 (Main Graphics Queue)" where the recording says "Main Graphics Queue".</summary>
+    private static bool SameQueueName(string gpuName, string? recordedName)
+    {
+        if (string.IsNullOrWhiteSpace(recordedName)) return false;
+        string recorded = recordedName.Trim(), gpu = gpuName.Trim();
+        return gpu.Equals(recorded, StringComparison.OrdinalIgnoreCase) || gpu.EndsWith("(" + recorded + ")", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Pairs each GPU capture queue with an unused recorded queue of the same type, preferring an equal (or parenthesized) name.</summary>
     public static List<CorrelationQueueMapDto> MapQueues(IReadOnlyList<(int Index, string Name, string Type)> gpu, IReadOnlyList<(string Id, string? Name, string? Type)> recorded)
     {
         var used = new HashSet<int>();
@@ -121,7 +129,7 @@ internal static class TimingCorrelation
             int pick = -1;
             string method = "none";
             for (int r = 0; r < recorded.Count && pick < 0; r++)
-                if (!used.Contains(r) && NormalizeQueueType(recorded[r].Type) == type && string.Equals(recorded[r].Name?.Trim(), queue.Name.Trim(), StringComparison.OrdinalIgnoreCase))
+                if (!used.Contains(r) && NormalizeQueueType(recorded[r].Type) == type && SameQueueName(queue.Name, recorded[r].Name))
                     (pick, method) = (r, "typeAndName");
             for (int r = 0; r < recorded.Count && pick < 0; r++)
                 if (!used.Contains(r) && NormalizeQueueType(recorded[r].Type) == type)

@@ -43,5 +43,11 @@ enforces it). See README.md.
   cached profiles after document changes. Recorded sample counts are not exact CPU time.
 - Exact PIX API signatures: reflect over the DLL (see the `reflect` scratch project pattern in git
   history/README) or read the official samples at https://github.com/microsoft/pix-samples.
+- Prompts are playbooks in `src/PixMcp/Pix/Playbooks.cs` (served by `Tools/PixPrompts.cs`); a step
+  may only name registered tools with parameters they accept (PromptTests). Every new tool needs a
+  toolset in `Pix/Toolsets.cs` (ToolsetTests). Keep `ServerHost.Instructions` at 800 characters or
+  fewer; detail belongs in descriptions, nextCalls and playbooks.
+- Tools wait on jobs through `Job.WaitAsync`, which forwards progress to clients that sent a
+  progress token; never await `Job.Completion` directly in a tool.
 - Smoke test end to end: `python scripts/smoke.py <PixMcp.exe> @scripts/scenarios/capture-and-inspect.json`
   (requires `tests/D3D12TestApp/build.cmd` to have been run).

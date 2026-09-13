@@ -97,10 +97,14 @@ public static class PixErrors
         public const string SqlInvalidParameter = "sql_invalid_parameter";
         public const string SqlTimeout = "sql_timeout";
         public const string SqlInterrupted = "sql_interrupted";
+        public const string SqlTablesNotPopulated = "sql_tables_not_populated";
+        public const string SqlCapacityExceeded = "sql_capacity_exceeded";
+        public const string SqlStoreClosed = "sql_store_closed";
+        public const string SqlStoreBusy = "sql_store_busy";
         public const string ToolError = "tool_error";
 
         /// <summary>Codes that describe a transient condition the caller may retry after following nextCalls.</summary>
-        public static readonly IReadOnlySet<string> Retryable = new HashSet<string>(StringComparer.Ordinal) { AnalysisActive, PreparationUnavailable, ResultCapacityExceeded, SqlInterrupted, SqlTimeout, Timeout, TimingCaptureBusy, TimingQueryInterrupted, TimingQueryInvalidated, WorkerBusy };
+        public static readonly IReadOnlySet<string> Retryable = new HashSet<string>(StringComparer.Ordinal) { AnalysisActive, SqlStoreBusy, PreparationUnavailable, ResultCapacityExceeded, SqlInterrupted, SqlTimeout, Timeout, TimingCaptureBusy, TimingQueryInterrupted, TimingQueryInvalidated, WorkerBusy };
 
         /// <summary>Every code, sorted; derived from the constants so nothing can be emitted that is not documented.</summary>
         public static readonly IReadOnlyList<string> All = typeof(Codes).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
@@ -199,6 +203,16 @@ public static class PixErrors
 
     public static PixToolException InvalidArguments(string message, IReadOnlyList<ToolCallDto>? nextCalls = null)
         => new(Codes.InvalidArguments, message, false, nextCalls);
+
+    /// <summary>A call to a tool whose toolset PIXMCP_TOOLSETS does not enable.</summary>
+    public static PixToolException ToolDisabled(string tool)
+        => new(Codes.ToolDisabled, $"{tool} belongs to toolset '{Toolsets.For(tool)}', which {ServerOptions.ToolsetsVariable} does not enable (enabled: {string.Join(", ", Toolsets.Describe().Enabled)}). Restart the server with that toolset listed to use it.",
+            false, [new ToolCallDto("pix_info", new { }, CostHints.Cached)]);
+
+    /// <summary>prompts/get for a playbook whose tools PIXMCP_TOOLSETS hides.</summary>
+    public static PixToolException PromptDisabled(string prompt)
+        => new(Codes.ToolDisabled, $"Prompt {prompt} needs tools that {ServerOptions.ToolsetsVariable} does not enable (enabled toolsets: {string.Join(", ", Toolsets.Describe().Enabled)}).",
+            false, [new ToolCallDto("pix_info", new { }, CostHints.Cached)]);
 
     public static PixToolException AnalysisSettingsConflict(string? handle)
         => new(Codes.AnalysisSettingsConflict, "Analysis is already running with different or SDK-selected settings. Call pix_gpu_analysis_stop before requesting different settings.",

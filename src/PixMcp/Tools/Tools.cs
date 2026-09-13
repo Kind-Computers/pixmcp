@@ -33,11 +33,13 @@ internal sealed record Preparation<T>(string Key, string Kind, string Descriptio
 internal static class PreparationKeys
 {
     public const string Analysis = "analysis", Timing = "timing", AccessedResources = "accessed-resources";
-    public const string Inspection = "inspection", InspectionTiming = "inspection:timing", InspectionBindings = "inspection:bindings",
-        InspectionTimingBindings = "inspection:bindings,timing";
+    /// <summary>pix_gpu_inspect_event's shared preparation: analysis, timing and accessed resources in one job.</summary>
+    public const string Inspection = "inspection";
+    /// <summary>pix_gpu_occupancy's preparation: timing first, then the timing pass's occupancy or a standalone replay.</summary>
+    public const string Occupancy = "occupancy";
     /// <summary>Every job that starts analysis as its first step.</summary>
-    public static readonly string[] StartingAnalysis = [Timing, AccessedResources, Inspection, InspectionTiming, InspectionBindings, InspectionTimingBindings];
-    public static readonly string[] CollectingTiming = [InspectionTiming, InspectionTimingBindings];
+    public static readonly string[] StartingAnalysis = [Timing, AccessedResources, Inspection, Occupancy];
+    public static readonly string[] CollectingTiming = [Inspection, Occupancy];
 }
 
 /// <summary>Shared plumbing for tool implementations.</summary>
@@ -244,6 +246,24 @@ internal static class Tools
         foreach (string key in preparation.JoinKeys)
             if (handle.PreparationJobs.TryGetValue(key, out Job? related) && !related.IsFinished) return related;
         return null;
+    }
+
+    /// <summary>
+    /// One preparation made of several: ready when every part is ready; its job runs each missing part in order. Callers join a
+    /// running job of any part (or of a part's own join keys) before starting it.
+    /// </summary>
+    internal static Preparation<T> Combine<T>(string handle, IReadOnlyList<Preparation<T>> parts) where T : PixHandle
+    {
+        if (parts.Count == 1) return parts[0];
+        return new Preparation<T>(string.Join("+", parts.Select(p => p.Key)), parts[0].Kind,
+            $"Prepare {string.Join(", ", parts.Select(p => p.Key))} for {handle}",
+            h => parts.All(p => p.IsReady(h)),
+            (h, job) =>
+            {
+                foreach (Preparation<T> part in parts)
+                    if (!part.IsReady(h)) part.Prepare(h, job);
+            })
+        { JoinKeys = parts.SelectMany(p => p.JoinKeys.Prepend(p.Key)).Distinct().ToArray() };
     }
 
     /// <summary>

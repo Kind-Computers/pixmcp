@@ -22,6 +22,7 @@ public sealed class Job
     private string? _resultRef;
     private string _resultState = "none";
     private ErrorDto? _resultError;
+    private string? _partialRef;
     private readonly ResultStore? _results;
     private readonly string[] _owners;
     private DateTimeOffset? _startedAt, _finishedAt;
@@ -42,6 +43,8 @@ public sealed class Job
     public JobStatus Status { get { lock (_lock) return _status; } }
     public float Progress { get { lock (_lock) return _progress; } }
     public string? ResultRef { get { lock (_lock) return _resultRef; } }
+    /// <summary>The latest progress snapshot published with SetPartial while the job runs; released when it finishes.</summary>
+    public string? PartialResultRef { get { lock (_lock) return _partialRef; } }
     public string? Error { get { lock (_lock) return _error; } }
     public ErrorDto? ErrorDetail { get { lock (_lock) return _errorDetail; } }
     public DateTimeOffset? StartedAt { get { lock (_lock) return _startedAt; } }
@@ -51,7 +54,26 @@ public sealed class Job
     public IPixCancellationToken? PixToken { get { lock (_lock) return _pixToken; } }
     internal TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public bool IsFinished => Status is JobStatus.Succeeded or JobStatus.Failed or JobStatus.Cancelled;
-    public Task WaitAsync(TimeSpan timeout, CancellationToken ct) => Completion.Task.WaitAsync(timeout, ct);
+    /// <summary>Raised outside the job lock when progress or a status message changes; handlers must be cheap and must not throw.</summary>
+    public event Action<Job>? Progressed;
+    /// <summary>The most recent status message, or null.</summary>
+    public string? LastMessage { get { lock (_lock) return _messages.Count == 0 ? null : _messages[^1]; } }
+
+    /// <summary>
+    /// Waits for the job to finish. Inside a tool call whose client sent a progress token, the wait also forwards this job's
+    /// progress as notifications/progress (<see cref="ProgressForwarding"/>).
+    /// </summary>
+    public Task WaitAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        Task wait = Completion.Task.WaitAsync(timeout, ct);
+        return !wait.IsCompleted && ProgressForwarding.Current is { } target ? ProgressForwarding.Forward(this, wait, target) : wait;
+    }
+
+    private void RaiseProgressed()
+    {
+        try { Progressed?.Invoke(this); }
+        catch (Exception) { /* Progress reporting never fails the job. */ }
+    }
 
     public void ThrowIfCancellationRequested()
     {
@@ -112,6 +134,7 @@ public sealed class Job
             catch (PixToolException ex) { retention = ex.Detail; state = "retentionFailed"; }
         }
         lock (_lock) { _resultRef = resultRef; _resultState = state; _resultError = retention; _progress = 1; Finish(JobStatus.Succeeded); }
+        ReleasePartial();
     }
 
     /// <summary>Called when storage pressure removed the retained result; the job stays listed so the eviction is observable.</summary>
@@ -126,15 +149,47 @@ public sealed class Job
 
     internal void Fail(Exception ex)
     {
+        Exception cause = ex is PartialResultException { InnerException: { } inner } ? inner : ex;
+        string? resultRef = null;
+        if (ex is PartialResultException partial && _results is not null)
+        {
+            try { resultRef = _results.Store(partial.Result, jobId: Id, owners: _owners, operation: Kind, origin: Origin); }
+            catch (PixToolException) { }
+        }
         lock (_lock)
         {
-            _error = PixErrors.Describe(ex);
-            _errorDetail = PixErrors.ToDto(ex);
+            _error = PixErrors.Describe(cause);
+            _errorDetail = PixErrors.ToDto(cause);
+            if (resultRef is not null) { _resultRef = resultRef; _resultState = "available"; }
             // A cancellation request alone does not prove an operation stopped.
-            bool cancelled = CancellationRequested && (ex is OperationCanceledException ||
-                ex is ExternalException native && PixErrors.IsCancellationHResult(native.ErrorCode));
+            bool cancelled = CancellationRequested && (cause is OperationCanceledException ||
+                cause is ExternalException native && PixErrors.IsCancellationHResult(native.ErrorCode));
             Finish(cancelled ? JobStatus.Cancelled : JobStatus.Failed);
         }
+        ReleasePartial();
+    }
+
+    /// <summary>Publishes the work finished so far (for example completed Dr. PIX runs); the previous snapshot is released.</summary>
+    internal void SetPartial(object snapshot)
+    {
+        if (_results is null) return;
+        string reference;
+        try { reference = _results.Store(snapshot, jobId: Id, owners: _owners, operation: Kind + "-partial", origin: Origin); }
+        catch (PixToolException) { return; }
+        string? superseded;
+        lock (_lock)
+        {
+            if (IsFinished) superseded = reference;
+            else { superseded = _partialRef; _partialRef = reference; }
+        }
+        if (superseded is not null) _results.Release(superseded);
+    }
+
+    private void ReleasePartial()
+    {
+        string? previous;
+        lock (_lock) { previous = _partialRef; _partialRef = null; }
+        if (previous is not null) _results?.Release(previous);
     }
 
     private void Finish(JobStatus status)
@@ -146,16 +201,24 @@ public sealed class Job
 
     public void SetProgress(float progress)
     {
+        bool changed = false;
         lock (_lock)
         {
-            if (!IsFinished && float.IsFinite(progress)) _progress = Math.Clamp(progress, 0, 1);
+            if (!IsFinished && float.IsFinite(progress))
+            {
+                float clamped = Math.Clamp(progress, 0, 1);
+                changed = clamped != _progress;
+                _progress = clamped;
+            }
         }
+        if (changed) RaiseProgressed();
     }
 
     public void AddMessage(string message)
     {
         if (string.IsNullOrWhiteSpace(message)) return;
         lock (_lock) { _messages.Add(message); if (_messages.Count > 200) _messages.RemoveAt(0); }
+        RaiseProgressed();
     }
 
     public IReadOnlyList<string> Messages { get { lock (_lock) return _messages.ToArray(); } }
@@ -169,11 +232,13 @@ public sealed class Job
                 _progress, CreatedAt, _startedAt, _finishedAt,
                 _startedAt is null ? null : ((_finishedAt ?? DateTimeOffset.UtcNow) - _startedAt.Value).TotalSeconds,
                 _messages.TakeLast(20).Select(m => m.Length > 500 ? m[..500] + "…" : m).ToArray(),
-                _errorDetail, _resultRef, CancellationRequested, [], _resultState, _resultError, Origin);
+                _errorDetail, _resultRef, CancellationRequested, [], _resultState, _resultError, Origin, _partialRef);
         }
         // Never hold the job lock while checking retention; keep status/result identity atomic.
         if (snapshot.ResultRef is not null && _results?.IsAvailable(snapshot.ResultRef) == false)
             snapshot = snapshot with { ResultRef = null, ResultState = "evicted" };
+        if (snapshot.PartialResultRef is not null && _results?.IsAvailable(snapshot.PartialResultRef) == false)
+            snapshot = snapshot with { PartialResultRef = null };
         return snapshot with { NextCalls = NextCallsFor(snapshot) };
     }
 
@@ -181,7 +246,10 @@ public sealed class Job
     private IReadOnlyList<ToolCallDto> NextCallsFor(JobDto dto)
     {
         if (dto.ResultRef is not null) return [ResultStore.ReadCall(dto.ResultRef)];
-        if (dto.Status is "queued" or "running") return [new ToolCallDto("pix_job_wait", new { jobId = Id, timeoutSeconds = 2 }, CostHints.Job)];
+        if (dto.Status is "queued" or "running")
+            return dto.PartialResultRef is null
+                ? [new ToolCallDto("pix_job_wait", new { jobId = Id, timeoutSeconds = 2 }, CostHints.Job)]
+                : [new ToolCallDto("pix_job_wait", new { jobId = Id, timeoutSeconds = 2 }, CostHints.Job), ResultStore.ReadCall(dto.PartialResultRef)];
         var next = new List<ToolCallDto>();
         bool recompute = dto.ResultState is "evicted" or "retentionFailed" || dto.Status is "failed" or "cancelled";
         if (recompute && Origin is not null) next.Add(Origin);
@@ -350,4 +418,10 @@ public sealed class JobManager : IDisposable
         }
         return job.ToDto();
     }
+}
+
+/// <summary>Carries what a failed or cancelled job still produced; the job keeps it as its result and reports the inner error.</summary>
+public sealed class PartialResultException(Exception inner, object result) : Exception(inner.Message, inner)
+{
+    public object Result { get; } = result;
 }

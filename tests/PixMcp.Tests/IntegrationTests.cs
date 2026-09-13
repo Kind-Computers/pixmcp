@@ -10,6 +10,7 @@ namespace PixMcp.Tests;
 /// End-to-end tests against the real PIX API. They run only when PIX_TEST_CAPTURE points at a
 /// .wpix GPU capture (and PIX Preview is installed); otherwise they are skipped.
 /// </summary>
+[Collection(GpuReplayCollection.Name)]
 public class IntegrationTests : IDisposable
 {
     private readonly PixWorker _worker = new();
@@ -128,9 +129,168 @@ public class IntegrationTests : IDisposable
         Assert.All(overview.GetProperty("topDraws").EnumerateArray(), row => Assert.Contains(row.GetProperty("kind").GetString(), new[] { "draw", "dispatch", "executeIndirect" }));
         Assert.Contains(overview.GetProperty("topPasses").EnumerateArray(), row => row.GetProperty("name").GetString()!.EndsWith("Frame"));
         Assert.DoesNotContain(overview.GetProperty("topPasses").EnumerateArray(), row => row.GetProperty("name").GetString()!.EndsWith("Hello PixMcp!!!"));
-        Assert.True(overview.GetProperty("queues")[0].GetProperty("eventKinds").GetProperty("label").GetInt32() >= 1);
-        Assert.Equal(captureVendor.GetProperty("vendor").GetString(), overview.GetProperty("vendor").GetProperty("vendor").GetString());
+        Assert.True(overview.GetProperty("queues")[0].GetProperty("kinds").GetProperty("label").GetInt32() >= 1);
+        Assert.Equal(captureVendor.GetProperty("vendor").GetString(), overview.GetProperty("capture").GetProperty("adapter").GetProperty("vendor").GetString());
+        Assert.Equal(1, overview.GetProperty("capture").GetProperty("frames").GetProperty("count").GetInt32());
+        Assert.Equal(overview.GetProperty("topDraws").GetArrayLength(), overview.GetProperty("histogram").GetProperty("buckets").EnumerateArray().Sum(b => b.GetProperty("count").GetInt32()));
+        JsonElement insights = overview.GetProperty("insights");
+        Assert.Equal(insights.GetArrayLength(), insights.EnumerateArray().Select(i => i.GetProperty("id").GetString()).Distinct().Count());
+        Assert.All(overview.GetProperty("topPasses").EnumerateArray(), row => Assert.True(row.GetProperty("workCount").GetInt32() >= 0));
 
+        // Queue overlap and bubbles: two timed GPU queues give one pair; busy plus every gap fills each span; per-cause totals reconcile.
+        Assert.Equal(1, overview.GetProperty("overlap").GetProperty("pairs").GetArrayLength());
+        JsonElement overlapReport = Parse(await QueueAnalysisTools.QueueOverlap(_session, _jobs, handle, minGapNs: 0, waitSeconds: 600));
+        Assert.Equal(1, overlapReport.GetProperty("pairs").GetArrayLength());
+        Assert.Contains(overlapReport.GetProperty("unavailable").EnumerateArray(), u => u.GetProperty("reason").GetString() == "noTimedEvents");
+        foreach (JsonElement busyQueue in overlapReport.GetProperty("queues").EnumerateArray())
+            Assert.Equal(busyQueue.GetProperty("spanEndNs").GetUInt64() - busyQueue.GetProperty("spanStartNs").GetUInt64(),
+                busyQueue.GetProperty("busy").GetProperty("ns").GetUInt64() + busyQueue.GetProperty("bubbleTotal").GetProperty("ns").GetUInt64());
+        JsonElement gaps = Parse(await QueueAnalysisTools.Bubbles(_session, _jobs, handle, minGapNs: 0, limit: 1000, waitSeconds: 600));
+        Assert.Equal(gaps.GetProperty("total").GetInt64(), gaps.GetProperty("items").GetArrayLength());
+        Assert.Equal(gaps.GetProperty("perCause").EnumerateArray().Sum(c => (decimal)c.GetProperty("total").GetProperty("ns").GetUInt64()),
+            gaps.GetProperty("items").EnumerateArray().Sum(b => (decimal)b.GetProperty("duration").GetProperty("ns").GetUInt64()));
+        if (gaps.GetProperty("total").GetInt64() > 0)
+        {
+            EventRef afterGap = JsonSerializer.Deserialize<EventRef>(gaps.GetProperty("items")[0].GetProperty("after").GetRawText(), Json.Options)!;
+            JsonElement inspectedAfterGap = Parse(await InspectionTools.InspectEvent(_session, _jobs, afterGap, [InspectionSection.timing], waitSeconds: 600));
+            Assert.Equal(afterGap.EventIndex, inspectedAfterGap.GetProperty("eventRef").GetProperty("eventIndex").GetUInt32());
+        }
+
+        // Resources: estimated sizes, the capture-wide use index with access classes, and the back buffer's timeline with its barriers.
+        JsonElement bySize = Parse(await ResourceTools.Resources(_session, _jobs, handle, sortBy: "estimatedBytes", limit: 10));
+        JsonElement backBuffer = bySize.GetProperty("items").EnumerateArray().First(r => r.GetProperty("dimension").GetString() == "TEXTURE2D");
+        Assert.Equal((640UL, 1_228_800UL), (backBuffer.GetProperty("width").GetUInt64(), backBuffer.GetProperty("estimatedBytes").GetUInt64()));
+        EventRef trianglePass = JsonSerializer.Deserialize<EventRef>(overview.GetProperty("topPasses").EnumerateArray()
+            .First(p => p.GetProperty("name").GetString()!.EndsWith("Triangle pass")).GetProperty("eventRef").GetRawText(), Json.Options)!;
+        JsonElement passTargets = Parse(await ResourceTools.Resources(_session, _jobs, handle, scope: trianglePass, usedAs: "renderTarget", waitSeconds: 600));
+        Assert.Equal(backBuffer.GetProperty("apiObjectId").GetString(), Assert.Single(passTargets.GetProperty("items").EnumerateArray()).GetProperty("apiObjectId").GetString());
+        ResourceRef backBufferRef = JsonSerializer.Deserialize<ResourceRef>(backBuffer.GetProperty("resourceRef").GetRawText(), Json.Options)!;
+        JsonElement writes = Parse(await ResourceTools.ResourceUses(_session, _jobs, backBufferRef, access: "write", waitSeconds: 600));
+        Assert.True(writes.GetProperty("total").GetInt64() >= 1);
+        Assert.All(writes.GetProperty("items").EnumerateArray(), u => Assert.Equal("RENDER_TARGET_VIEW", u.GetProperty("viewType").GetString()));
+        JsonElement timeline = Parse(await ResourceTools.ResourceTimelineTool(_session, _jobs, backBufferRef, waitSeconds: 600));
+        Assert.True(timeline.GetProperty("summary").GetProperty("writes").GetInt32() >= 1);
+        Assert.Equal(2, timeline.GetProperty("summary").GetProperty("barriers").GetInt32());
+        Assert.Contains(timeline.GetProperty("rows").EnumerateArray(), r => r.GetProperty("access").GetString() == "barrier" && r.GetProperty("stateAfter").GetString() == "RENDER_TARGET");
+        Assert.DoesNotContain(timeline.GetProperty("insights").EnumerateArray(), i => i.GetProperty("id").GetString() == "written_never_read");
+
+        // Rollups: kind sums equal the per-kind timing rows, and marker depth 1 reconciles to the queue's sum of roots.
+        JsonElement byKind = Parse(await RollupTools.Rollup(_session, _jobs, handle, groupBy: "kind", queueIndex: 0, waitSeconds: 600));
+        JsonElement allTiming = Parse(await CountersTools.TimingEvents(_session, _jobs, handle, queueIndex: 0, limit: 1000, waitSeconds: 600));
+        Dictionary<string, ulong> timingKindSums = allTiming.GetProperty("items").EnumerateArray().GroupBy(r => r.GetProperty("kind").GetString()!)
+            .ToDictionary(g => g.Key, g => g.Aggregate(0UL, (sum, r) => sum + r.GetProperty("eop").GetProperty("ns").GetUInt64()));
+        Assert.NotEmpty(byKind.GetProperty("items").EnumerateArray());
+        foreach (JsonElement group in byKind.GetProperty("items").EnumerateArray())
+            if (group.TryGetProperty("sum", out JsonElement kindSum) && kindSum.ValueKind == JsonValueKind.Object)
+                Assert.Equal(timingKindSums[group.GetProperty("key").GetString()!], kindSum.GetProperty("ns").GetUInt64());
+        JsonElement depth1 = Parse(await RollupTools.Rollup(_session, _jobs, handle, groupBy: "markerDepth", queueIndex: 0, waitSeconds: 600));
+        Assert.True(depth1.GetProperty("reconciles").GetBoolean());
+        Assert.Equal(queue.GetProperty("sumOfRootsNs").GetUInt64(), depth1.GetProperty("items").EnumerateArray()
+            .Aggregate(0UL, (sum, r) => sum + (r.TryGetProperty("sum", out JsonElement s) && s.ValueKind == JsonValueKind.Object ? s.GetProperty("ns").GetUInt64() : 0)));
+        Assert.True(Parse(await RollupTools.Rollup(_session, _jobs, handle, groupBy: "api", format: "table", waitSeconds: 600)).GetProperty("rows").GetArrayLength() > 0);
+
+        // Pipelines and shaders rank by replay time; a shaderKey from the inventory navigates to its uses.
+        JsonElement pipelines = Parse(await RollupTools.Pipelines(_session, _jobs, handle, waitSeconds: 600));
+        ulong[] pipelineTimes = pipelines.GetProperty("items").EnumerateArray()
+            .Select(p => p.TryGetProperty("gpuTime", out JsonElement t) && t.ValueKind == JsonValueKind.Object ? t.GetProperty("ns").GetUInt64() : 0).ToArray();
+        Assert.NotEmpty(pipelineTimes);
+        Assert.Equal(pipelineTimes.OrderByDescending(v => v), pipelineTimes);
+        // The fxc-built fixture exposes no shader hashes: its work events have no pipeline identity and group as one occurrence row.
+        foreach (JsonElement pipeline in pipelines.GetProperty("items").EnumerateArray())
+            Assert.Equal(pipeline.TryGetProperty("psoKey", out JsonElement key) && key.ValueKind == JsonValueKind.String ? "psoKey" : "occurrence",
+                pipeline.GetProperty("identity").GetString());
+        Assert.Equal(overview.GetProperty("queues").EnumerateArray().Sum(q => q.GetProperty("kinds").GetProperty("work").GetInt32()),
+            pipelines.GetProperty("items").EnumerateArray().Sum(p => p.GetProperty("useCount").GetInt32()));
+        JsonElement shadersByTime = Parse(await ShaderInventoryTools.Shaders(_session, _jobs, handle, sortBy: "gpuTime", waitSeconds: 600));
+        double[] shaderTimes = shadersByTime.GetProperty("items").EnumerateArray()
+            .Select(i => i.TryGetProperty("gpuTimeMs", out JsonElement t) && t.ValueKind == JsonValueKind.Number ? t.GetDouble() : 0).ToArray();
+        Assert.Equal(shaderTimes.OrderByDescending(v => v), shaderTimes);
+        Assert.Contains(shaderTimes, t => t > 0);
+        string? shaderKey = shadersByTime.GetProperty("items").EnumerateArray()
+            .Select(i => i.TryGetProperty("shaderKey", out JsonElement k) && k.ValueKind == JsonValueKind.String ? k.GetString() : null).FirstOrDefault(k => k is not null);
+        if (shaderKey is not null)
+        {
+            JsonElement usesByKey = Parse(await ShaderInventoryTools.Uses(_session, _jobs, shaderKey: shaderKey, handle: handle, waitSeconds: 600));
+            Assert.True(usesByKey.GetProperty("total").GetInt64() > 0);
+            Assert.Equal(shaderKey, usesByKey.GetProperty("shaderKey").GetString());
+        }
+        else
+        {
+            PixToolException unknownKey = await Assert.ThrowsAsync<PixToolException>(() => ShaderInventoryTools.Uses(_session, _jobs, shaderKey: "hash:PS:00", handle: handle, waitSeconds: 600));
+            Assert.Equal(PixErrors.Codes.InvalidReference, unknownKey.Detail.Code);
+        }
+
+        // Event histograms bucket with the overview's kind classifier; count mode matches the page total.
+        JsonElement histogram = Parse(await GpuCaptureTools.Events(_session, handle, queueIndex: 0, mode: "histogram"));
+        JsonElement kinds = overview.GetProperty("queues")[0].GetProperty("kinds");
+        Assert.NotEmpty(histogram.GetProperty("buckets").EnumerateArray());
+        foreach (JsonElement bucket in histogram.GetProperty("buckets").EnumerateArray())
+            Assert.Equal(kinds.GetProperty(bucket.GetProperty("key").GetString()!).GetInt32(), bucket.GetProperty("count").GetInt32());
+        Assert.Equal(Parse(await GpuCaptureTools.Events(_session, handle, queueIndex: 0, limit: 1)).GetProperty("total").GetInt64(),
+            Parse(await GpuCaptureTools.Events(_session, handle, queueIndex: 0, mode: "count")).GetProperty("total").GetInt64());
+
+        // Occupancy after timing: the timing pass supplies it when PIX reports data, else one standalone replay; the event adds its own points.
+        EventRef drawRef = JsonSerializer.Deserialize<EventRef>(overview.GetProperty("topDraws")[0].GetProperty("eventRef").GetRawText(), Json.Options)!;
+        JsonElement occupancy = Parse(await CountersTools.Occupancy(_session, _jobs, handle, maxPoints: 5, waitSeconds: 600, eventRef: drawRef));
+        if (!(occupancy.TryGetProperty("unavailable", out JsonElement occupancyUnavailable) && occupancyUnavailable.GetBoolean()))
+        {
+            string source = occupancy.GetProperty("source").GetString()!;
+            Assert.Contains(source, new[] { "timingPass", "standaloneReplay" });
+            if (occupancy.GetProperty("timingPassProbe").ValueKind == JsonValueKind.True) Assert.Equal("timingPass", source);
+            Assert.All(occupancy.GetProperty("series").EnumerateArray(), s =>
+            {
+                if (s.GetProperty("peakPercent").ValueKind == JsonValueKind.Number) Assert.InRange(s.GetProperty("peakPercent").GetDouble(), 0, 100);
+            });
+            Assert.Equal(occupancy.GetProperty("series").GetArrayLength(), occupancy.GetProperty("event").GetProperty("series").GetArrayLength());
+            JsonElement inspectedOccupancy = Parse(await InspectionTools.InspectEvent(_session, _jobs, drawRef, [InspectionSection.occupancy], waitSeconds: 600)).GetProperty("occupancy");
+            Assert.Equal("available", inspectedOccupancy.GetProperty("state").GetString());
+        }
+
+        await SessionTools.Close(_session, handle);
+    }
+
+    [SkippableFact]
+    public async Task GpuSqlMaterialisesTheCaptureAndAnswersGuardedQueries()
+    {
+        Skip.IfNot(Available && Environment.GetEnvironmentVariable("PIX_TEST_ANALYSIS") == "1", "Set PIX_TEST_ANALYSIS=1 to replay on the GPU");
+        string handle = Parse(await GpuCaptureTools.Open(_session, CapturePath!)).GetProperty("handle").GetString()!;
+
+        // A statement over an unpopulated family names the populate call instead of replaying.
+        PixToolException missing = await Assert.ThrowsAsync<PixToolException>(() => GpuSqlTools.Sql(_session, _jobs, handle, sql: "SELECT COUNT(*) FROM timing"));
+        Assert.Equal(PixErrors.Codes.SqlTablesNotPopulated, missing.Detail.Code);
+        Assert.Contains(missing.Detail.NextCalls, c => c.Tool == "pix_gpu_sql_populate");
+        Assert.Empty(_jobs.All.Where(j => j.Kind == "gpu-sql-populate"));
+
+        JsonElement populated = Parse(await GpuSqlTools.Populate(_session, _jobs, handle, tables: ["all"], waitSeconds: 600));
+        Assert.True(populated.GetProperty("status").GetString() == "succeeded", populated.GetRawText());
+
+        JsonElement work = Parse(await GpuSqlTools.Sql(_session, _jobs, handle, sql: "SELECT COUNT(*) AS n FROM v_work", waitSeconds: 600));
+        Assert.Equal("gpusql", work.GetProperty("source").GetString());
+        JsonElement overview = Parse(await InvestigationTools.Overview(_session, _jobs, handle, waitSeconds: 600));
+        Assert.Equal(overview.GetProperty("queues").EnumerateArray().Sum(q => q.GetProperty("kinds").GetProperty("work").GetInt32()), work.GetProperty("rows")[0][0].GetInt32());
+        JsonElement timingRows = Parse(await GpuSqlTools.Sql(_session, _jobs, handle, sql: "SELECT COUNT(*) FROM timing WHERE eop_ns IS NOT NULL", waitSeconds: 600));
+        JsonElement timingEvents = Parse(await CountersTools.TimingEvents(_session, _jobs, handle, limit: 1, waitSeconds: 600));
+        Assert.Equal(timingEvents.GetProperty("total").GetInt64(), timingRows.GetProperty("rows")[0][0].GetInt64());
+        JsonElement passes = Parse(await GpuSqlTools.Sql(_session, _jobs, handle, query: "top_passes", waitSeconds: 600));
+        Assert.Contains(passes.GetProperty("rows").EnumerateArray(), row => row[2].GetString()!.EndsWith("Frame"));
+        JsonElement tables = Parse(await GpuSqlTools.TablesTool(_session, handle));
+        Assert.All(tables.GetProperty("families").EnumerateArray().Where(f => f.GetProperty("family").GetString() is "core" or "timing" or "shaders" or "resources"),
+            f => Assert.Equal("ready", f.GetProperty("state").GetString()));
+
+        string csv = Path.Combine(Path.GetTempPath(), $"pixmcp-gpusql-{Guid.NewGuid():N}.csv");
+        try
+        {
+            JsonElement exported = Parse(await GpuSqlTools.Export(_session, _jobs, handle, csv, sql: "SELECT queue_index, event_index, name FROM events ORDER BY queue_index, event_index", waitSeconds: 600));
+            Assert.Equal("succeeded", exported.GetProperty("status").GetString());
+            Assert.Equal("queue_index,event_index,name", File.ReadLines(csv).First());
+        }
+        finally { File.Delete(csv); }
+
+        // After the analysis stops, replay families still answer and say they are stale.
+        await AnalysisTools.Stop(_session, handle);
+        JsonElement stale = Parse(await GpuSqlTools.Sql(_session, _jobs, handle, sql: "SELECT COUNT(*) FROM timing", waitSeconds: 600));
+        Assert.Contains(stale.GetProperty("provenance").GetProperty("tableStates").EnumerateArray(),
+            state => state.GetProperty("family").GetString() == "timing" && state.GetProperty("stale").GetBoolean());
         await SessionTools.Close(_session, handle);
     }
 
@@ -210,13 +370,33 @@ public class IntegrationTests : IDisposable
         JsonElement partial = Parse(await InspectionTools.InspectEvent(_session, _jobs, eventRef, [InspectionSection.timing], waitSeconds: 0));
         Assert.False(partial.TryGetProperty("pending", out _));
         string timingJob = partial.GetProperty("preparation").GetProperty("jobId").GetString()!;
+        Assert.True(partial.GetProperty("timing").GetProperty("pending").GetBoolean());
+        Assert.Equal(("draw", 3L), (partial.GetProperty("kind").GetString(), partial.GetProperty("parameters").GetProperty("workItems").GetInt64()));
         JsonElement joined = Parse(await InspectionTools.InspectEvent(_session, _jobs, eventRef, [InspectionSection.timing, InspectionSection.bindings], waitSeconds: 0));
         Assert.Equal(timingJob, joined.GetProperty("preparation").GetProperty("jobId").GetString());
         Assert.Single(_jobs.All.Where(j => j.Kind == "event-inspection"));
         Assert.Equal("succeeded", Parse(await SessionTools.JobWait(_jobs, timingJob, 600)).GetProperty("status").GetString());
         JsonElement complete = Parse(await InspectionTools.InspectEvent(_session, _jobs, eventRef, [InspectionSection.timing, InspectionSection.bindings], waitSeconds: 600));
         Assert.False(complete.TryGetProperty("preparation", out _));
-        Assert.True(complete.GetProperty("timing").TryGetProperty("eopDurationNs", out _) || complete.GetProperty("timing").TryGetProperty("unavailable", out _));
+        JsonElement completeTiming = complete.GetProperty("timing");
+        Assert.True(completeTiming.GetProperty("eop").GetProperty("ns").GetUInt64() > 0);
+        Assert.True(completeTiming.GetProperty("rankInQueue").GetInt32() >= 1);
+        Assert.Contains(complete.GetProperty("parameters").GetProperty("arguments").EnumerateArray(), a =>
+            a.GetProperty("name").GetString() is "VertexCountPerInstance" or "IndexCountPerInstance" && a.GetProperty("int64").GetInt64() == 3);
+
+        // The default sections add targets and hints: the fixture draw renders into its 640x480 back buffer.
+        string defaultAnswer = await InspectionTools.InspectEvent(_session, _jobs, eventRef, waitSeconds: 600);
+        JsonElement inspected = Parse(defaultAnswer);
+        JsonElement targets = inspected.GetProperty("targets");
+        Assert.Equal("available", targets.GetProperty("state").GetString());
+        Assert.Contains(targets.GetProperty("targets").EnumerateArray(), t => t.GetProperty("viewType").GetString() == "renderTarget"
+            && t.GetProperty("width").GetUInt64() == 640 && t.GetProperty("height").GetUInt32() == 480 && t.GetProperty("nsPerMegapixel").ValueKind == JsonValueKind.Number);
+        Assert.Equal(JsonValueKind.Array, inspected.GetProperty("hints").ValueKind);
+        int defaultBytes = System.Text.Encoding.UTF8.GetByteCount(defaultAnswer);
+        Assert.True(defaultBytes < 10_000, $"Default inspection is {defaultBytes} bytes: " + string.Join(", ",
+            inspected.EnumerateObject().Select(p => $"{p.Name}={System.Text.Encoding.UTF8.GetByteCount(p.Value.GetRawText())}")));
+        Assert.Equal("notCollected", Parse(await InspectionTools.InspectEvent(_session, _jobs, eventRef, [InspectionSection.counters], waitSeconds: 600))
+            .GetProperty("counters").GetProperty("state").GetString());
 
         // A cold timing prepare hands its result over through pix_job_wait: available and readable.
         await AnalysisTools.Stop(_session, handle);
@@ -259,8 +439,19 @@ public class IntegrationTests : IDisposable
         JsonElement collected = Parse(await CountersTools.CountersCollect(_session, _jobs, handle, new[] { counterId }, limit: 5, waitSeconds: 600));
         Assert.Equal(counterId, collected.GetProperty("extra").GetProperty("counters")[0].GetProperty("id").GetUInt32());
         Assert.Equal("exact", collected.GetProperty("extra").GetProperty("collection").GetProperty("source").GetString());
-        Assert.Contains(collected.GetProperty("extra").GetProperty("coverage")[0].GetProperty("readback").GetString(), new[] { "bulk", "perEvent" });
+        Assert.Contains(collected.GetProperty("extra").GetProperty("coverage").EnumerateObject().First().Value[0].GetProperty("readback").GetString(), new[] { "bulk", "perEvent" });
         Assert.All(collected.GetProperty("items").EnumerateArray(), row => Assert.Contains(row.GetProperty("rowKind").GetString(), new[] { "marker", "event" }));
+        // Rows join replay timing (collected in the same job), normalize per millisecond, and a grouped read starts no second counters job.
+        Assert.Contains(collected.GetProperty("items").EnumerateArray(), row => row.TryGetProperty("eop", out JsonElement eop) && eop.ValueKind == JsonValueKind.Object);
+        int countersJobs = _jobs.All.Count(j => j.Kind == "counters");
+        JsonElement grouped = Parse(await CountersTools.CountersCollect(_session, _jobs, handle, new[] { counterId }, groupBy: "kind", waitSeconds: 600));
+        Assert.Equal("kind", grouped.GetProperty("groupBy").GetString());
+        Assert.All(grouped.GetProperty("items").EnumerateArray(), group => Assert.Equal(counterId, group.GetProperty("counters")[0].GetProperty("id").GetUInt32()));
+        Assert.Equal(countersJobs, _jobs.All.Count(j => j.Kind == "counters"));
+        JsonElement perMs = Parse(await CountersTools.CountersCollect(_session, _jobs, handle, new[] { counterId }, normalize: "perMs", sortBy: "eop", limit: 5, waitSeconds: 600));
+        Assert.All(perMs.GetProperty("items").EnumerateArray(), row => Assert.True(row.TryGetProperty("normalized", out _) || row.TryGetProperty("normalizeReason", out _)));
+        ulong[] eops = perMs.GetProperty("items").EnumerateArray().Select(row => row.TryGetProperty("eop", out JsonElement e) && e.ValueKind == JsonValueKind.Object ? e.GetProperty("ns").GetUInt64() : 0).ToArray();
+        Assert.Equal(eops.OrderByDescending(v => v), eops);
         if (counters.GetArrayLength() > 1)
         {
             // {a} then {a,b} replays (a superset), while {b} after {a,b} is projected from it without a job.
@@ -338,8 +529,8 @@ public class IntegrationTests : IDisposable
         JsonElement run = Parse(await DrPixTools.Run(_session, _jobs, handle, new[] { experimentId }, scope: scope, waitSeconds: 600));
         Assert.Equal("succeeded", run.GetProperty("status").GetString());
         JsonElement result = Parse(ResultTools.Read(_session, run.GetProperty("resultRef").GetString()!)).GetProperty("value");
-        Assert.Equal(1, result.GetProperty("experimentsRun").GetInt32());
-        JsonElement experimentResult = Assert.Single(result.GetProperty("results").EnumerateArray());
+        Assert.Equal((1, 1, false), (result.GetProperty("runsRequested").GetInt32(), result.GetProperty("runsCompleted").GetInt32(), result.GetProperty("partial").GetBoolean()));
+        JsonElement experimentResult = Assert.Single(result.GetProperty("runs").EnumerateArray());
         Assert.Equal(experimentId, experimentResult.GetProperty("guid").GetString());
         Assert.True(experimentResult.GetProperty("succeeded").GetBoolean(), experimentResult.GetRawText());
         JsonElement range = result.GetProperty("range");
@@ -348,7 +539,94 @@ public class IntegrationTests : IDisposable
         Assert.Equal(gpuIds.Length, range.GetProperty("workEvents").GetInt32());
         Assert.False(range.GetProperty("swapped").GetBoolean());
         Assert.Equal(scope.EventIndex, result.GetProperty("scope").GetProperty("root").GetProperty("eventIndex").GetUInt32());
+        JsonElement timing = experimentResult.GetProperty("timing");
+        Assert.Equal(("detected", "basic"), (timing.GetProperty("semantics").GetString(), experimentResult.GetProperty("family").GetString()));
+        Assert.True(timing.GetProperty("baselineMs").GetDouble() > 0);
+        Assert.Single(result.GetProperty("table").GetProperty("rows").EnumerateArray());
+        Assert.Single(result.GetProperty("savings").EnumerateArray());
+
+        // perEvent: one run per draw inside the pass, each over a single work event.
+        int draws = Parse(await GpuCaptureTools.Events(_session, handle, scope: scope, kind: "work", limit: 100)).GetProperty("total").GetInt32();
+        JsonElement perEvent = Parse(await DrPixTools.Run(_session, _jobs, handle, new[] { experimentId }, scope: scope, perEvent: true, waitSeconds: 600));
+        Assert.Equal("succeeded", perEvent.GetProperty("status").GetString());
+        JsonElement perEventResult = Parse(ResultTools.Read(_session, perEvent.GetProperty("resultRef").GetString()!)).GetProperty("value");
+        Assert.Equal(draws, perEventResult.GetProperty("runsRequested").GetInt32());
+        Assert.All(perEventResult.GetProperty("ranges").EnumerateArray(), r => Assert.Equal(r.GetProperty("firstGpuId").GetUInt32(), r.GetProperty("lastGpuId").GetUInt32()));
         await SessionTools.Close(_session, handle);
+    }
+
+    [SkippableFact]
+    public async Task ComparesCapturesWithTotalsRollupsNoiseAndScopedSameHandleRuns()
+    {
+        Skip.IfNot(Available && Environment.GetEnvironmentVariable("PIX_TEST_ANALYSIS") == "1", "Set PIX_TEST_CAPTURE and PIX_TEST_ANALYSIS=1 to replay on the GPU");
+        string candidatePath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(CapturePath!))!, "candidate.wpix");
+        Skip.IfNot(File.Exists(candidatePath), "candidate.wpix next to PIX_TEST_CAPTURE is required");
+        string baseline = Parse(await GpuCaptureTools.Open(_session, CapturePath!)).GetProperty("handle").GetString()!;
+        string candidate = Parse(await GpuCaptureTools.Open(_session, candidatePath)).GetProperty("handle").GetString()!;
+        try
+        {
+            JsonElement job = Parse(await InvestigationTools.Compare(_session, _jobs, baseline, candidate, repeats: 2, waitSeconds: 900));
+            Assert.Equal("succeeded", job.GetProperty("status").GetString());
+            JsonElement summary = Parse(ResultTools.Read(_session, job.GetProperty("resultRef").GetString()!)).GetProperty("value");
+            Assert.True(summary.GetProperty("totals").GetProperty("baselineBusyNs").GetUInt64() > 0);
+            Assert.NotEmpty(summary.GetProperty("byMarkerPath").EnumerateArray());
+            JsonElement noise = summary.GetProperty("noise");
+            Assert.Equal(2, noise.GetProperty("repeats").GetInt32());
+            Assert.NotEqual("single", noise.GetProperty("repeatMethod").GetString());
+            Assert.False(summary.GetProperty("provenanceMismatch").GetBoolean());
+
+            EventRef[] roots = Parse(await GpuCaptureTools.Events(_session, candidate, kind: "marker", limit: 10)).GetProperty("items").EnumerateArray()
+                .Select(m => JsonSerializer.Deserialize<EventRef>(m.GetProperty("eventRef").GetRawText(), Json.Options)!).ToArray();
+            Assert.True(roots.Length >= 2, "The candidate capture needs two markers for a scoped same-handle comparison.");
+            JsonElement scoped = Parse(await InvestigationTools.Compare(_session, _jobs, candidate, candidate, baselineScope: roots[0], candidateScope: roots[1], waitSeconds: 900));
+            Assert.Equal("succeeded", scoped.GetProperty("status").GetString());
+            Assert.True(_session.Get<PixMcp.Pix.Handles.GpuCaptureHandle>(candidate).AnalysisStarted);
+
+            PixToolException active = await Assert.ThrowsAsync<PixToolException>(() => InvestigationTools.Compare(_session, _jobs, candidate, baseline, stopBaselineAnalysis: false));
+            Assert.Equal("analysis_active", active.Detail.Code);
+        }
+        finally
+        {
+            await SessionTools.Close(_session, baseline);
+            await SessionTools.Close(_session, candidate);
+        }
+    }
+
+    [SkippableFact]
+    public async Task ClassifiesTheBottleneckOfTheComputePassAndServesRepeatsFromCache()
+    {
+        Skip.IfNot(Available && Environment.GetEnvironmentVariable("PIX_TEST_ANALYSIS") == "1", "Set PIX_TEST_CAPTURE and PIX_TEST_ANALYSIS=1 to replay on the GPU");
+        string handle = Parse(await GpuCaptureTools.Open(_session, CapturePath!)).GetProperty("handle").GetString()!;
+        try
+        {
+            JsonElement dispatch = Parse(await GpuCaptureTools.Events(_session, handle, kind: "dispatch", limit: 1)).GetProperty("items")[0];
+            var computePass = new EventRef(handle, dispatch.GetProperty("eventRef").GetProperty("queueIndex").GetInt32(), dispatch.GetProperty("parentIndex").GetUInt32());
+            JsonElement job = Parse(await BottleneckTools.Bottleneck(_session, _jobs, handle, scope: computePass, waitSeconds: 600));
+            Assert.Equal("succeeded", job.GetProperty("status").GetString());
+            JsonElement result = Parse(ResultTools.Read(_session, job.GetProperty("resultRef").GetString()!)).GetProperty("value");
+            Assert.Contains(result.GetProperty("verdict").GetProperty("limiter").GetString(), BottleneckRules.Limiters.Append("unknown"));
+            Assert.True(result.GetProperty("evidence").GetArrayLength() >= 2, result.GetRawText());
+            Assert.All(result.GetProperty("evidence").EnumerateArray(), row =>
+            {
+                Assert.False(string.IsNullOrEmpty(row.GetProperty("source").GetString()));
+                Assert.False(string.IsNullOrEmpty(row.GetProperty("unit").GetString()));
+            });
+            Assert.Contains(result.GetProperty("coverage").EnumerateArray(), c => c.GetProperty("source").GetString() == "occupancy");
+            Assert.False(string.IsNullOrEmpty(result.GetProperty("detailRef").GetString()));
+            Assert.True(System.Text.Encoding.UTF8.GetByteCount(result.GetRawText()) < 8192);
+            JsonElement again = Parse(await BottleneckTools.Bottleneck(_session, _jobs, handle, scope: computePass, waitSeconds: 600));
+            Assert.True(Parse(ResultTools.Read(_session, again.GetProperty("resultRef").GetString()!)).GetProperty("value").GetProperty("fromCache").GetBoolean());
+
+            JsonElement pass = Parse(await GpuCaptureTools.Events(_session, handle, kind: "marker", nameContains: "Triangle pass", limit: 1)).GetProperty("items")[0];
+            EventRef trianglePass = JsonSerializer.Deserialize<EventRef>(pass.GetProperty("eventRef").GetRawText(), Json.Options)!;
+            JsonElement drpixJob = Parse(await BottleneckTools.Bottleneck(_session, _jobs, handle, scope: trianglePass, evidence: ["timing", "drpix"], maxDrPixRuns: 2, waitSeconds: 600));
+            JsonElement drpix = Parse(ResultTools.Read(_session, drpixJob.GetProperty("resultRef").GetString()!)).GetProperty("value");
+            Assert.Contains(drpix.GetProperty("evidence").EnumerateArray(), row => row.GetProperty("metric").GetString()!.StartsWith("drpix.1x1 Viewport", StringComparison.Ordinal));
+        }
+        finally
+        {
+            await SessionTools.Close(_session, handle);
+        }
     }
 
     [SkippableFact]
@@ -396,7 +674,49 @@ public class IntegrationTests : IDisposable
         Assert.True(counts.GetProperty("recordedPaths").GetInt32() >= 2);
         // The fixture's GPU capture names its markers Frame/Triangle pass while its timing capture records Fixture Frame/Fixture CPU Work.
         Assert.Contains(result.GetProperty("unmatchedRecorded").EnumerateArray(), u => u.GetProperty("path").GetString() == "Fixture Frame");
-        Assert.Contains(result.GetProperty("queueMap").EnumerateArray(), q => q.GetProperty("method").GetString() != "none");
+        Assert.Contains(result.GetProperty("queueMap").EnumerateArray(), q => q.GetProperty("method").GetString() == "typeAndName");
+    }
+
+    [SkippableFact]
+    public async Task OverviewAnswersColdCapturesThenRanksPassesAndStaysWithinBudget()
+    {
+        Skip.IfNot(Available && TestArtifacts.AnalysisEnabled, "Set PIX_TEST_ANALYSIS=1 to replay on the GPU");
+        string handle = Parse(await GpuCaptureTools.Open(_session, CapturePath!)).GetProperty("handle").GetString()!;
+        JsonElement cold = Parse(await InvestigationTools.Overview(_session, _jobs, handle, waitSeconds: 0));
+        Assert.True(cold.GetProperty("queues").GetArrayLength() > 0);
+        Assert.True(cold.GetProperty("capture").GetProperty("eventTotal").GetInt64() > 0);
+        if (cold.TryGetProperty("timing", out JsonElement pending) && pending.ValueKind == JsonValueKind.Object)
+        {
+            Assert.True(pending.GetProperty("pending").GetBoolean());
+            await _jobs.Get(pending.GetProperty("jobId").GetString()!).WaitAsync(TimeSpan.FromSeconds(600), CancellationToken.None);
+        }
+
+        string full = await InvestigationTools.Overview(_session, _jobs, handle, waitSeconds: 600);
+        JsonElement overview = Parse(full);
+        Assert.True(overview.GetProperty("queues")[0].GetProperty("totals").GetProperty("busyMs").GetDouble() > 0);
+        string[] passes = overview.GetProperty("topPasses").EnumerateArray().Select(p => p.GetProperty("name").GetString()!).ToArray();
+        Assert.Contains(passes, name => name.EndsWith("Frame"));
+        Assert.Contains(passes, name => name.EndsWith("Triangle pass"));
+        Assert.DoesNotContain(overview.GetProperty("topDraws").EnumerateArray(), d => d.GetProperty("kind").GetString() is "clear" or "copy" or "present");
+        int fullBytes = System.Text.Encoding.UTF8.GetByteCount(full);
+        Assert.True(fullBytes < 12000, $"overview is {fullBytes} bytes");
+        string brief = await InvestigationTools.Overview(_session, _jobs, handle, waitSeconds: 600, brief: true);
+        string BreakDown(string json) => string.Join(", ", System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject().Select(p => $"{p.Key}={System.Text.Encoding.UTF8.GetByteCount(p.Value?.ToJsonString() ?? "null")}"));
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(brief) < 8192, $"brief overview is {System.Text.Encoding.UTF8.GetByteCount(brief)} bytes: {BreakDown(brief)}; full: {BreakDown(full)}");
+
+        JsonElement table = Parse(await InvestigationTools.Overview(_session, _jobs, handle, waitSeconds: 600, format: "table"));
+        Assert.Equal(overview.GetProperty("topDraws").GetArrayLength(), table.GetProperty("topDraws").GetProperty("rows").GetArrayLength());
+        JsonElement firstFrame = Parse(await InvestigationTools.Overview(_session, _jobs, handle, waitSeconds: 600, frameIndex: 0));
+        Assert.Equal(overview.GetProperty("topDraws").GetArrayLength(), firstFrame.GetProperty("topDraws").GetArrayLength());
+        await Assert.ThrowsAsync<PixToolException>(() => InvestigationTools.Overview(_session, _jobs, handle, waitSeconds: 600, frameIndex: 99));
+
+        JsonElement trianglePass = overview.GetProperty("topPasses").EnumerateArray().First(p => p.GetProperty("name").GetString()!.EndsWith("Triangle pass"));
+        EventRef triangle = JsonSerializer.Deserialize<EventRef>(trianglePass.GetProperty("eventRef").GetRawText(), Json.Options)!;
+        JsonElement scoped = Parse(await InvestigationTools.Overview(_session, _jobs, handle, waitSeconds: 600, scope: triangle));
+        Assert.NotEmpty(scoped.GetProperty("topDraws").EnumerateArray());
+        Assert.All(scoped.GetProperty("topDraws").EnumerateArray(), d => Assert.Equal("draw", d.GetProperty("kind").GetString()));
+        Assert.True(scoped.GetProperty("topDraws").GetArrayLength() < overview.GetProperty("topDraws").GetArrayLength());
+        await SessionTools.Close(_session, handle);
     }
 
     private static JsonElement Parse(string json) => JsonSerializer.Deserialize<JsonElement>(json);

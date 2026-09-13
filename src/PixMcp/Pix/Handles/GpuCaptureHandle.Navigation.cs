@@ -14,7 +14,7 @@ public sealed record ReplayProvenance(string Source, string PixVersion, string? 
     uint? PowerState, string? Flags, string TimingSemantics,
     string? AdapterName = null, string? Vendor = null, string? CaptureVendor = null, bool VendorMismatch = false, string? PixBuild = null);
 public sealed record OccupancyCache(IPixGpuCaptureOccupancyData Data,
-    IPixGpuCaptureOccupancyType[] Types, IPixGpuCaptureOccupancyStage[] Stages);
+    IPixGpuCaptureOccupancyType[] Types, IPixGpuCaptureOccupancyStage[] Stages, string Source = "standaloneReplay");
 
 public sealed partial class GpuCaptureHandle
 {

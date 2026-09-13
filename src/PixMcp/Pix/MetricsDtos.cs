@@ -24,7 +24,19 @@ public sealed record TimingTreeDto(string Handle, int QueueIndex, EventRef? Scop
 /// <c>descendantDataEvents</c> counts the leaf rows with data under a marker.
 /// </summary>
 public sealed record CounterValueRowDto(EventRef EventRef, uint Index, uint? GpuId, string Name,
-    IReadOnlyList<string>? MarkerPath, IReadOnlyDictionary<string, object?> Values, string RowKind = "event", int? DescendantDataEvents = null);
+    IReadOnlyList<string>? MarkerPath, IReadOnlyDictionary<string, object?> Values, string RowKind = "event", int? DescendantDataEvents = null)
+{
+    /// <summary>The event's inclusive replay EOP time (includeTiming).</summary>
+    public DurationDto? Eop { get; init; }
+    /// <summary>TOP start to EOP end; overlaps neighbouring events.</summary>
+    public DurationDto? Exec { get; init; }
+    /// <summary>Values divided by the normalization divisor, keyed by counter id.</summary>
+    public IReadOnlyDictionary<string, double?>? Normalized { get; init; }
+    /// <summary>Why the row has no normalized values.</summary>
+    public string? NormalizeReason { get; init; }
+    /// <summary>Ratio columns keyed by name.</summary>
+    public IReadOnlyDictionary<string, double?>? Derived { get; init; }
+}
 
 public static class CounterQuery
 {
@@ -45,6 +57,9 @@ public static class CounterQuery
             return FloatingNumber(left).CompareTo(FloatingNumber(right));
         return Number(left)!.Value.CompareTo(Number(right)!.Value);
     });
+
+    /// <summary>Orders counter values numerically: integers as exact decimals, floating formats as doubles.</summary>
+    public static IComparer<object?> ValueComparer => NumericComparer;
 
     public static bool InRange(object? value, decimal? minimum, decimal? maximum)
     {

@@ -14,7 +14,7 @@ using PixMcp.Pix.Handles;
 namespace PixMcp.Tools;
 
 [McpServerToolType]
-public static class CountersTools
+public static partial class CountersTools
 {
     // ---- Per-event GPU timing ----
 
@@ -455,7 +455,7 @@ public static class CountersTools
                 new { groups, counterCount = counters.Count, vendor = h.EffectiveVendor(), presets, notes = CompatibilityNotes.Texts("counters", vendor, PixDiscovery.Version) });
         }, waitSeconds, cancellationToken);
 
-    private static List<CounterInfo> LoadCounters(GpuCaptureHandle h, Job? job = null)
+    internal static List<CounterInfo> LoadCounters(GpuCaptureHandle h, Job? job = null)
     {
         if (h.CounterList is not null)
         {
@@ -527,7 +527,7 @@ public static class CountersTools
     /// Resolves a preset to counter ids on the worker (needs the counter list, so analysis is prepared first as a job),
     /// then continues with the id-based path so cache keys stay id-based. A pending or deferred hop is returned as is.
     /// </summary>
-    private static async Task<string> WithPreset(PixSession session, JobManager jobs, string tool, string handle, string preset, double waitSeconds,
+    internal static async Task<string> WithPreset(PixSession session, JobManager jobs, string tool, string handle, string preset, double waitSeconds,
         CancellationToken cancellationToken, Func<uint[], Task<string>> next)
     {
         string hop = await Tools.RunWhenReady(session, jobs, tool, handle, GpuCaptureHandle.AnalysisPreparation(handle), h => ResolvePreset(h, preset), waitSeconds, cancellationToken).ConfigureAwait(false);
@@ -589,6 +589,13 @@ public static class CountersTools
     private static CounterEventRow[] CounterRows(CounterCollectionCache cache, QueueEntry queue, string handle, CancellationToken ct = default)
         => CounterRows(cache, queue, handle, null, ct);
 
+    /// <summary>A cached collection's rows for one queue, materialised with one bulk readback on first use (PIX worker only).</summary>
+    internal static CounterEventRow[] CachedCounterRows(GpuCaptureHandle h, CounterCollectionCache cache, int queueIndex)
+        => CounterRows(cache, h.Queue(queueIndex), h.Id, h, default);
+
+    /// <summary>The collected counter set for <paramref name="ids"/>, exact or projected from a materialised superset (PIX worker only).</summary>
+    internal static CounterCollectionCache CounterSet(GpuCaptureHandle h, uint[] ids, Job? job = null) => CollectCounterSet(h, ids, job);
+
     private static CounterEventRow[] CounterRows(CounterCollectionCache cache, QueueEntry queue, string handle, GpuCaptureHandle? h, CancellationToken ct)
         => cache.GetOrCreateRows(queue.Index, () =>
         {
@@ -599,24 +606,33 @@ public static class CountersTools
             return rows;
         });
 
-    [McpServerTool(Name = "pix_gpu_counters_read", Title = "Read counter rows", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Marker rows (rowKind=marker) are PIX's own measurements over the marker's span collected in separate playback rounds, never the sum of the event rows below them. Pages per-event GPU hardware counter values for one queue. Reuses decoded results (a subset of an already collected set is projected without replay); a counter set not collected yet is collected as a job first (see waitSeconds), the same job pix_gpu_counters_prepare runs explicitly.")]
+    public static readonly string[] CounterSortKeys = ["index", "name", "eop", "counter"];
+
+    [McpServerTool(Name = "pix_gpu_counters_read", Title = "Read counter rows", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Marker rows (rowKind=marker) are PIX's own measurements over the marker's span collected in separate playback rounds, never the sum of the event rows below them. Pages per-event GPU hardware counter values for one queue. Reuses decoded results (a subset of an already collected set is projected without replay); a counter set not collected yet is collected as a job first (see waitSeconds), the same job pix_gpu_counters_prepare runs explicitly. Rows from every queue carry the event's replay timing (includeTiming) and optional normalized and ratio columns; groupBy returns per-group counter aggregates through the rollup engine.")]
     public static Task<string> CountersCollect(
         PixSession session,
         JobManager jobs,
         [Description("GPU capture handle")] string handle,
         [Description("Counter ids to collect (from pix_gpu_counters_list). Keep the set small; each set replays the capture. Exactly one of counterIds or preset.")] uint[]? counterIds = null,
         [Description(CounterPresets.NamesDescription + " Exactly one of counterIds or preset.")] string? preset = null,
-        [Description("Queue index (default 0).")] int queueIndex = 0,
-        [Description("First event (default 0).")] int offset = 0,
-        [Description("Maximum events (default 25, max 1000).")] int limit = Paging.DefaultLimit,
+        [Description("Only this queue; omit for every queue.")] int? queueIndex = null,
+        [Description("First row (default 0).")] int offset = 0,
+        [Description("Maximum rows (default 25, max 1000).")] int limit = Paging.DefaultLimit,
         [Description(Tools.KindDescription)] string? kind = null,
         [Description("Only events whose name contains this text.")] string? nameContains = null,
         [Description("Skip events that have no data for any requested counter (default true).")] bool onlyEventsWithData = true,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
-        [Description("Sort by this requested counter ID. Numeric thresholds also apply to this counter.")] uint? orderByCounterId = null,
-        [Description("Sort largest first (default true).")] bool descending = true,
-        [Description("Minimum numeric value of orderByCounterId, inclusive.")] decimal? minValue = null,
-        [Description("Maximum numeric value of orderByCounterId, inclusive.")] decimal? maxValue = null,
+        [Description("Join each row's replay timing as eop and exec durations (default true; collects timing in the same job when it is missing).")] bool includeTiming = true,
+        [Description("none (default), perMs (divide by the event's inclusive EOP milliseconds), perThreadGroup (divide by a dispatch's thread groups) or perPixel (divide by the pixels of a draw's largest bound render target). Percent, ratio, rate, boolean and bitmask counters are never normalized.")] string normalize = "none",
+        [Description("Ratio columns: each { name, numeratorId, denominatorId } adds derived[name] = numerator / denominator per row (null when the denominator is 0 or missing); both ids must be in the collected set; at most 8.")] CounterRatioSpec[]? derived = null,
+        [Description("none (default: rows) or a pix_gpu_rollup grouping (marker, markerPath, markerDepth, shader, psoKey, kind, queue, commandList, api) that returns per-group counter aggregates instead of rows.")] string groupBy = "none",
+        [Description("Marker depth for groupBy=markerDepth (default 1).")] int depth = 1,
+        [Description("index (default), name, eop (needs includeTiming) or counter (with sortCounterId).")] string sortBy = "index",
+        [Description("Counter id to sort by when sortBy=counter; must be in the collected set.")] uint? sortCounterId = null,
+        [Description("Sort descending; when omitted, eop and counter sort largest first while index and name ascend.")] bool? descending = null,
+        [Description("Counter id that minValue and maxValue filter on; must be in the collected set.")] uint? filterCounterId = null,
+        [Description("Minimum numeric value of filterCounterId, inclusive.")] decimal? minValue = null,
+        [Description("Maximum numeric value of filterCounterId, inclusive.")] decimal? maxValue = null,
         [Description(EventScope.Description)] EventRef? scope = null,
         [Description(EventScope.PrefixDescription)] string? markerPathPrefix = null,
         [Description(Shaping.FormatDescription)] string format = "objects",
@@ -630,383 +646,156 @@ public static class CountersTools
         {
             if (counterIds is { Length: > 0 }) throw PixErrors.InvalidArguments("Pass counterIds or preset, not both.");
             return WithPreset(session, jobs, "pix_gpu_counters_read", handle, preset, waitSeconds, cancellationToken,
-                ids => CountersCollect(session, jobs, handle, ids, null, queueIndex, offset, limit, kind, nameContains, onlyEventsWithData, waitSeconds,
-                    orderByCounterId, descending, minValue, maxValue, scope, markerPathPrefix, format, brief, topN, maxStringLength, includeProvenance, cancellationToken));
+                ids => CountersCollect(session, jobs, handle, ids, null, queueIndex, offset, limit, kind, nameContains, onlyEventsWithData, waitSeconds, includeTiming, normalize,
+                    derived, groupBy, depth, sortBy, sortCounterId, descending, filterCounterId, minValue, maxValue, scope, markerPathPrefix, format, brief, topN, maxStringLength,
+                    includeProvenance, cancellationToken));
         }
         uint[] ids = NormalizeCounterIds(counterIds);
+        string grouping = RollupTools.Canonical(groupBy, ["none", .. Rollups.GroupBys], "groupBy");
+        string normalization = RollupTools.Canonical(normalize, CounterNormalization.Modes, "normalize");
+        string sort = RollupTools.Canonical(sortBy, CounterSortKeys, "sortBy");
+        CounterRatioSpec[] specs = derived ?? [];
+        if (grouping != "none")
+        {
+            if (normalization is not ("none" or "perMs")) throw PixErrors.InvalidArguments("groupBy supports normalize=none or perMs.");
+            if (specs.Length > 0 || sort != "index" || sortCounterId.HasValue || filterCounterId.HasValue || minValue.HasValue || maxValue.HasValue)
+                throw PixErrors.InvalidArguments("derived, sortBy, sortCounterId and value filters apply to rows; with groupBy use pix_gpu_rollup (sortBy, minPercent, minCount).",
+                    [new("pix_gpu_rollup", new { handle, groupBy = grouping, metric = "counter", counterIds = ids })]);
+            return RollupTools.Rollup(session, jobs, handle, grouping, depth, "counter", ids, null, queueIndex, scope, markerPathPrefix, kind, normalization, "sum", true,
+                null, 1, offset, limit, format, brief, maxStringLength, waitSeconds, includeProvenance, cancellationToken);
+        }
         ShapingOptions shaping = Shaping.Options(format, brief, topN, maxStringLength, offset);
-        if (orderByCounterId.HasValue && !ids.Contains(orderByCounterId.Value))
-            throw new PixToolException(PixErrors.Codes.InvalidArguments, "orderByCounterId must be present in counterIds.");
-        if ((minValue.HasValue || maxValue.HasValue) && !orderByCounterId.HasValue)
-            throw new PixToolException(PixErrors.Codes.InvalidArguments, "Numeric thresholds require orderByCounterId.");
-        if (minValue > maxValue)
-            throw new PixToolException(PixErrors.Codes.InvalidArguments, "minValue must not exceed maxValue.");
+        if (sort == "counter" && (!sortCounterId.HasValue || !ids.Contains(sortCounterId.Value)))
+            throw PixErrors.InvalidArguments("sortBy=counter needs sortCounterId from counterIds.");
+        if (sortCounterId.HasValue && sort != "counter") throw PixErrors.InvalidArguments("sortCounterId applies only to sortBy=counter.");
+        if (filterCounterId.HasValue && !ids.Contains(filterCounterId.Value)) throw PixErrors.InvalidArguments("filterCounterId must be present in counterIds.");
+        if ((minValue.HasValue || maxValue.HasValue) && !filterCounterId.HasValue) throw PixErrors.InvalidArguments("minValue and maxValue need filterCounterId.");
+        if (minValue > maxValue) throw PixErrors.InvalidArguments("minValue must not exceed maxValue.");
+        if (!includeTiming && (sort == "eop" || normalization == "perMs")) throw PixErrors.InvalidArguments("sortBy=eop and normalize=perMs need includeTiming=true.");
+        if (specs.Length > 8) throw PixErrors.InvalidArguments("At most 8 derived columns.");
+        foreach (CounterRatioSpec spec in specs)
+        {
+            if (string.IsNullOrWhiteSpace(spec.Name)) throw PixErrors.InvalidArguments("Every derived column needs a name.");
+            if (!ids.Contains(spec.NumeratorId) || !ids.Contains(spec.DenominatorId))
+                throw PixErrors.InvalidArguments($"Derived column {spec.Name} names a counter outside counterIds.", [new("pix_gpu_counters_list", new { handle })]);
+        }
+        if (specs.Select(s => s.Name).Distinct(StringComparer.Ordinal).Count() != specs.Length) throw PixErrors.InvalidArguments("Derived column names must be unique.");
         ScopeSelection selection = EventScope.Resolve(session, handle, queueIndex, scope, markerPathPrefix);
-        session.Get<GpuCaptureHandle>(handle).Queue(queueIndex);
+        GpuCaptureHandle capture = session.Get<GpuCaptureHandle>(handle);
+        if (queueIndex.HasValue) capture.Queue(queueIndex.Value);
         // Validate the filter before an expensive replay, even if the queue is empty.
         Tools.ValidateKind(kind);
-        return Tools.RunWhenReady(session, jobs, "pix_gpu_counters_read", handle, CounterSetPreparation(handle, ids), h =>
+        var parts = new List<Preparation<GpuCaptureHandle>> { CounterSetPreparation(handle, ids) };
+        if (includeTiming) parts.Add(TimingPreparation(handle));
+        return Tools.RunWhenReady(session, jobs, "pix_gpu_counters_read", handle, Tools.Combine(handle, parts), h =>
         {
             (int o, int l) = Shaping.Window(shaping, offset, limit);
-            QueueEntry queue = h.Queue(queueIndex);
             CounterCollectionCache cache = CollectCounterSet(h, ids, null);
-            EventRecord[] all = h.AllEvents(queueIndex);
-            int[] childCounts = h.ChildCounts(queueIndex);
-            int valueIndex = orderByCounterId.HasValue ? Array.FindIndex(cache.Counters, c => c.Id == orderByCounterId.Value) : -1;
-            CounterEventRow[] materialised = CounterRows(cache, queue, h.Id, h, default);
-            // Leaf rows with data under each marker, one bottom-up pass over parentIndex.
-            var descendants = new int[all.Length];
-            foreach (CounterEventRow row in materialised)
-            {
-                if (!row.HasData || row.Event.Index >= all.Length || childCounts[row.Event.Index] > 0) continue;
-                for (uint parent = all[row.Event.Index].ParentIndex, hops = 0; parent < all.Length && hops < all.Length; parent = all[parent].ParentIndex, hops++) descendants[parent]++;
-            }
-            IEnumerable<CounterEventRow> matching = materialised.Where(row =>
-            {
-                EventRecord e = row.Event;
-                if (!Tools.Contains(e.Name, nameContains) || !Tools.MatchesKind(e, kind, e.Index < childCounts.Length && childCounts[e.Index] > 0)
-                    || (onlyEventsWithData && !row.HasData)) return false;
-                return selection.Contains(queueIndex, all, e.Index);
-            });
-            CounterEventRow[] rows = CounterQuery.ApplyNumericQuery(matching, valueIndex, descending, minValue, maxValue).ToArray();
             uint[] orderedIds = cache.Counters.Select(c => c.Id).ToArray();
-            CounterValueRowDto[] page = rows.Skip(o).Take(l).Select(row =>
+            int Column(uint? id) => id is uint value ? Array.IndexOf(orderedIds, value) : -1;
+            int sortColumn = Column(sortCounterId), filterColumn = Column(filterCounterId);
+            var candidates = new List<CounterCandidate>();
+            var descendantsByQueue = new Dictionary<int, int[]>();
+            var trees = new Dictionary<int, TimingTreeResult>();
+            bool rollupAvailable = false;
+            foreach (QueueEntry queue in h.Queues)
             {
-                bool marker = row.Event.Index < all.Length && Tools.IsMarker(row.Event, childCounts[row.Event.Index] > 0);
-                return new CounterValueRowDto(
-                    new(handle, queueIndex, row.Event.Index), row.Event.Index, row.Event.GpuId == uint.MaxValue ? null : row.Event.GpuId,
-                    row.Event.Name, EventNavigation.MarkerPath(all, row.Event.Index), CounterQuery.Values(orderedIds, row.Values),
-                    marker ? "marker" : "event", marker && row.Event.Index < all.Length ? descendants[row.Event.Index] : null);
+                if (queueIndex.HasValue && queue.Index != queueIndex.Value) continue;
+                EventRecord[] all = h.AllEvents(queue.Index);
+                int[] childCounts = h.ChildCounts(queue.Index);
+                if (includeTiming && h.Timing is not null) trees[queue.Index] = h.TimingTreeFor(queue.Index);
+                CounterEventRow[] materialised = CounterRows(cache, queue, h.Id, h, default);
+                // Leaf rows with data under each marker, one bottom-up pass over parentIndex.
+                var descendants = new int[all.Length];
+                foreach (CounterEventRow row in materialised)
+                {
+                    if (!row.HasData || row.Event.Index >= all.Length || childCounts[row.Event.Index] > 0) continue;
+                    for (uint parent = all[row.Event.Index].ParentIndex, hops = 0; parent < all.Length && hops < all.Length; parent = all[parent].ParentIndex, hops++) descendants[parent]++;
+                }
+                descendantsByQueue[queue.Index] = descendants;
+                rollupAvailable |= materialised.Any(r => r.HasData && r.Event.Index < all.Length && Tools.IsMarker(r.Event, childCounts[r.Event.Index] > 0));
+                foreach (CounterEventRow row in materialised)
+                {
+                    EventRecord e = row.Event;
+                    bool hasChildren = e.Index < childCounts.Length && childCounts[e.Index] > 0;
+                    if (!Tools.Contains(e.Name, nameContains) || !Tools.MatchesKind(e, kind, hasChildren) || (onlyEventsWithData && !row.HasData)) continue;
+                    if (!selection.Contains(queue.Index, all, e.Index)) continue;
+                    if (filterColumn >= 0 && !CounterQuery.InRange(row.Values[filterColumn], minValue, maxValue)) continue;
+                    candidates.Add(new(queue.Index, row, all, childCounts));
+                }
+            }
+
+            TimingTreeNode? NodeOf(CounterCandidate c)
+                => trees.TryGetValue(c.Queue, out TimingTreeResult? tree) && c.Row.Event.Index < tree.Nodes.Length && tree.Nodes[c.Row.Event.Index].IsTimed ? tree.Nodes[c.Row.Event.Index] : null;
+            bool desc = descending ?? sort is "counter" or "eop";
+            IEnumerable<CounterCandidate> ordered = sort switch
+            {
+                "counter" => (desc
+                    ? candidates.OrderBy(c => CounterQuery.IsNumeric(c.Row.Values[sortColumn]) ? 0 : 1).ThenByDescending(c => c.Row.Values[sortColumn], CounterQuery.ValueComparer)
+                    : candidates.OrderBy(c => CounterQuery.IsNumeric(c.Row.Values[sortColumn]) ? 0 : 1).ThenBy(c => c.Row.Values[sortColumn], CounterQuery.ValueComparer))
+                    .ThenBy(c => c.Queue).ThenBy(c => c.Row.Event.Index),
+                "eop" => (desc
+                    ? candidates.OrderBy(c => NodeOf(c) is null ? 1 : 0).ThenByDescending(c => NodeOf(c)?.InclusiveEopNs ?? 0)
+                    : candidates.OrderBy(c => NodeOf(c) is null ? 1 : 0).ThenBy(c => NodeOf(c)?.InclusiveEopNs ?? 0))
+                    .ThenBy(c => c.Queue).ThenBy(c => c.Row.Event.Index),
+                "name" => (desc ? candidates.OrderByDescending(c => c.Row.Event.Name, StringComparer.OrdinalIgnoreCase) : candidates.OrderBy(c => c.Row.Event.Name, StringComparer.OrdinalIgnoreCase))
+                    .ThenBy(c => c.Queue).ThenBy(c => c.Row.Event.Index),
+                _ => desc ? candidates.OrderByDescending(c => c.Queue).ThenByDescending(c => c.Row.Event.Index) : candidates.OrderBy(c => c.Queue).ThenBy(c => c.Row.Event.Index),
+            };
+            CounterCandidate[] rows = ordered.ToArray();
+            CounterValueRowDto[] page = rows.Skip(o).Take(l).Select(c =>
+            {
+                EventRecord e = c.Row.Event;
+                bool hasChildren = e.Index < c.Children.Length && c.Children[e.Index] > 0;
+                bool marker = e.Index < c.All.Length && Tools.IsMarker(e, hasChildren);
+                var eventRef = new EventRef(handle, c.Queue, e.Index);
+                DurationDto? eop = null, exec = null;
+                if (NodeOf(c) is TimingTreeNode node)
+                {
+                    TimingTreeResult tree = trees[c.Queue];
+                    ulong? parentInclusive = node.ParentIndex is uint p && p < tree.Nodes.Length && p != node.Index && tree.Nodes[p].IsTimed ? tree.Nodes[p].InclusiveEopNs : null;
+                    eop = Metrics.Duration(node.InclusiveEopNs, tree.Totals, parentInclusive);
+                    exec = node.ExecutionNs is ulong executed ? Metrics.Duration(executed, tree.Totals) : null;
+                }
+                (double? divisor, string? reason) = CounterNormalization.Divisor(normalization, Tools.Classify(e, hasChildren), eop, ApiCallParser.Parse(e.ApiCallData, e.Name), () =>
+                {
+                    EventTargetsDto targets = ResourceTools.QueryBoundTargets(h, eventRef);
+                    EventTargetDto? largest = targets.Targets.Where(t => t.ViewType == "renderTarget").MaxBy(t => t.PixelCount);
+                    return (largest?.PixelCount ?? 0, targets.Reason);
+                });
+                return new CounterValueRowDto(eventRef, e.Index, e.GpuId == uint.MaxValue ? null : e.GpuId, e.Name, EventNavigation.MarkerPath(c.All, e.Index),
+                    CounterQuery.Values(orderedIds, c.Row.Values), marker ? "marker" : "event", marker ? descendantsByQueue[c.Queue][e.Index] : null)
+                {
+                    Eop = eop,
+                    Exec = exec,
+                    Normalized = divisor is double d ? CounterNormalization.Normalize(cache.Counters, c.Row.Values, d) : null,
+                    NormalizeReason = normalization == "none" || divisor is not null ? null : reason,
+                    Derived = specs.Length == 0 ? null : specs.ToDictionary(s => s.Name, s => CounterNormalization.Ratio(c.Row.Values[Column(s.NumeratorId)], c.Row.Values[Column(s.DenominatorId)])),
+                };
             }).ToArray();
             bool mixed = page.Any(r => r.RowKind == "marker") && page.Any(r => r.RowKind == "event");
             ToolCallDto Call(int at, int? strings) => new("pix_gpu_counters_read", new { handle, counterIds = ids, queueIndex, offset = at, limit = l, kind, nameContains,
-                onlyEventsWithData, orderByCounterId, descending, minValue, maxValue, scope, markerPathPrefix, format, brief, maxStringLength = strings });
-            return Shaping.Apply(page, rows.Length, o, l, shaping, RowShapes.Counters(cache.Counters), handle,
+                onlyEventsWithData, includeTiming, normalize = normalization, derived = specs.Length == 0 ? null : specs, sortBy = sort, sortCounterId, descending,
+                filterCounterId, minValue, maxValue, scope, markerPathPrefix, format, brief, maxStringLength = strings });
+            return Shaping.Apply(page, rows.Length, o, l, shaping, RowShapes.Counters(cache.Counters, specs, normalization != "none", includeTiming), handle,
                 new
                 {
                     counters = CounterMetadata(cache), provenance = h.Provenance(),
                     integerEncoding = "Integers outside the JavaScript safe range are decimal strings.", scope = selection.DescribeOrNull(h),
-                    collection = Collection(CounterSetKey(ids), cache), coverage = cache.CoverageByQueue.GetValueOrDefault(queueIndex),
+                    collection = Collection(CounterSetKey(ids), cache),
+                    coverage = cache.CoverageByQueue.Where(kv => !queueIndex.HasValue || kv.Key == queueIndex.Value)
+                        .ToDictionary(kv => kv.Key.ToString(System.Globalization.CultureInfo.InvariantCulture), kv => kv.Value),
                     vendor = h.EffectiveVendor(), notes = CompatibilityNotes.Texts("counters", h.EffectiveVendor().Vendor, PixDiscovery.Version),
                     rollupSemantics = RoundsRule,
-                    rollupAvailable = materialised.Any(r => r.HasData && r.Event.Index < all.Length && Tools.IsMarker(r.Event, childCounts[r.Event.Index] > 0)),
+                    rollupAvailable,
                     warning = mixed ? "This page mixes marker rows and event rows; do not add them together (see rollupSemantics)." : null,
+                    timing = includeTiming ? "eop is the event's inclusive replay EOP time (percentages divide by its queue); exec runs from TOP start to EOP end and overlaps neighbouring events." : null,
+                    normalization = normalization == "none" ? null : new { mode = normalization, divisor = CounterNormalization.Describe(normalization) },
+                    derived = specs.Length == 0 ? null : specs,
                 },
                 next => Call(next, maxStringLength), () => Call(o, Shaping.FullStringLength));
         }, waitSeconds, cancellationToken);
     }
 
-    // ---- Occupancy and high-frequency counters (optional per hardware) ----
-
-    [McpServerTool(Name = "pix_gpu_occupancy", Title = "GPU occupancy series", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. GPU occupancy over the capture (per occupancy type and shader stage), downsampled to maxPoints. Unavailable on some hardware; returns an 'unavailable' marker instead of failing. Needs GPU analysis: started automatically as a job (see waitSeconds).")]
-    public static Task<string> Occupancy(
-        PixSession session,
-        JobManager jobs,
-        [Description("GPU capture handle")] string handle,
-        [Description("Maximum sample points per series (default 200, max 5000).")] int maxPoints = 200,
-        [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
-        [Description("Original point offset for lossless pages; omit for evenly spaced overview samples.")] int? pointOffset = null,
-        [Description(EventScope.Description + " Reports the selection's replay-clock window (windowNs) once timing is collected; the series itself stays capture-wide.")] EventRef? scope = null,
-        [Description(EventScope.PrefixDescription)] string? markerPathPrefix = null,
-        [Description("Queue the scope refers to; defaults to the scope's queue.")] int? queueIndex = null,
-        [Description(Tools.IncludeProvenanceDescription)] bool includeProvenance = false,
-        CancellationToken cancellationToken = default)
-    {
-        ScopeSelection selection = EventScope.Resolve(session, handle, queueIndex, scope, markerPathPrefix);
-        return Tools.RunWhenReady(session, jobs, "pix_gpu_occupancy", handle, OccupancyPreparation(handle), h =>
-        {
-            if (h.OptionalUnavailable.TryGetValue("occupancy", out object? unavailable)) return unavailable;
-            return OccupancyCore(h, Math.Clamp(maxPoints, 2, 5000), pointOffset, selection.DescribeOrNull(h), Window(h, selection));
-        }, waitSeconds, cancellationToken);
-    }
-
-    /// <summary>Replay-clock window of a restricted selection, or null when unrestricted or timing has not been collected.</summary>
-    private static object? Window(GpuCaptureHandle h, ScopeSelection selection)
-    {
-        if (selection.IsUnrestricted) return null;
-        var window = EventScope.ToTimeWindow(h, selection);
-        return window is null
-            ? new { state = h.Timing is null ? "timingNotCollected" : "noTimedEvents", nextCalls = new[] { new ToolCallDto("pix_gpu_timing_prepare", new { handle = h.Id }) } }
-            : new { startNs = window.Value.StartNs, endNs = window.Value.EndNs, timedEvents = window.Value.TimedEvents, clock = "PIX replay clock (same clock as timing rows; alignment with sampled series is not verified)" };
-    }
-
-    private static Preparation<GpuCaptureHandle> OccupancyPreparation(string handle)
-        => new("occupancy", "occupancy", $"Collect GPU occupancy for {handle}",
-            h => h.OccupancyData is not null || h.OptionalUnavailable.ContainsKey("occupancy"), (h, job) =>
-            {
-                h.EnsureAnalysisStarted(job);
-                try { CollectOccupancy(h, job); h.MarkCapability("occupancy", "supported"); }
-                catch (Exception ex) when (ExplicitlyUnsupported(ex))
-                {
-                    h.OptionalUnavailable["occupancy"] = PixErrors.Unavailable("occupancy", ex);
-                    h.MarkCapability("occupancy", "unsupported", PixErrors.Describe(ex));
-                }
-            });
-
-    internal static bool ExplicitlyUnsupported(Exception ex)
-        => PixErrors.HResultOf(ex) is unchecked((int)0x80004001) or unchecked((int)0x80070032) or unchecked((int)0x887A0004);
-
-    private static void CollectOccupancy(GpuCaptureHandle h, Job job)
-    {
-        Guid occGuid = typeof(IPixGpuCaptureOccupancy).GUID;
-        _IPixGpuCaptureAnalysis_Extensions.GetOccupancy(h.GetAnalysis(), in occGuid, out object occObj);
-        var occupancy = (IPixGpuCaptureOccupancy)occObj;
-
-        Guid colGuid = typeof(IPixCollection).GUID;
-        _IPixGpuCaptureOccupancy_Extensions.GetOccupancyTypes(occupancy, in colGuid, out object typesObj);
-        _IPixGpuCaptureOccupancy_Extensions.GetOccupancyStages(occupancy, in colGuid, out object stagesObj);
-        var types = Interop.Items<IPixGpuCaptureOccupancyType>((IPixCollection)typesObj).ToList();
-        var stages = Interop.Items<IPixGpuCaptureOccupancyStage>((IPixCollection)stagesObj).ToList();
-
-        Guid dataGuid = typeof(IPixGpuCaptureOccupancyData).GUID;
-        _IPixGpuCaptureOccupancy_Extensions.CollectOccupancy(occupancy, in dataGuid, out object dataObj);
-        var data = (IPixGpuCaptureOccupancyData)dataObj;
-        job.ThrowIfCancellationRequested();
-        h.OccupancyData = new(data, types.ToArray(), stages.ToArray());
-    }
-
-    private static unsafe object OccupancyCore(GpuCaptureHandle h, int maxPoints, int? pointOffset, object? scope = null, object? windowNs = null)
-    {
-        OccupancyCache cache = h.OccupancyData!;
-        var types = cache.Types; var stages = cache.Stages; var data = cache.Data;
-        var series = new List<object>();
-        foreach (IPixGpuCaptureOccupancyType type in types)
-        {
-            foreach (IPixGpuCaptureOccupancyStage stage in stages)
-            {
-                ulong count = 0;
-                PIX_OCCUPANCY_POINT* points = null;
-                try { _IPixGpuCaptureOccupancyData_Extensions.GetPoints(data, type, stage, ref count, ref points); }
-                catch { continue; }
-                if (count == 0 || points == null)
-                {
-                    continue;
-                }
-                var sampled = new List<object>();
-                uint maxSlots = 0;
-                foreach (ulong i in SampleIndices(count, maxPoints, pointOffset))
-                {
-                    sampled.Add(new { index = i, timeNs = points[i].TimeNanoseconds, slots = points[i].Slots });
-                }
-                for (ulong i = 0; i < count; i++)
-                {
-                    maxSlots = Math.Max(maxSlots, points[i].Slots);
-                }
-                series.Add(new
-                {
-                    type = Interop.W(type.GetName()),
-                    stage = Interop.W(stage.GetName()),
-                    stageAbbreviation = Interop.W(stage.GetAbbreviation()),
-                    maxSlotsAvailable = type.GetMaxSlots(),
-                    pointCount = count,
-                    peakSlots = maxSlots,
-                    points = sampled,
-                    returnedPoints = sampled.Count,
-                    sampling = pointOffset.HasValue ? "consecutive" : "evenlySpaced",
-                    nextCalls = SampleNextCalls("pix_gpu_occupancy", h.Id, "pointOffset", count, maxPoints, pointOffset, null),
-                });
-            }
-        }
-
-        return new
-        {
-            provenance = h.Provenance(), timeOrigin = "PIX replay clock; not calibrated to application wall time",
-            types = types.Select(t => new { name = Interop.W(t.GetName()), description = Interop.WOrNull(t.GetDescription()), maxSlots = t.GetMaxSlots() }).ToArray(),
-            stages = stages.Select(s => new { name = Interop.W(s.GetName()), abbreviation = Interop.W(s.GetAbbreviation()) }).ToArray(),
-            series,
-            scope,
-            windowNs,
-            notes = CompatibilityNotes.Texts("occupancy", h.EffectiveVendor().Vendor, PixDiscovery.Version),
-        };
-    }
-
-    [McpServerTool(Name = "pix_gpu_hf_counters", Title = "High-frequency counters", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. High-frequency (sampled over time) GPU counters: lists counters/groups/sets and, when a set is chosen, collects and returns samples downsampled to maxSamples. Unavailable on some hardware. Per-event counter values come from pix_gpu_counters_read instead. Needs GPU analysis: started automatically as a job (see waitSeconds).")]
-    public static Task<string> HighFrequencyCounters(
-        PixSession session,
-        JobManager jobs,
-        [Description("GPU capture handle")] string handle,
-        [Description("Counter set index to collect (omit to only list).")] int? setIndex = null,
-        [Description("Maximum samples per counter (default 200, max 5000).")] int maxSamples = 200,
-        [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
-        [Description("Original sample offset for lossless pages; omit for evenly spaced overview samples.")] int? sampleOffset = null,
-        [Description(EventScope.Description + " Reports the selection's replay-clock window (windowNs) once timing is collected; the samples stay capture-wide.")] EventRef? scope = null,
-        [Description(EventScope.PrefixDescription)] string? markerPathPrefix = null,
-        [Description(Tools.IncludeProvenanceDescription)] bool includeProvenance = false,
-        CancellationToken cancellationToken = default)
-    {
-        ScopeSelection selection = EventScope.Resolve(session, handle, null, scope, markerPathPrefix);
-        return Tools.RunWhenReady(session, jobs, "pix_gpu_hf_counters", handle, HfPreparation(handle, setIndex), h =>
-        {
-            if (setIndex < 0) throw new PixToolException(PixErrors.Codes.InvalidArguments, "setIndex must be nonnegative.");
-            if (h.OptionalUnavailable.TryGetValue("hf:" + setIndex, out object? unavailable)) return unavailable;
-            return HfCore(h, setIndex, Math.Clamp(maxSamples, 2, 5000), sampleOffset, selection.DescribeOrNull(h), Window(h, selection));
-        }, waitSeconds, cancellationToken);
-    }
-
-    private static Preparation<GpuCaptureHandle> HfPreparation(string handle, int? setIndex)
-    {
-        if (setIndex < 0) throw PixErrors.InvalidArguments("setIndex must be nonnegative.");
-        string key = "hf:" + setIndex;
-        return new(key, "hf-counters", $"Collect high-frequency counters for {handle}",
-            h => h.OptionalUnavailable.ContainsKey(key) || (setIndex.HasValue ? h.HighFrequencyCollections.ContainsKey(setIndex.Value) : h.HighFrequencyCatalog is not null),
-            (h, job) =>
-            {
-                h.EnsureAnalysisStarted(job);
-                try
-                {
-                    h.HighFrequencyCatalog ??= HfCore(h, null, 2);
-                    if (setIndex.HasValue) HfCore(h, setIndex, 2);
-                    job.ThrowIfCancellationRequested();
-                    h.MarkCapability("highFrequencyCounters", "supported");
-                }
-                catch (Exception ex) when (ExplicitlyUnsupported(ex))
-                {
-                    h.OptionalUnavailable[key] = PixErrors.Unavailable("highFrequencyCounters", ex);
-                    h.MarkCapability("highFrequencyCounters", "unsupported", PixErrors.Describe(ex));
-                }
-            });
-    }
-
-    private static unsafe object HfCore(GpuCaptureHandle h, int? setIndex, int maxSamples, int? sampleOffset = null, object? scope = null, object? windowNs = null)
-    {
-        Guid hfGuid = typeof(IPixGpuCaptureHighFrequencyCounters).GUID;
-        _IPixGpuCaptureAnalysis_Extensions.GetHighFrequencyCounters(h.GetAnalysis(), in hfGuid, out object hfObj);
-        var hf = (IPixGpuCaptureHighFrequencyCounters)hfObj;
-        Guid colGuid = typeof(IPixCollection).GUID;
-        _IPixGpuCaptureHighFrequencyCounters_Extensions.GetCounters(hf, in colGuid, out object countersObj);
-        _IPixGpuCaptureHighFrequencyCounters_Extensions.GetCounterGroups(hf, in colGuid, out object groupsObj);
-        _IPixGpuCaptureHighFrequencyCounters_Extensions.GetGpuCounterSets(hf, in colGuid, out object setsObj);
-        var counters = (IPixCollection)countersObj;
-        var groups = (IPixCollection)groupsObj;
-        var sets = (IPixCollection)setsObj;
-
-        var setList = Interop.Items<IPixGpuCaptureCounterCollection>(sets).Select((s, i) => new
-        {
-            index = i,
-            name = Interop.W(s.GetName()),
-            description = Interop.WOrNull(s.GetDescription()),
-            counters = Interop.Items<IPixGpuCaptureHighFrequencyCounter>(s).Select(c =>
-            {
-                string name = Interop.W(c.GetName()); string? description = HfDescription(c);
-                UnitGuess unit = CounterUnits.Infer(name, description, "FLOAT64");
-                return new { id = c.GetId(), name, description, unit = unit.Unit, unitSource = unit.UnitSource, unitConfidence = unit.UnitConfidence };
-            }).ToArray(),
-        }).ToArray();
-
-        object? samples = null;
-        if (setIndex.HasValue)
-        {
-            if (setIndex.Value < 0 || (ulong)setIndex.Value >= sets.GetCount())
-            {
-                throw PixErrors.InvalidReference($"setIndex {setIndex} is out of range; there are {sets.GetCount()} counter set(s).",
-                    new ToolCallDto("pix_gpu_hf_counters", new { handle = h.Id }, CostHints.Cached));
-            }
-            if (!h.HighFrequencyCollections.TryGetValue(setIndex.Value, out HfCollectionCache? cached))
-            {
-                var set = sets.Get<IPixGpuCaptureCounterCollection>((ulong)setIndex.Value);
-                var selected = new SelectedPixCollection(sets, (ulong)setIndex.Value);
-                Guid dataGuid = typeof(IPixGpuCaptureHighFrequencyCounterData).GUID;
-                _IPixGpuCaptureHighFrequencyCounters_Extensions.CollectCounterData(hf, selected, in dataGuid, out object dataObj);
-                var data = (IPixGpuCaptureHighFrequencyCounterData)dataObj;
-                var collected = new List<HfCounterSamples>();
-                foreach (IPixGpuCaptureHighFrequencyCounter counter in Interop.Items<IPixGpuCaptureHighFrequencyCounter>(set))
-                {
-                    string name = Interop.W(counter.GetName());
-                    ulong batchId = 0, count = 0;
-                    ulong* timestamps = null;
-                    double* values = null;
-                    try
-                    {
-                        _IPixGpuCaptureHighFrequencyCounterData_Extensions.GetSamples(data, set, counter, ref batchId, ref count, ref timestamps, ref values);
-                        if (count > 0 && (timestamps == null || values == null))
-                            throw new InvalidOperationException("PIX returned sample counts without sample data.");
-                        double min = double.MaxValue, max = double.MinValue, sum = 0;
-                        for (ulong i = 0; i < count; i++)
-                        {
-                            double v = values[i];
-                            min = Math.Min(min, v); max = Math.Max(max, v); sum += v;
-                        }
-                        collected.Add(new HfCounterSamples(name, counter, batchId, count,
-                            count == 0 ? null : min, count == 0 ? null : max, count == 0 ? null : sum / count));
-                    }
-                    catch (Exception ex) { collected.Add(new HfCounterSamples(name, counter, batchId, count, null, null, null, PixErrors.Describe(ex))); }
-                }
-                cached = new HfCollectionCache(Interop.W(set.GetName()), data, set, collected.ToArray());
-                h.HighFrequencyCollections[setIndex.Value] = cached;
-            }
-            samples = new
-            {
-                set = cached.Set,
-                counters = cached.Counters.Select(c => HfSamplesDto(h, setIndex.Value, cached, c, maxSamples, sampleOffset)).ToArray(),
-            };
-        }
-
-        return new
-        {
-            provenance = h.Provenance(), timeOrigin = "PIX replay clock; batch IDs identify sample collections",
-            counterCount = counters.GetCount(),
-            groups = Interop.Items<IPixGpuCaptureCounterCollection>(groups).Select(g => new { name = Interop.W(g.GetName()), count = g.GetCount() }).ToArray(),
-            sets = setList,
-            samples,
-            scope,
-            windowNs,
-            notes = CompatibilityNotes.Texts("highFrequencyCounters", h.EffectiveVendor().Vendor, PixDiscovery.Version),
-        };
-    }
-
-    private static string? HfDescription(IPixGpuCaptureHighFrequencyCounter counter)
-    {
-        try { return Interop.WOrNull(counter.GetDescription()); }
-        catch (Exception) { return null; }
-    }
-
-    private static unsafe object HfSamplesDto(GpuCaptureHandle h, int setIndex, HfCollectionCache cache, HfCounterSamples counter, int maxSamples, int? sampleOffset)
-    {
-        if (counter.Error is not null) return new { counter = counter.Counter, unavailable = true, reason = counter.Error };
-        try
-        {
-            ulong batchId = 0, count = 0;
-            ulong* timestamps = null;
-            double* values = null;
-            _IPixGpuCaptureHighFrequencyCounterData_Extensions.GetSamples(cache.Data, cache.CounterSet, counter.NativeCounter,
-                ref batchId, ref count, ref timestamps, ref values);
-            if (count > 0 && (timestamps == null || values == null))
-                throw new InvalidOperationException("PIX returned sample counts without sample data.");
-            var sampled = SampleIndices(count, maxSamples, sampleOffset).Select(i => new { index = i, timeNs = timestamps[i], value = values[i] }).ToArray();
-            // PIX owns the returned pointers for the lifetime of this data object.
-            GC.KeepAlive(cache.Data);
-            string? description = HfDescription(counter.NativeCounter);
-            UnitGuess unit = CounterUnits.Infer(counter.Counter, description, "FLOAT64");
-            return new
-            {
-                counter = counter.Counter,
-                description,
-                unit = unit.Unit, unitSource = unit.UnitSource, unitConfidence = unit.UnitConfidence,
-                batchId,
-                sampleCount = count,
-                min = counter.Min,
-                max = counter.Max,
-                average = counter.Average,
-                samples = sampled,
-                returnedSamples = sampled.Length,
-                sampling = sampleOffset.HasValue ? "consecutive" : "evenlySpaced",
-                nextCalls = SampleNextCalls("pix_gpu_hf_counters", h.Id, "sampleOffset", count, maxSamples, sampleOffset, setIndex),
-            };
-        }
-        catch (Exception ex) { return new { counter = counter.Counter, unavailable = true, reason = PixErrors.Describe(ex) }; }
-    }
-
-    private static IEnumerable<ulong> SampleIndices(ulong count, int limit, int? offset)
-        => offset.HasValue ? Enumerable.Range(0, (int)Math.Min((ulong)limit, count > (ulong)Math.Max(0, offset.Value) ? count - (ulong)Math.Max(0, offset.Value) : 0))
-            .Select(i => (ulong)Math.Max(0, offset.Value) + (ulong)i) : Sampling.Indices(count, limit);
-
-    private static ToolCallDto[] SampleNextCalls(string tool, string handle, string offsetName, ulong count, int limit, int? offset, int? setIndex)
-    {
-        long next = offset.HasValue ? (long)offset.Value + limit : 0;
-        if ((offset.HasValue && (ulong)next >= count) || (!offset.HasValue && count <= (ulong)limit)) return [];
-        var args = new Dictionary<string, object> { ["handle"] = handle, [offsetName] = next,
-            [tool == "pix_gpu_occupancy" ? "maxPoints" : "maxSamples"] = limit };
-        if (setIndex.HasValue) args["setIndex"] = setIndex.Value;
-        return [new(tool, args)];
-    }
+    private sealed record CounterCandidate(int Queue, CounterEventRow Row, EventRecord[] All, int[] Children);
 }

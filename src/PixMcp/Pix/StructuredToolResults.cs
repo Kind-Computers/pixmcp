@@ -30,7 +30,7 @@ internal static class StructuredToolResults
     internal static readonly string[] TableTools =
     {
         "pix_gpu_events", "pix_gpu_timing_events", "pix_gpu_counters_read", "pix_gpu_timing_tree", "pix_gpu_shaders",
-        "pix_gpu_resources", "pix_timing_events", "pix_timing_hotspots",
+        "pix_gpu_resources", "pix_timing_events", "pix_timing_hotspots", "pix_gpu_rollup", "pix_gpu_bubbles",
     };
     private static readonly AsyncLocal<CallToolRequestParams?> CurrentRequest = new();
 
@@ -85,14 +85,25 @@ internal static class StructuredToolResults
         filters.AddCallToolFilter(next => async (request, ct) =>
         {
             using IDisposable scope = WithRequest(request.Params);
+            string tool = request.Params?.Name ?? "";
+            // A client that sent a progress token receives notifications/progress while this call waits on a job.
+            ClientProgress? progress = request.Params?.ProgressToken is ProgressToken token && request.Server is { } server
+                ? new ClientProgress(value => server.NotifyProgressAsync(token, value, options: null, cancellationToken: CancellationToken.None))
+                : null;
+            using IDisposable progressScope = ProgressForwarding.Scope(progress);
             try
             {
-                ValidateArguments(request.Params?.Name ?? "", request.Params?.Arguments);
+                if (!Toolsets.Enabled(tool)) return ErrorResult(PixErrors.ToolDisabled(tool));
+                ValidateArguments(tool, request.Params?.Arguments);
                 CallToolResult result = await next(request, ct).ConfigureAwait(false);
                 AddStructuredContent(result);
                 PixSession? session = request.Services?.GetService<PixSession>();
                 Annotate(result, session, request.Params?.Arguments);
-                BoundResult(result, session, CurrentOwners(), request.Params?.Name == "pix_result_read", request.Params?.Name);
+                // Summary text mode: the budget counts the summary, and a deferred replacement is summarised again.
+                bool summary = ServerOptions.Current.TextContent == ServerOptions.TextContentSummary;
+                if (summary) TextSummary.Apply(result, tool);
+                BoundResult(result, session, CurrentOwners(), tool == "pix_result_read", request.Params?.Name);
+                if (summary) TextSummary.Apply(result, tool);
                 return result;
             }
             catch (OperationCanceledException) { throw; }
@@ -100,11 +111,15 @@ internal static class StructuredToolResults
             {
                 return ErrorResult(ex);
             }
+            finally
+            {
+                if (progress is not null) await progress.DrainAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+            }
         });
         filters.AddListToolsFilter(next => async (request, ct) =>
         {
             ListToolsResult result = await next(request, ct).ConfigureAwait(false);
-            Tool[] ordered = result.Tools.OrderBy(t => t.Name, StringComparer.Ordinal).ToArray();
+            Tool[] ordered = result.Tools.Where(t => Toolsets.Enabled(t.Name)).OrderBy(t => t.Name, StringComparer.Ordinal).ToArray();
             foreach (Tool tool in ordered)
             {
                 // The SDK can share tool metadata across requests. Replace it atomically with immutable, memoised JSON.
@@ -144,10 +159,17 @@ internal static class StructuredToolResults
         filters.AddListPromptsFilter(next => async (request, ct) =>
         {
             ListPromptsResult result = await next(request, ct).ConfigureAwait(false);
-            result.Prompts = result.Prompts.OrderBy(p => p.Name, StringComparer.Ordinal).ToArray();
+            result.Prompts = result.Prompts.Where(p => Playbooks.Find(p.Name) is null || Playbooks.IsAvailable(p.Name))
+                .OrderBy(p => p.Name, StringComparer.Ordinal).ToArray();
             result.TimeToLive = ListTimeToLive;
             result.CacheScope = CacheScope.Private;
             return result;
+        });
+        filters.AddGetPromptFilter(next => async (request, ct) =>
+        {
+            string name = request.Params?.Name ?? "";
+            if (Playbooks.Find(name) is not null && !Playbooks.IsAvailable(name)) throw PixErrors.PromptDisabled(name);
+            return await next(request, ct).ConfigureAwait(false);
         });
         filters.AddReadResourceFilter(next => async (request, ct) =>
         {
@@ -273,15 +295,27 @@ internal static class StructuredToolResults
     internal static JsonElement SchemaFor(string toolName)
     {
         JsonElement core = CoreSchemaFor(toolName);
+        if (toolName == "pix_gpu_events") return AnyOf(core, TableSchema, Export<EventCountDto>(), Export<EventHistogramDto>(), DeferredSchema, ErrorSchema);
         return TableTools.Contains(toolName) ? AnyOf(core, TableSchema, DeferredSchema, ErrorSchema) : AnyOf(core, DeferredSchema, ErrorSchema);
+    }
+
+    /// <summary>The DTO schema with the named array properties also accepting a positional table (format = table on a composite response).</summary>
+    private static JsonElement TableSections(JsonElement schema, params string[] properties)
+    {
+        JsonNode root = JsonNode.Parse(schema.GetRawText())!;
+        if (root["properties"] is JsonObject declared)
+            foreach (string name in properties)
+                if (declared[name] is JsonNode original)
+                    declared[name] = new JsonObject { ["anyOf"] = new JsonArray(original.DeepClone(), JsonNode.Parse(TableSchema.GetRawText())) };
+        return JsonSerializer.SerializeToElement(root);
     }
 
     internal static JsonElement CoreSchemaFor(string toolName) => LegacyResultSchemas.For(toolName) ?? (toolName switch
     {
         "pix_gpu_analysis_start" or "pix_gpu_timing_prepare" or "pix_gpu_counters_prepare"
-            or "pix_gpu_drpix_run" or "pix_timing_resolve_symbols" or "pix_device_take_gpu_capture"
+            or "pix_gpu_drpix_run" or "pix_gpu_bottleneck" or "pix_timing_resolve_symbols" or "pix_device_take_gpu_capture"
             or "pix_device_timing_capture_stop" or "pix_capture_upgrade" or "pix_gpu_shader_profile" or "pix_gpu_compare" or "pix_gpu_preview"
-            or "pix_gpu_export_cpp" or "pix_csv_compare" or "pix_job_status" or "pix_job_wait" or "pix_job_cancel" => JobSchema,
+            or "pix_gpu_export_cpp" or "pix_csv_compare" or "pix_gpu_sql_populate" or "pix_gpu_sql_export" or "pix_job_status" or "pix_job_wait" or "pix_job_cancel" => JobSchema,
         "pix_result_read" => ResultReadSchema,
         "pix_result_export" => Export<ResultExportDto>(),
         "pix_gpu_compare_changes" => Export<ComparisonChangesDto>(),
@@ -299,12 +333,15 @@ internal static class StructuredToolResults
         "pix_timing_hotspots" => AnyOf(Export<TimingHotspotsDto>(), PendingSchema),
         "pix_timing_calltree" => AnyOf(Export<TimingCalltreeDto>(), PendingSchema),
         "pix_timing_sql" => AnyOf(Export<Sql.SqlResultDto>(), PendingSchema),
+        "pix_gpu_sql" => AnyOf(Export<Sql.SqlResultDto>(), PendingSchema),
+        "pix_gpu_sql_tables" => Export<Sql.GpuSqlTablesDto>(),
         "pix_timing_schema" => AnyOf(Export<TimingSchemaDto>(), PendingSchema),
         "pix_jobs" => JobsSchema,
         "pix_gpu_events" => EventPageSchema,
-        "pix_gpu_resources" => Export<PageResult<ResourceSummaryDto>>(),
+        "pix_gpu_resources" => AnyOf(Export<PageResult<ResourceSummaryDto>>(), PendingSchema),
+        "pix_gpu_resource_timeline" => AnyOf(Export<ResourceTimelineDto>(), PendingSchema),
         "pix_gpu_resource" => Export<ResourceDetailsDto>(),
-        "pix_gpu_counters_read" => AnyOf(Export<PageResult<CounterValueRowDto>>(), PendingSchema),
+        "pix_gpu_counters_read" => AnyOf(Export<PageResult<CounterValueRowDto>>(), Export<RollupDto>(), PendingSchema),
         "pix_gpu_timing_tree" => AnyOf(Export<TimingTreeDto>(), PendingSchema),
         "pix_gpu_pipeline_state" => AnyOf(Export<PipelineStateDto>(), PendingSchema),
         "pix_gpu_inspect_event" => AnyOf(Export<EventInspectionDto>(), PendingSchema),
@@ -313,9 +350,13 @@ internal static class StructuredToolResults
         "pix_gpu_shader_search" => AnyOf(Export<ShaderSearchDto>(), PendingSchema),
         "pix_gpu_shaders" => AnyOf(Export<ShaderInventoryDto>(), PendingSchema),
         "pix_gpu_shader_uses" => AnyOf(Export<ShaderUsesDto>(), PendingSchema),
+        "pix_gpu_rollup" => AnyOf(Export<RollupDto>(), PendingSchema),
+        "pix_gpu_pipelines" => AnyOf(Export<PipelinesDto>(), PendingSchema),
+        "pix_gpu_queue_overlap" => AnyOf(Export<QueueOverlapDto>(), PendingSchema),
+        "pix_gpu_bubbles" => AnyOf(Export<BubblesDto>(), PendingSchema),
         "pix_gpu_event_resources" => AnyOf(Export<EventResourcesDto>(), PendingSchema),
         "pix_gpu_resource_uses" => AnyOf(Export<ResourceUsesDto>(), PendingSchema),
-        "pix_gpu_overview" => AnyOf(Export<CaptureOverviewDto>(), PendingSchema),
+        "pix_gpu_overview" => AnyOf(Export<CaptureOverviewDto>(), TableSections(Export<CaptureOverviewDto>(), "topPasses", "topDraws"), PendingSchema),
         "pix_gpu_timing_events" => AnyOf(Export<PageResult<TimingEventDto>>(), PendingSchema),
         "pix_gpu_counters_list" => AnyOf(Export<PageResult<LegacyResultSchemas.CounterMetadata>>(), PendingSchema),
         "pix_dump_event" => Export<Tools.DumpEventResultDto>(),
@@ -324,7 +365,7 @@ internal static class StructuredToolResults
         "pix_gpu_preview_bytes" => Export<PreviewBytesSchemaDto>(),
         "pix_gpu_occupancy" => AnyOf(Export<LegacyResultSchemas.Occupancy>(), Export<LegacyResultSchemas.UnavailableResult>(), PendingSchema),
         "pix_gpu_hf_counters" => AnyOf(Export<LegacyResultSchemas.HighFrequency>(), Export<LegacyResultSchemas.UnavailableResult>(), PendingSchema),
-        "pix_gpu_drpix_experiments" => AnyOf(Export<PageResult<Handles.ExperimentInfo>>("nextOffset", "extra"), PendingSchema),
+        "pix_gpu_drpix_experiments" => AnyOf(Export<PageResult<DrPixExperimentDto>>("nextOffset", "extra"), PendingSchema),
         _ => ObjectSchema,
     });
 
@@ -432,10 +473,36 @@ internal static class StructuredToolResults
         ("pix_gpu_api_objects", "type") => ["HEAP", "RESOURCE", "COMMAND_QUEUE", "COMMAND_ALLOCATOR"],
         ("pix_device_d3d_settings_set", "category") => ["debugLayer", "dred", "device"],
         ("pix_csv_compare", "stat") => ["mean", "median", "p95"],
+        ("pix_gpu_sql_export", "format") => ["csv", "json"],
+        ("pix_gpu_sql_tables", "detail") => ["summary", "full"],
+        ("pix_gpu_rollup", "groupBy") => Rollups.GroupBys,
+        ("pix_gpu_counters_read", "groupBy") => ["none", .. Rollups.GroupBys],
+        ("pix_gpu_counters_read", "normalize") => CounterNormalization.Modes,
+        ("pix_gpu_counters_read", "sortBy") => Tools.CountersTools.CounterSortKeys,
+        ("pix_gpu_occupancy", "groupBy") => Tools.CountersTools.OccupancyGroupings,
+        ("pix_gpu_hf_counters", "groupBy") => Tools.CountersTools.HfGroupings,
+        ("pix_gpu_rollup", "metric") => Rollups.MetricNames,
+        ("pix_gpu_rollup", "sortBy") => Rollups.SortKeys,
+        ("pix_gpu_rollup", "normalize") => Rollups.Normalizations,
+        ("pix_gpu_pipelines", "sortBy") => Tools.RollupTools.PipelineSortKeys,
+        ("pix_gpu_bubbles", "sortBy") => Tools.QueueAnalysisTools.BubbleSortKeys,
+        ("pix_gpu_resources", "sortBy") => Tools.ResourceTools.ResourceSortKeys,
+        ("pix_gpu_resources", "usedAs") => ResourceAccess.UsedAs,
+        ("pix_gpu_drpix_experiments", "family") => DrPixFamilies.Names,
+        ("pix_gpu_compare_changes", "direction") => ComparisonResultQuery.Directions,
+        ("pix_gpu_compare_changes", "sortBy") => ComparisonResultQuery.SortKeys,
+        ("pix_gpu_compare_changes", "minConfidence") => ComparisonResultQuery.Confidences,
+        ("pix_gpu_resource_uses" or "pix_gpu_resource_timeline", "access") => ResourceAccess.Classes,
+        ("pix_gpu_resource_uses", "sortBy") => Tools.ResourceTools.ResourceUseSortKeys,
+        ("pix_gpu_bubbles", "cause") => BubbleAnalysis.Causes,
+        ("pix_gpu_shaders", "sortBy") => ShaderIndex.SortKeys,
+        ("pix_gpu_events", "mode") => Tools.GpuCaptureTools.EventModes,
+        ("pix_gpu_events", "bucketBy") => GroupKeys.BucketBys,
         ("pix_gpu_timing_events", "sortBy") => ["eopDuration", "topDuration", "eopStart", "index"],
         ("pix_gpu_timing_tree", "sortBy") => TimingTree.SortKeys,
         ("pix_timing_tree", "sortBy") => RecordedMarkerTree.SortKeys,
         ("pix_timing_verdict", "frameSource") => TimingDatabase.FrameSources,
+        ("pix_gpu_overview", "format") => Shaping.Formats,
         (_, "format") when TableTools.Contains(tool) => Shaping.Formats,
         (_, "kind") when tool.StartsWith("pix_gpu_") => PixMcp.Tools.Tools.Kinds,
         ("pix_timing_events", "domain") => TimingDatabase.EventDomains,
@@ -450,15 +517,27 @@ internal static class StructuredToolResults
         ("pix_gpu_preview" or "pix_gpu_export_cpp" or "pix_csv_compare", "timeoutSeconds") => (1, 3600),
         ("pix_gpu_shader_search", "nodeIndex") => (0, null),
         ("pix_gpu_shader_search", "contextLines") => (0, 20),
-        ("pix_timing_sql", "maxRows") => (1, Sql.SqlRequest.MaxMaxRows),
-        ("pix_timing_sql", "maxBytes") => (Sql.SqlRequest.MinMaxBytes, Sql.SqlRequest.MaxMaxBytes),
-        ("pix_timing_sql", "maxStringLength") => (Sql.SqlRequest.MinMaxStringLength, Sql.SqlRequest.MaxMaxStringLength),
+        ("pix_timing_sql" or "pix_gpu_sql", "maxRows") => (1, Sql.SqlRequest.MaxMaxRows),
+        ("pix_timing_sql" or "pix_gpu_sql", "maxBytes") => (Sql.SqlRequest.MinMaxBytes, Sql.SqlRequest.MaxMaxBytes),
+        ("pix_timing_sql" or "pix_gpu_sql", "maxStringLength") => (Sql.SqlRequest.MinMaxStringLength, Sql.SqlRequest.MaxMaxStringLength),
         ("pix_timing_sql", "timeoutSeconds") => (0, 120),
+        ("pix_gpu_sql", "timeoutSeconds") => (0, 600),
+        ("pix_gpu_sql_export", "maxRows") => (1, null),
         ("pix_timing_gpu_summary", "limit") => (1, 100),
         ("pix_timing_tree", "depth") => (1, 8),
         ("pix_timing_tree", "minSelfNs") => (0, null),
         ("pix_timing_verdict", "maxFrames") => (2, 5000),
+        ("pix_gpu_rollup" or "pix_gpu_counters_read", "depth") => (1, 16),
+        ("pix_gpu_rollup", "minCount") => (1, null),
+        ("pix_gpu_rollup", "minPercent") => (0, 1000),
+        ("pix_gpu_queue_overlap" or "pix_gpu_bubbles", "minGapNs") => (0, null),
+        ("pix_gpu_resources", "minBytes") => (0, null),
+        ("pix_gpu_drpix_run", "maxRuns") => (1, 1000),
+        ("pix_gpu_compare", "rollupDepth") => (1, 8),
+        ("pix_gpu_compare", "repeats") => (1, 5),
+        ("pix_gpu_bottleneck", "maxDrPixRuns") => (1, 8),
         (_, "efficiencyClass") => (0, 255),
+        (_, "frameIndex") => (0, null),
         (_, "startLine") => (1, null),
         (_, "offset" or "queueIndex" or "shaderIndex" or "eventIndex" or "setIndex"
             or "pointOffset" or "sampleOffset" or "viewOffset" or "bindingOffset" or "nodeOffset") => (0, null),

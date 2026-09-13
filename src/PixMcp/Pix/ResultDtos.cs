@@ -18,7 +18,7 @@ public sealed record EventDto(int QueueIndex, uint Index, uint? GpuId, uint? Par
 public sealed record JobDto(string JobId, string Kind, string Description, string Status, float Progress,
     DateTimeOffset CreatedAt, DateTimeOffset? StartedAt, DateTimeOffset? FinishedAt, double? ElapsedSeconds,
     IReadOnlyList<string> Messages, ErrorDto? Error, string? ResultRef, bool CancellationRequested,
-    IReadOnlyList<ToolCallDto> NextCalls, string ResultState = "none", ErrorDto? ResultError = null, ToolCallDto? Origin = null);
+    IReadOnlyList<ToolCallDto> NextCalls, string ResultState = "none", ErrorDto? ResultError = null, ToolCallDto? Origin = null, string? PartialResultRef = null);
 
 /// <summary>An executable follow-up call. Cost is a best-effort hint: cached, query, replay, pixtool or job.</summary>
 public sealed record ToolCallDto(string Tool, object Arguments, string? Cost = null);

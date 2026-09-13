@@ -87,8 +87,23 @@ public sealed partial class ResultStore : IDisposable
     /// <summary>True for paths inside the server's private result storage root (never a valid user output path).</summary>
     internal bool IsPrivatePath(string fullPath)
         => fullPath.StartsWith(System.IO.Path.GetDirectoryName(_directory)! + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    /// <summary>A path for a server-owned scratch file in this session's private directory; the owner deletes it, and abandoned sessions are reclaimed whole.</summary>
+    internal string ScratchPath(string fileName)
+    {
+        ThrowIfDisposed();
+        return System.IO.Path.Combine(_directory, fileName);
+    }
     public event Action<string>? JobEvicted;
     public bool IsAvailable(string resultRef) { lock (_gate) return !_disposed && _snapshots.ContainsKey(resultRef); }
+
+    /// <summary>Removes a snapshot its producer superseded (a job's earlier partial result); readers holding a lease finish first.</summary>
+    public void Release(string resultRef)
+    {
+        lock (_gate)
+        {
+            if (!_disposed && _snapshots.TryGetValue(resultRef, out Snapshot? snapshot)) RemoveLocked(snapshot);
+        }
+    }
     public ResultStoreSummary Summary() { lock (_gate) return new(_memoryBytes, _memoryLimit, _diskBytes, _diskLimit, _snapshots.Count, _leases, _evictions); }
     internal void RegisterJobOwners(string jobId, IEnumerable<string> owners) { lock (_gate) { ThrowIfDisposed(); _jobOwners[jobId] = owners.Select(NormalizeOwner).Distinct(StringComparer.Ordinal).ToArray(); } }
     public void MarkJobFinished(string jobId) { lock (_gate) if (!_disposed) _finishedJobs.TryAdd(jobId, (++_finishedOrder, _time.GetUtcNow())); }

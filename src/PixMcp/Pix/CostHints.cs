@@ -16,14 +16,14 @@ public static class CostHints
     private static readonly HashSet<string> CachedTools = new(StringComparer.Ordinal)
     {
         "pix_result_read", "pix_job_status", "pix_jobs", "pix_handles", "pix_info", "pix_gpu_compare_changes", "pix_log",
-        "pix_gpu_queues", "pix_gpu_info", "pix_gpu_analysis_status", "pix_gpu_preview_image", "pix_gpu_preview_bytes",
+        "pix_gpu_queues", "pix_gpu_info", "pix_gpu_analysis_status", "pix_gpu_sql_tables", "pix_gpu_preview_image", "pix_gpu_preview_bytes",
     };
     private static readonly HashSet<string> JobTools = new(StringComparer.Ordinal)
     {
-        "pix_job_wait", "pix_job_cancel", "pix_gpu_compare", "pix_gpu_drpix_run", "pix_gpu_counters_prepare", "pix_gpu_counters_prepare",
+        "pix_job_wait", "pix_job_cancel", "pix_gpu_compare", "pix_gpu_drpix_run", "pix_gpu_bottleneck", "pix_gpu_counters_prepare", "pix_gpu_counters_prepare",
         "pix_gpu_timing_prepare", "pix_gpu_timing_prepare", "pix_gpu_analysis_start", "pix_gpu_shader_profile",
         "pix_gpu_shader_static_profile", "pix_timing_resolve_symbols", "pix_device_take_gpu_capture",
-        "pix_device_timing_capture_start", "pix_device_timing_capture_stop", "pix_capture_upgrade", "pix_csv_compare",
+        "pix_device_timing_capture_start", "pix_device_timing_capture_stop", "pix_capture_upgrade", "pix_csv_compare", "pix_gpu_sql_populate", "pix_gpu_sql_export",
     };
     private static readonly HashSet<string> PixToolTools = new(StringComparer.Ordinal)
     {
@@ -31,7 +31,7 @@ public static class CostHints
     };
     private static readonly HashSet<string> TimingTools = new(StringComparer.Ordinal)
     {
-        "pix_gpu_timing_events", "pix_gpu_timing_tree", "pix_gpu_overview", "pix_gpu_queue_overlap", "pix_gpu_bubbles", "pix_gpu_rollup", "pix_correlate",
+        "pix_gpu_timing_events", "pix_gpu_timing_tree", "pix_gpu_overview", "pix_gpu_queue_overlap", "pix_gpu_bubbles", "pix_gpu_rollup", "pix_gpu_pipelines", "pix_correlate",
     };
     private static readonly HashSet<string> AnalysisTools = new(StringComparer.Ordinal)
     {

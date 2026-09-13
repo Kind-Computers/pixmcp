@@ -358,6 +358,7 @@ public sealed partial class GpuCaptureHandle : PixHandle
             catch (Exception ex) { warnings.Add("Disconnect: " + PixErrors.Describe(ex)); }
         }
         AnalysisStarted = false;
+        AnalysisGeneration++;
         AnalysisStartedAt = null;
         AnalysisConnected = false;
         Adapters = null;
@@ -371,6 +372,9 @@ public sealed partial class GpuCaptureHandle : PixHandle
         CounterCollections.Clear();
         HighFrequencyCollections.Clear();
         OccupancyData = null;
+        TimingPassProbe.Clear();
+        TimelineCache.Clear();
+        BottleneckCache.Clear();
         HighFrequencyCatalog = null;
         OptionalUnavailable.Clear();
         _capabilities.Clear();
@@ -426,6 +430,7 @@ public sealed partial class GpuCaptureHandle : PixHandle
     public override void Close(List<string> warnings)
     {
         StopAnalysis(warnings);
+        CloseSqlStore(warnings);
         foreach (QueueEntry queue in Queues)
         {
             queue.Cache = null;

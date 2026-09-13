@@ -6,9 +6,14 @@ internal sealed class ResourceUseIndex
     private readonly IReadOnlyDictionary<string, ResourceUseDto[]> _byResource;
     internal IReadOnlyList<object> Coverage { get; }
 
+    /// <summary>Every row of the index in scan order.</summary>
+    internal IReadOnlyList<ResourceUseDto> Rows { get; }
+
     internal ResourceUseIndex(IEnumerable<ResourceUseDto> rows, IReadOnlyList<object> coverage)
     {
-        _byResource = rows.GroupBy(r => r.ResourceRef.ApiObjectId, StringComparer.OrdinalIgnoreCase)
+        ResourceUseDto[] all = rows.ToArray();
+        Rows = all;
+        _byResource = all.GroupBy(r => r.ResourceRef.ApiObjectId, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.ToArray(), StringComparer.OrdinalIgnoreCase);
         Coverage = coverage;
     }

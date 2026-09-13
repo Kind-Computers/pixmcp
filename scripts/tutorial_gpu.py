@@ -321,7 +321,7 @@ def run_gpu(ctx, capture_path, adapter_name, label, *, require_tsr=True):
                     queue_index = draws[0]["eventRef"]["queueIndex"] if draws else opened["queues"][0]["queueIndex"]
                     task("counter values and numeric ordering", lambda: ctx.query("pix_gpu_counters_read", handle=handle,
                          counterIds=counter_ids, queueIndex=queue_index, kind="work", limit=10,
-                         orderByCounterId=counter_ids[0]), optional=True)
+                         sortBy="counter", sortCounterId=counter_ids[0]), optional=True)
             elif counters is not None:
                 task("counter collection availability", lambda: _missing("No hardware counters were advertised for this capture and adapter.", True), optional=True)
             else:

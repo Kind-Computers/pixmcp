@@ -97,6 +97,8 @@ public static class GpuCaptureTools
     public static Task<string> Queues(PixSession session, [Description("GPU capture handle")] string handle, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_gpu_queues", () => SessionTools.Envelope(session.Get<GpuCaptureHandle>(handle).Queues.Select(q => q.ToDto()).ToArray()), cancellationToken);
 
+    internal static readonly string[] EventModes = ["rows", "count", "histogram"];
+
     [McpServerTool(Name = "pix_gpu_events", Title = "List capture events", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Pages through the events of a GPU capture queue (or all queues when queueIndex is omitted), with optional filters. Events form a tree via parentIndex; gpuId identifies GPU work for timing/Dr. PIX ranges.")]
     public static Task<string> Events(
         PixSession session,
@@ -117,10 +119,14 @@ public static class GpuCaptureTools
         [Description(Shaping.BriefDescription)] bool brief = false,
         [Description(Shaping.TopNDescription)] int? topN = null,
         [Description(Shaping.MaxStringLengthDescription)] int? maxStringLength = null,
+        [Description("rows (default: paged events), count (only the number of matching events) or histogram (matching events counted per bucketBy value, largest first; limit caps the buckets).")] string mode = "rows",
+        [Description("Bucket for mode=histogram: kind (default), marker (nearest enclosing marker), markerPath, queue, commandList or api (event name).")] string bucketBy = "kind",
         CancellationToken cancellationToken = default)
     {
         ScopeSelection selection = EventScope.Resolve(session, handle, queueIndex, scope, markerPathPrefix);
         ShapingOptions shaping = Shaping.Options(format, brief, topN, maxStringLength, offset);
+        string eventMode = RollupTools.Canonical(mode, EventModes, "mode");
+        string bucket = RollupTools.Canonical(bucketBy, GroupKeys.BucketBys, "bucketBy");
         queueIndex ??= scope?.QueueIndex;
         return Tools.Run(session, "pix_gpu_events", () =>
         {
@@ -135,6 +141,34 @@ public static class GpuCaptureTools
             object Shape(List<EventDto> page, long total) => Shaping.Apply(page, total, o, l, shaping, RowShapes.Events, handle,
                 selection.IsUnrestricted ? null : new { scope = selection.Describe(h) }, next => Call(next, maxStringLength), () => Call(o, Shaping.FullStringLength));
             bool filtered = !selection.IsUnrestricted || Tools.HasEventFilter(nameContains, nameStartsWith, apiCallContains, kind, parentIndex, gpuIdMin, gpuIdMax);
+
+            if (eventMode != "rows")
+            {
+                long matched = 0;
+                var buckets = new Dictionary<string, (int Count, EventRef First)>(StringComparer.Ordinal);
+                foreach (int qi in queueIndex.HasValue ? new[] { queueIndex.Value } : h.Queues.Select(q => q.Index).ToArray())
+                {
+                    EventRecord[] all = h.AllEvents(qi);
+                    int[] children = h.ChildCounts(qi);
+                    foreach (EventRecord e in Tools.FilterEvents(all, nameContains, nameStartsWith, apiCallContains, kind, parentIndex, gpuIdMin, gpuIdMax))
+                    {
+                        if (!selection.Contains(h, qi, e.Index)) continue;
+                        matched++;
+                        if (eventMode != "histogram") continue;
+                        string key = GroupKeys.Of(bucket, qi, all, children, e.Index);
+                        buckets[key] = buckets.TryGetValue(key, out var seen) ? (seen.Count + 1, seen.First) : (1, new EventRef(handle, qi, e.Index));
+                    }
+                }
+                if (eventMode == "count") return new EventCountDto(handle, queueIndex, matched) { Scope = selection.DescribeOrNull(h) };
+                EventBucketDto[] ordered = buckets.Select(b => new EventBucketDto(b.Key, b.Value.Count, b.Value.First))
+                    .OrderByDescending(b => b.Count).ThenBy(b => b.Key, StringComparer.Ordinal).ToArray();
+                return new EventHistogramDto(handle, queueIndex, bucket, matched, ordered.Length, ordered.Take(l).ToArray())
+                {
+                    Scope = selection.DescribeOrNull(h),
+                    NextCalls = ordered.Length > l ? [new("pix_gpu_events", new { handle, queueIndex, nameContains, nameStartsWith, apiCallContains, kind, parentIndex,
+                        gpuIdMin, gpuIdMax, scope, markerPathPrefix, mode = eventMode, bucketBy = bucket, limit = Paging.MaxLimit })] : [],
+                };
+            }
 
             if (queueIndex.HasValue && !filtered)
             {

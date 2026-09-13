@@ -54,7 +54,7 @@ public sealed record HfCounterSamples(string Counter, IPixGpuCaptureHighFrequenc
     ulong BatchId, ulong SampleCount, double? Min, double? Max, double? Average, string? Error = null);
 
 public sealed record HfCollectionCache(string Set, IPixGpuCaptureHighFrequencyCounterData Data,
-    IPixGpuCaptureCounterCollection CounterSet, HfCounterSamples[] Counters);
+    IPixGpuCaptureCounterCollection CounterSet, HfCounterSamples[] Counters, string Source = "standaloneReplay");
 
 /// <summary>Bounded, evenly spaced samples that retain both endpoints without overflowing ulong.</summary>
 internal static class Sampling

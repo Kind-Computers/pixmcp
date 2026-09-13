@@ -326,6 +326,60 @@ internal static class SqlQuery
         return row;
     }
 
+    /// <summary>The tables and views a statement reads, reported by the authorizer while preparing it under the guard; nothing runs.</summary>
+    public static IReadOnlyList<string> ReferencedTables(ReadOnlySqlite db, string sql)
+    {
+        if (string.IsNullOrWhiteSpace(sql)) throw PixErrors.InvalidArguments("sql is required.");
+        db.Check();
+        using SqlStatementGuard guard = SqlStatementGuard.Install(db.Handle);
+        using sqlite3_stmt statement = Prepare(db, guard, sql, out string? tail);
+        if (!IsIgnorable(tail))
+            throw new PixToolException(PixErrors.Codes.SqlMultipleStatements, "Only one statement per call: remove the text after the first statement (comments are allowed).");
+        return guard.ReferencedTables;
+    }
+
+    /// <summary>
+    /// Runs one guarded read-only statement and hands its column names, then every row unshaped (full text, BLOB previews), to the
+    /// callbacks; stops after <paramref name="maxRows"/> rows. For exports.
+    /// </summary>
+    public static long Stream(ReadOnlySqlite db, SqlRequest request, Action<IReadOnlyList<string>> header, Action<object?[]> row, long maxRows, out bool truncated)
+    {
+        if (string.IsNullOrWhiteSpace(request.Sql)) throw PixErrors.InvalidArguments("sql is required.");
+        if (request.Sql.Length > SqlRequest.MaxSqlLength) throw PixErrors.InvalidArguments($"sql is {request.Sql.Length} characters; the limit is {SqlRequest.MaxSqlLength}.");
+        bool cut = false;
+        long written = db.WithBudget(request.TimeoutSeconds, PixErrors.Codes.SqlTimeout, PixErrors.Codes.SqlInterrupted, "SQL export", () =>
+        {
+            db.Check();
+            sqlite3 connection = db.Handle;
+            using SqlStatementGuard guard = SqlStatementGuard.Install(connection);
+            using sqlite3_stmt statement = Prepare(db, guard, request.Sql, out string? tail);
+            if (!IsIgnorable(tail))
+                throw new PixToolException(PixErrors.Codes.SqlMultipleStatements, "Only one statement per call: remove the text after the first statement (comments are allowed).");
+            if (raw.sqlite3_stmt_readonly(statement) == 0)
+                throw new PixToolException(PixErrors.Codes.SqlNotReadOnly, "SQLite reports this statement would modify the database; only read-only statements run.");
+            int count = raw.sqlite3_column_count(statement);
+            header(Enumerable.Range(0, count).Select(i => raw.sqlite3_column_name(statement, i).utf8_to_string() ?? $"column{i}").ToArray());
+            Dictionary<string, (object? Value, string Source)> values = ResolveParameters(ParameterNames(statement), request, [], out _);
+            Bind(db, statement, values);
+            SqlRequest unshaped = request with { MaxStringLength = int.MaxValue, IncludeBlobs = true };
+            int truncatedCells = 0;
+            long n = 0;
+            while (true)
+            {
+                int rc = raw.sqlite3_step(statement);
+                if (rc == raw.SQLITE_DONE) break;
+                if (rc != raw.SQLITE_ROW) throw StepFailure(db, guard, connection, rc);
+                if ((n & 0xFF) == 0) db.Check();
+                if (n == maxRows) { cut = true; break; }
+                row(ReadRow(statement, count, unshaped, ref truncatedCells));
+                n++;
+            }
+            return n;
+        });
+        truncated = cut;
+        return written;
+    }
+
     /// <summary>SQLite type-affinity rules applied to a declared type.</summary>
     public static string? Affinity(string? declaredType)
     {

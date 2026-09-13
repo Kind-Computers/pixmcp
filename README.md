@@ -103,7 +103,8 @@ Omit `env` when automatic discovery is sufficient. VS Code's `.vscode/mcp.json` 
 ## Investigation workflow
 
 1. Call `pix_info`, then `pix_gpu_open`.
-2. Call `pix_gpu_overview` for queues, capabilities, and the top measured passes/draws.
+2. Call `pix_gpu_overview` for capture facts and frames, queue kinds and replay totals, the top
+   passes and work events, and an EOP histogram.
    Use `includeTiming: false` for metadata without replay.
 3. Pass a returned `eventRef` to `pix_gpu_inspect_event` to get event context, timing,
    pipeline state, root constants, bindings, and suggested follow-up calls.
@@ -129,6 +130,28 @@ References contain capture identity and are safe to pass between tools:
 Copy references from results. Event indices are queue-local; API object IDs are strings.
 A shader index refers to the shader list for that event. Names and marker paths provide
 context, while references provide identity within the open capture.
+
+### Prompts, the investigation ladder, and progress
+
+The server lists ten playbook prompts: `pix_frame_budget`, `pix_regression`,
+`pix_dispatch_slow`, `pix_cpu_vs_gpu`, `pix_crash_triage`, `pix_async_overlap`,
+`pix_bandwidth_hogs`, `pix_fill_vs_vertex`, `pix_sql_investigation` and `pix_gpu_bottleneck`.
+Each renders numbered steps with exact JSON calls, the ladder level of every call, what the
+numbers do not mean, and example questions. String arguments such as `handle`, or an `eventRef`
+passed as JSON text, are substituted into the calls. A prompt whose tools are disabled by
+`PIXMCP_TOOLSETS` is not listed. [docs/investigation-ladder.md](docs/investigation-ladder.md)
+groups the tools into Level 0 verdicts, Level 1 composites, Level 2 scoped enumerators and
+Level 3 raw SQL and result reads.
+
+A client that sends a progress token (`_meta.progressToken`) with a tool call receives
+`notifications/progress` while that call waits on a job. That covers `pix_job_wait`,
+job-starting tools called with `waitSeconds`, and query tools waiting for a replay preparation.
+Each report carries the job's progress on a 0..100 scale and its latest status message, at most
+four times a second, with a final report when the wait ends. Polling `pix_job_status` keeps
+working for clients without a token.
+
+The instructions sent with `initialize` stay under 800 characters. Tool descriptions,
+`nextCalls` and the prompts carry the detail.
 
 ### Results, paging, and jobs
 
@@ -177,6 +200,9 @@ value prints `pixmcp: <variable> ...` and exits 1 before any protocol output, an
 | `PIXMCP_RESULT_MEMORY_BYTES` | 268435456 | Snapshot bytes kept in memory before spilling to disk |
 | `PIXMCP_RESULT_DISK_BYTES` | 2147483648 | Snapshot bytes kept on disk (memory and disk cannot both be 0) |
 | `PIXMCP_RESULT_DIR` | system temp | Absolute directory for spilled snapshots (created if missing) |
+| `PIXMCP_GPUSQL_MAX_BYTES` | 1073741824 (1 GiB) | Byte cap of each GPU capture's private SQL store (at least 1048576) |
+| `PIXMCP_TOOLSETS` | all | Toolsets to advertise, separated by commas: `gpu`, `timing`, `dump`, `device`, `csv`, `gpusql`, `drpix`, `shader` (`session` is always on). Disabled tools leave `tools/list`, fail with `tool_disabled` and hide the prompts that need them |
+| `PIXMCP_TEXT_CONTENT` | full | `summary` replaces the text block of each successful result with a summary of at most 512 bytes; `structuredContent` and errors stay complete |
 
 The store retains up to 50 transient snapshots and the latest 50 finished jobs.
 Storage pressure evicts transient results first, then finished jobs (after a 30 second
@@ -213,7 +239,7 @@ cancellation takes effect remains succeeded.
 
 Every handle has one preparation gate: parallel callers of the same replay share one job, and
 query tools join any running job that makes progress toward what they need (analysis start,
-timing, accessed resources, another `pix_gpu_inspect_event` variant) before starting their
+timing, accessed resources, the shared `pix_gpu_inspect_event` preparation) before starting their
 own. Once the preparation has finished the query is admitted with at least one extra second,
 so a ready prerequisite is not lost to a busy queue. Starting analysis with different
 adapter, power-state or flag settings while a start is queued or running fails immediately
@@ -287,6 +313,10 @@ transient condition to retry after following `nextCalls`.
 | `sql_not_read_only` |  | SQLite reports the statement would write (for example VACUUM). |
 | `sql_syntax_error` |  | SQLite could not prepare the statement (syntax, unknown table, column or function); the message carries SQLite's text and nextCalls the schema. |
 | `sql_timeout` | yes | The statement exceeded timeoutSeconds; narrow the window, add indexed predicates or LIMIT, or raise the budget. |
+| `sql_tables_not_populated` |  | The GPU SQL statement reads a family pix_gpu_sql_populate has not materialised; nextCalls carry the populate call (or pass autoPopulate=true). |
+| `sql_capacity_exceeded` |  | Populating a family would grow the GPU SQL store past PIXMCP_GPUSQL_MAX_BYTES; the family keeps its previous rows. |
+| `sql_store_closed` |  | The GPU capture handle and its SQL store closed; reopen the capture and populate again. |
+| `sql_store_busy` | yes | A populate transaction holds the GPU SQL store; retry. |
 | `timeout` | yes | A bounded wait elapsed (retryable). |
 | `timing_capture_busy` | yes | The timing capture is being saved or resolved; retry (retryable). |
 | `timing_capture_invalid` |  | The file is not a recorded timing capture. |
@@ -323,8 +353,9 @@ Paged GPU and timing tools (`pix_gpu_events`, `pix_gpu_timing_events`, `pix_gpu_
   with `/`; integers above 2^53 are decimal strings. Tables are several times smaller than
   object rows, so a 1,000-row page usually stays inline.
 - `brief`: only identifying and ranking fields (marker paths, execution durations, raw
-  timestamps and API text are dropped). `pix_gpu_overview` and `pix_gpu_inspect_event` accept
-  `brief` and `maxStringLength` only.
+  timestamps and API text are dropped). `pix_gpu_inspect_event` accepts `brief` and
+  `maxStringLength` only; `pix_gpu_overview` also accepts `format = table`, which turns its
+  `topPasses` and `topDraws` into positional tables.
 - `topN`: the first N rows of the sorted set with no continuation (`offset` must be 0).
 - `maxStringLength` (default 200, 16..4096): longer strings are cut with `…`; the response
   counts them in `truncatedStrings` and offers a continuation with `maxStringLength = 4096`.
@@ -343,6 +374,31 @@ metadata that needs no replay (queues, kinds, capabilities; the event record and
 and put `{ pending: true, jobId, retry }` in the sections that wait for the preparation job
 (`timing`; `timing`, `pipeline`, `bindings` plus `preparation`). Wait for the job, then repeat
 the call; the top level of such a partial answer is never `pending`.
+
+`pix_gpu_overview` reports:
+
+- `capture`: path, event total, queue count, the capture's `adapter` vendor, and `frames` (frames
+  delimited by Present calls, the presenting queue, and how other queues are assigned: `present`
+  by replay-clock windows between Present completions, `indexOnly` without timing, `none` without
+  a Present).
+- `queues`: `kinds` (every kind, with `work` = draw + dispatch + executeIndirect) and replay
+  `totals` (busy, span, idle).
+- `topPasses`: timed markers with children, with `inclusive` and `self` durations, semantics,
+  child overflow, `childCount` and `workCount`.
+- `topDraws`: timed work events with `eop`, `exec` and the captured call text in `parameters.raw`.
+- `histogram`: work-event EOP durations in the non-empty 1-2-5 buckets (edges 10 us to 10 ms,
+  plus overflow), against the busy time of the queues involved.
+- `frames` (multi-frame captures only): busy time per frame as the union of TOP..EOP windows,
+  up to 50 rows, with nearest-rank percentiles and a nextCall to the slowest frame.
+- `insights` (up to eight, warnings first): `vendor_mismatch`, `children_exceed_measured`,
+  `untimed_events`, `frame_variance_high`, `queue_idle_high`, `single_pass_dominates`,
+  `pass_self_time_high`, `long_tail_draws`, `no_markers`, `executeindirect_heavy` and
+  `many_barriers`, each with evidence, implication and follow-up calls that name only registered
+  tools and parameters (`includeInsights = false` skips them).
+
+`frameIndex` restricts passes, work events and the histogram to one frame. `brief = true` keeps
+every ranked row but drops execution durations, call text, capability reasons and notes,
+denominators and zero kind counts.
 
 Input schemas carry `examples` for reference-shaped parameters (`handle`, `eventRef`, `scope`,
 `shaderRef`, `resourceRef`, `markerPathPrefix`, `format`, `kind`), so the wire shape of an
@@ -373,7 +429,7 @@ server's hardware, `transcribed` from vendor plugin strings, `unverified`). On t
 `pix_gpu_counters_list` on an Arc/Xe2 machine and replace `tests/PixMcp.Tests/Fixtures/counter-catalogs/intel-xe2.json`).
 
 Vendor identity is reported everywhere replayed numbers appear: queues carry `vendor`, `pix_gpu_info`
-and `pix_gpu_overview` carry the capture's `vendor` (from the capture file's vendor id or device
+carries the capture's `vendor` and `pix_gpu_overview` its `capture.adapter` (from the capture file's vendor id or device
 name), analysis status carries `replayVendor` and `captureVendor`, and replay provenance carries
 `adapterName`, `vendor`, `captureVendor`, `vendorMismatch` and `pixBuild`. Known limitations live
 in a machine-readable registry (`src/PixMcp/Resources/compatibility-notes.json`): capabilities
@@ -426,7 +482,137 @@ offsets for retrieving the original point sequence.
 
 ### Pipeline, resources, and shaders
 
-`pix_gpu_inspect_event` combines common queries in one preparation and response.
+`pix_gpu_inspect_event` combines common queries in one preparation and response. Its sections
+are `timing`, `pipeline`, `shaders`, `bindings`, `targets`, `counters`, `occupancy`, `hf` and
+`hints`; the default is `timing`, `pipeline`, `shaders`, `bindings`, `targets` and `hints`.
+Every answer carries the event `kind` and `parameters`: the captured call parsed into named
+arguments (XML element or positional form) with `workItems` (vertices or indices times
+instances, thread groups, or ExecuteIndirect's maximum command count). `timing` ranks the event
+among the queue's timed work events (`rankInQueue`) and its timed siblings (`rankInParent`, and
+`siblings` with median, max and this event's share), reports the EOP duration, the TOP-start to
+EOP-end `exec` window and `perWorkItem` cost, and says whether the GPU started the event before
+the previous work event finished (`pipelinedWithPrevious`, `previousGapNs`; ancestors never
+count as the previous event). `targets` lists bound render targets and depth-stencil views with
+format, size, samples, pixel count at the view's mip slice and EOP nanoseconds per megapixel.
+`counters`, `occupancy` and `hf` read data already collected on the handle and never collect:
+`occupancy` gives PIX's own points for the event (`GetEventPoints`) next to each series held over
+the event's window, and `hf` gives window statistics and a heuristic utilization ranking per
+collected high-frequency counter set. `hints` flags `zero_work`,
+`tiny_dispatch`, `pipeline_latency`, `pipelined`, `dominant_in_parent` and `large_rt_fill` with
+evidence, implication and follow-up calls. Timing, bindings and hints share one `inspection`
+preparation (analysis, timing and accessed resources); pipeline, shaders and targets need only
+analysis, and counters, occupancy and hf need no replay.
+
+`pix_gpu_rollup` answers "where does the time go" in one call. `groupBy` is `marker` (nearest
+enclosing marker), `markerPath`, `markerDepth` (PIX's own marker spans at a depth, plus a
+`(no marker)` remainder so the rows add up to the queue's sum of roots), `shader` (a work event
+counts once per bound shader), `psoKey` (the bound shader set), `kind`, `queue`, `commandList` or
+`api`. Each group reports its count, measured and untimed rows, summed EOP as a duration with
+queue percentages, avg/min/max, nearest-rank p50/p95, `semantics` and a representative event with
+a follow-up call. `metric` is `eop`, `self`, `exec` or `counter` (per-group counter aggregates from
+`counterIds` or a `preset`, summed or averaged by unit, optionally `normalize = perMs`). Groupings
+other than `markerDepth` add measured event rows (`derivedSum`), never PIX's marker rounds.
+`pix_gpu_pipelines` ranks pipelines by summed replay time or use count with their shaders.
+`pix_gpu_shaders` takes `sortBy` (`gpuTime` and `useCount` rank largest first) and reports each
+shader's `shaderKey` (`hash:STAGE:HASH`) and `gpuTimeMs`; `pix_gpu_shader_uses` accepts
+`shaderKey` with `handle`. `pix_gpu_events` with `mode = count` returns only the number of
+matching events, and `mode = histogram` counts them per `bucketBy` value.
+
+`pix_gpu_queue_overlap` compares queues on the replay clock: per queue the busy time (the union of
+TOP-to-EOP windows of timed leaf events; markers with children are left out because their spans
+bridge the gaps being measured), idle and solo-busy time, every queue pair's overlap with a verdict
+(`overlapping` at 50 % of the smaller busy time or more, `mostlySerialized` at 10 %, else
+`serialized`), the critical-path queue and the longest idle gaps. `pix_gpu_bubbles` lists those
+gaps with the leaf events around them, a primary cause taken from the events between the pair
+and the event after the gap (`present`, `queueWait`, `queueSignal`, `barrier`,
+`commandListBoundary` or `unknown`, in that precedence; a Present, Wait or Signal right before the
+gap also counts), how busy the other queues were meanwhile, and totals per cause. `minGapNs` (default
+50 us) sets the threshold, and `scope` or `markerPathPrefix` clips every queue to the selection's
+window. Replay may serialise queues and adds its own synchronisation, so overlap is an upper bound
+and gaps a lower bound. `pix_gpu_overview` embeds the pairs and per-queue gap totals in `overlap`.
+
+`pix_gpu_resources` adds an estimated size (`estimatedBytes` with `estimateMethod`: buffer width,
+texels times bits over mips, array slices and samples, or 4x4 blocks for block-compressed formats;
+alignment and tiling are ignored) and a `heapKind`, filters by exact `name`, `pixelFormat`, `flags`
+and `minBytes`, sorts by `index`, `estimatedBytes`, `name` or `traffic`, and reports
+`extra.totals` by dimension, format and heap kind. `scope`, `markerPathPrefix`, `usedAs` and
+`sortBy = traffic` read the capture-wide resource-use index (one replay-backed pass over every
+event's views, captured API object arguments and barrier arguments) and add `trafficBytes`
+(estimated bytes times the events that read or write the resource, an upper bound) and
+`extra.scopeSummary` with the selection's render and depth targets. Every resource use carries
+`access` (`read`, `write`, `readWrite`, `copySrc`, `copyDst`, `barrier`, `unknown`) and
+`evidence`; `pix_gpu_resource_uses` filters by `access` and sorts by event, access or view type.
+`pix_gpu_resource_timeline` orders one resource's uses across queues, reports barrier states,
+phases of consecutive same-access uses, summary counts and insights (`read_before_write`,
+`missing_barrier_between_write_and_read`, `written_never_read`, `bound_as_rtv_and_srv_same_pass`),
+and joins replay timing only when it is already collected.
+
+`pix_gpu_drpix_experiments` adds each experiment's `family` (`basic`, `depthStencil`,
+`rasterization`, `executeIndirect`, `shaderCorrectness`, `debugBreak`, `memory`, `vendor`,
+`other`), `whatItProves` and `supportsRanges`, with `category`, `family` and `source` filters.
+`pix_gpu_drpix_run` runs every selected experiment (`experiments`, `categories`, `families`) over
+every range: `scope`, one range per top-most marker that `markerPathPrefix` matches, or
+`wholeCapture`; `perEvent = true` splits each range into one run per draw, dispatch or
+ExecuteIndirect, and `maxRuns` (default 50) bounds the replays. The result lists `runs[]` with
+structured `records` (values keyed by label, percent strings as numbers, PIX navigation links as
+`pixnavlink:` URIs), a `timing` pair (baseline and experiment milliseconds, saving and
+`semantics` `detected` or `inferredByOrder`) and `rangeIgnored` for experiments that always run
+over the whole capture, plus `ranges[]`, a one-row-per-run `table`, `savings` with implications, a
+`summary` and `notes`. While the job runs, its status offers `partialResultRef` with the runs
+finished so far; a cancelled or failed job keeps them as a `partial` result.
+
+`pix_gpu_compare` compares two captures, or two scopes or frames of one capture
+(`baselineScope`, `candidateScope`, `baselineFrame`, `candidateFrame`, `markerPathPrefix`; marker
+paths are taken relative to a scope). The summary adds `totals` (busy time per side and queue,
+the delta, the share the largest changes explain, and time only one side has), `byMarkerPath`
+(deltas rolled up to `rollupDepth` levels, listed without ancestor and descendant double counting;
+the full list is at `/byMarkerPath`), `noise` (with `repeats` of 2 to 5 each side's timing is
+collected again, by recollection or an analysis restart, and events report median EOP and spread;
+changes inside the spread are `belowNoiseFloor`), provenance mismatch `warnings`, and `codeDiffs`
+(HLSL line diffs for matched events whose shader hash changed). Events that share a marker path
+pair by order when both sides have the same count (`ordinalMatching`, confidence `low`); bindings
+compare as sets and ignore descriptor-heap indices unless `includeDescriptorHeapIndices` is true.
+`pix_gpu_compare_changes` also filters by `markerPathPrefix`, `kind`, `queueIndex`, `section`,
+`direction = structural`, `excludeBelowNoise` and `minConfidence`.
+
+`pix_gpu_bottleneck` classifies what limits one scope (`scope` or `markerPathPrefix`, required)
+as a job. Evidence comes in stages: `timing` (always; idle time in the scope window, work pending
+before execution, small dispatches), `counters` (the `preset`, default `utilization`, plus D3D
+pipeline statistics and depth occlusion over the scope's work events, with derived ratios),
+`occupancy` and `hf` over the scope's replay window, `drpix` (up to `maxDrPixRuns` experiments,
+each a replay) and `shaderProfile` (a pointer, not scored). Rules in the embedded
+`bottleneck-rules.json` score the limiters `pixelShading`, `vertexOrGeometry`, `rasterOrDepth`,
+`memoryBandwidth`, `cacheMiss`, `occupancyLatency`, `launchOverhead` and `syncIdle`. The result
+carries a `verdict` with `confidence` (high needs two evidence sources, a clear margin, every
+requested stage and a vendor block validated on hardware, which none is yet), `alternatives`, the
+`evidence` table, `ruleResults`, `recommendations` with calls, `coverage` per stage and a
+`detailRef` with every row. Results are cached per scope and evidence until analysis stops.
+
+`pix_gpu_counters_read` reads every queue unless `queueIndex` is given, and each row carries the
+event's replay `eop` and `exec` durations (`includeTiming`, default true, collects timing in the
+same job). `normalize` divides values by the event's EOP milliseconds (`perMs`), a dispatch's
+thread groups (`perThreadGroup`) or the pixels of a draw's largest bound render target
+(`perPixel`); percent, ratio, rate, boolean and bitmask counters are never normalized, and rows
+without a divisor say why in `normalizeReason`. `derived` adds ratio columns
+(`{ name, numeratorId, denominatorId }`). `sortBy` is `index`, `name`, `eop` or `counter` (with
+`sortCounterId`), and `filterCounterId` with `minValue`/`maxValue` filters rows. A `groupBy` other
+than `none` returns `pix_gpu_rollup` counter aggregates over the same collected set, so no second
+counters job starts.
+
+`pix_gpu_occupancy` reads the occupancy collected with the timing pass when PIX provides it
+(`source = timingPass`, collecting timing first) and replays only as a fallback or with
+`forceStandalone = true` (`source = standaloneReplay`); `timingPassProbe` records what PIX
+reported. Each series adds `peakPercent`, a time-weighted `timeWeightedAveragePercent` and
+`activeDurationNs`, and each point its `percent` of the type's maximum slots; points hold until
+the next one. `scope` or `markerPathPrefix` add `window` statistics over the selection's
+replay-clock window after a `clockCheck` of the series range (window numbers are withheld on
+`mismatch`), `eventRef` adds PIX's own points for that event next to the series held over its
+window, and `groupBy` (`event`, `marker`) lists per-series averages and peaks for the longest
+work events or the scope's child markers. `pix_gpu_hf_counters` works the same way for a counter
+set (`setIndex` or `setName`): samples from the timing pass when present, per-counter `window`
+statistics (count, min, max, average, time-weighted average, coverage, held value, nearest
+sample), `groupBy = event`, and a heuristic `utilizationRanking` when three or more percent-unit
+counters exist. The ranking never states a verdict.
 Root-constant bindings retrieve DWORD values where the native API supplies them;
 missing values have explicit coverage. Resource uses include event navigation and
 describe its evidence. A cached traversal of event-scoped views can recover navigation
@@ -745,6 +931,36 @@ pre-bound parameters and the named query library. Pass `table` for DDL, indexes 
 - Row ids are not OS ids: submissions, markers and executions reference `Threads.Id`, and queues
   and counters reference `Processes.Id`; `pix_timing_schema` documents each join.
 
+### SQL over GPU captures
+
+GPU captures are not SQLite, so `pix_gpu_sql_populate` materialises them into a private SQLite
+store per handle (in the session's private result directory, deleted when the handle closes) as
+one job with one transaction per family. `core` (capture, queues, events with kinds, marker
+paths, subtree bounds and frames, parsed call arguments, work items) and `resources` need no
+replay. `timing` (timing rows, the timing tree, queue totals), `shaders` (shader identities and
+per-event pipeline keys), `counters` (one counter set from `counterIds` or a `preset`),
+`resourceUses` (views bound per work event with a coarse access class) and `psos` (pipeline
+state JSON per work event) replay the capture if analysis is not started. `tables = all`
+populates core, timing, shaders and resources; counters, resourceUses and psos must be named.
+Ready families are skipped unless `force = true`, and rows of replay families populated under an
+earlier analysis are reported `stale` but still answer. `PIXMCP_GPUSQL_MAX_BYTES` caps the store
+(default 1 GiB); a family that would exceed it rolls back with `sql_capacity_exceeded`.
+
+`pix_gpu_sql` runs one read-only statement or a named library query (`top_passes`,
+`cost_by_marker`, `cost_by_kind_per_queue`, `cost_by_shader`, `cost_by_pso`,
+`dispatch_cost_per_workitem`, `resource_flow`, `barriers_per_pass`, `counters_for_events`,
+`counter_ratio`, `frames_summary`, `kinds_by_queue`, `untimed_events`, `unbalanced_markers`) off
+the PIX worker, under the same guard as `pix_timing_sql`. SQLite's authorizer first reports the
+tables the statement reads: a family that is not populated fails with `sql_tables_not_populated`
+and the populate call, or starts that job with `autoPopulate = true` (never for counters).
+`$handle`, `$scopeQueue`, `$scopeFirst` and `$scopeLast` (the `scope` event's subtree) and
+`$markerPathPrefix` are pre-bound, and the library queries honour them. Results have the timing
+SQL shape with `source = gpusql` and `provenance.tableStates`. `pix_gpu_sql_tables` describes
+families, documented tables, the views (`v_work`, `v_events_timed`, `v_passes`, `v_shader_cost`,
+`v_counters_joined`) and the named queries without touching the worker, and
+`pix_gpu_sql_export` streams every row to CSV or JSON as a job. Occupancy, high-frequency
+counters and Dr. PIX runs are not materialised yet.
+
 ### Dump triage
 
 `pix_dump_triage` summarizes deterministic evidence: nested incomplete events,
@@ -765,12 +981,13 @@ reading the preceding bytes because the native blob API only exposes prefix read
 | Area | Tools |
 |---|---|
 | Session/results | `pix_info`, `pix_handles`, `pix_close`, `pix_close_all`, `pix_jobs`, `pix_job_status`, `pix_job_wait`, `pix_job_cancel`, `pix_log`, `pix_result_read`, `pix_result_export` |
-| Investigation | `pix_gpu_overview`, `pix_gpu_inspect_event`, `pix_gpu_compare`, `pix_gpu_compare_changes` |
+| Investigation | `pix_gpu_overview`, `pix_gpu_inspect_event`, `pix_gpu_rollup`, `pix_gpu_pipelines`, `pix_gpu_queue_overlap`, `pix_gpu_bubbles`, `pix_gpu_compare`, `pix_gpu_compare_changes` |
+| GPU SQL | `pix_gpu_sql_populate`, `pix_gpu_sql`, `pix_gpu_sql_tables`, `pix_gpu_sql_export` |
 | GPU capture | `pix_gpu_open`, `pix_gpu_info`, `pix_gpu_queues`, `pix_gpu_events`, `pix_gpu_event`, `pix_gpu_api_objects`, `pix_gpu_screenshot` |
 | Analysis | `pix_gpu_analysis_start`, `pix_gpu_analysis_status`, `pix_gpu_analysis_adapters`, `pix_gpu_analysis_stop` |
 | Timing/counters | `pix_gpu_timing_prepare`, `pix_gpu_timing_events`, `pix_gpu_timing_tree`, `pix_gpu_counters_list`, `pix_gpu_counters_prepare`, `pix_gpu_counters_read`, `pix_gpu_occupancy`, `pix_gpu_hf_counters` |
 | Pipeline/shaders | `pix_gpu_pipeline_state`, `pix_gpu_shaders`, `pix_gpu_shader_uses`, `pix_gpu_shader_code`, `pix_gpu_shader_search`, `pix_gpu_shader_diagnostics`, `pix_gpu_shader_profile` |
-| Resources | `pix_gpu_resources`, `pix_gpu_resource`, `pix_gpu_event_resources`, `pix_gpu_resource_uses`, `pix_gpu_heap` |
+| Resources | `pix_gpu_resources`, `pix_gpu_resource`, `pix_gpu_event_resources`, `pix_gpu_resource_uses`, `pix_gpu_resource_timeline`, `pix_gpu_heap` |
 | Preview | `pix_gpu_preview`, `pix_gpu_preview_image`, `pix_gpu_preview_bytes` |
 | C++ export | `pix_gpu_export_cpp` |
 | Unreal CSV | `pix_csv_compare`, `pix_csv_pass_candidates` |

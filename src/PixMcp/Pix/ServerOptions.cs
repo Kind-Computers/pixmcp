@@ -6,7 +6,8 @@ namespace PixMcp.Pix;
 public sealed record ConfiguredValue(object? Value, string Source, string Variable);
 
 public sealed record ServerOptionsSummary(ConfiguredValue InlineResultBytes, ConfiguredValue MaxResultBytes,
-    ConfiguredValue ResultMemoryBytes, ConfiguredValue ResultDiskBytes, ConfiguredValue ResultDirectory, ConfiguredValue VerifyBulkReadback);
+    ConfiguredValue ResultMemoryBytes, ConfiguredValue ResultDiskBytes, ConfiguredValue ResultDirectory, ConfiguredValue VerifyBulkReadback, ConfiguredValue? GpuSqlMaxBytes = null,
+    ConfiguredValue? Toolsets = null, ConfiguredValue? TextContent = null);
 
 /// <summary>
 /// Server configuration, parsed once from the environment before any protocol output. Every consumer reads
@@ -20,7 +21,10 @@ public sealed record ServerOptions(
     long ResultDiskBytes, string DiskSource,
     string? ResultDirectory, string DirectorySource,
     IReadOnlyList<string> Problems,
-    bool VerifyBulkReadback = false, string VerifySource = ServerOptions.FromDefault)
+    bool VerifyBulkReadback = false, string VerifySource = ServerOptions.FromDefault,
+    long GpuSqlMaxBytes = ServerOptions.DefaultGpuSqlMaxBytes, string GpuSqlSource = ServerOptions.FromDefault,
+    IReadOnlySet<string>? Toolsets = null, string ToolsetsSource = ServerOptions.FromDefault,
+    string TextContent = ServerOptions.TextContentFull, string TextContentSource = ServerOptions.FromDefault)
 {
     public const string VerifyVariable = "PIXMCP_VERIFY_BULK_READBACK";
     public const string InlineVariable = "PIXMCP_INLINE_RESULT_BYTES";
@@ -28,6 +32,13 @@ public sealed record ServerOptions(
     public const string MemoryVariable = "PIXMCP_RESULT_MEMORY_BYTES";
     public const string DiskVariable = "PIXMCP_RESULT_DISK_BYTES";
     public const string DirectoryVariable = "PIXMCP_RESULT_DIR";
+    public const string GpuSqlMaxVariable = "PIXMCP_GPUSQL_MAX_BYTES";
+    /// <summary>Toolsets to advertise (see Toolsets); unset or "all" enables every toolset.</summary>
+    public const string ToolsetsVariable = "PIXMCP_TOOLSETS";
+    /// <summary>full (default): text blocks repeat the JSON; summary: one short text block per successful result.</summary>
+    public const string TextContentVariable = "PIXMCP_TEXT_CONTENT";
+    public const string TextContentFull = "full", TextContentSummary = "summary";
+    public const long DefaultGpuSqlMaxBytes = 1L << 30, MinGpuSqlMaxBytes = 1L << 20;
     public const int DefaultInlineResultBytes = 32 * 1024;
     public const int MinInlineResultBytes = 1024;
     public const int DefaultMaxResultBytes = 2 * 1024 * 1024;
@@ -69,7 +80,27 @@ public sealed record ServerOptions(
             }
         }
         (bool verify, string verifySource) = ParseFlag(environment, VerifyVariable, problems);
-        return new(inline, inlineSource, max, maxSource, memory, memorySource, disk, diskSource, directory, directorySource, problems, verify, verifySource);
+        (long gpuSql, string gpuSqlSource) = ParseLong(environment, GpuSqlMaxVariable, DefaultGpuSqlMaxBytes, MinGpuSqlMaxBytes, long.MaxValue, problems);
+        IReadOnlySet<string>? toolsets = null;
+        string toolsetsSource = FromDefault;
+        if (environment(ToolsetsVariable) is string toolsetText)
+        {
+            toolsets = global::PixMcp.Pix.Toolsets.Parse(toolsetText, out string? toolsetProblem);
+            if (toolsetProblem is null) toolsetsSource = FromEnvironment;
+            else problems.Add(toolsetProblem);
+        }
+        string textContent = TextContentFull, textContentSource = FromDefault;
+        if (environment(TextContentVariable) is string textText)
+        {
+            switch (textText.Trim().ToLowerInvariant())
+            {
+                case TextContentFull: textContentSource = FromEnvironment; break;
+                case TextContentSummary: textContent = TextContentSummary; textContentSource = FromEnvironment; break;
+                default: problems.Add($"{TextContentVariable} must be full or summary; got '{textText}'."); break;
+            }
+        }
+        return new(inline, inlineSource, max, maxSource, memory, memorySource, disk, diskSource, directory, directorySource, problems, verify, verifySource, gpuSql, gpuSqlSource,
+            toolsets, toolsetsSource, textContent, textContentSource);
     }
 
     private static (bool, string) ParseFlag(Func<string, string?> environment, string variable, List<string> problems)
@@ -112,7 +143,7 @@ public sealed record ServerOptions(
 
     /// <summary>A copy of the process configuration with some values replaced (for tests).</summary>
     public static ServerOptions With(int? inlineResultBytes = null, int? maxResultBytes = null, long? resultMemoryBytes = null, long? resultDiskBytes = null,
-        string? resultDirectory = null, bool? verifyBulkReadback = null)
+        string? resultDirectory = null, bool? verifyBulkReadback = null, long? gpuSqlMaxBytes = null, string? textContent = null)
         => Global with
         {
             InlineResultBytes = inlineResultBytes ?? Global.InlineResultBytes,
@@ -121,6 +152,8 @@ public sealed record ServerOptions(
             ResultDiskBytes = resultDiskBytes ?? Global.ResultDiskBytes,
             ResultDirectory = resultDirectory ?? Global.ResultDirectory,
             VerifyBulkReadback = verifyBulkReadback ?? Global.VerifyBulkReadback,
+            GpuSqlMaxBytes = gpuSqlMaxBytes ?? Global.GpuSqlMaxBytes,
+            TextContent = textContent ?? Global.TextContent,
         };
 
     public ServerOptionsSummary Describe() => new(
@@ -129,7 +162,10 @@ public sealed record ServerOptions(
         new(ResultMemoryBytes, MemorySource, MemoryVariable),
         new(ResultDiskBytes, DiskSource, DiskVariable),
         new(ResultDirectory, DirectorySource, DirectoryVariable),
-        new(VerifyBulkReadback, VerifySource, VerifyVariable));
+        new(VerifyBulkReadback, VerifySource, VerifyVariable),
+        new(GpuSqlMaxBytes, GpuSqlSource, GpuSqlMaxVariable),
+        new(Toolsets is null ? "all" : string.Join(",", Toolsets.Order(StringComparer.Ordinal)), ToolsetsSource, ToolsetsVariable),
+        new(TextContent, TextContentSource, TextContentVariable));
 
     private sealed class Restore(ServerOptions? previous) : IDisposable
     {

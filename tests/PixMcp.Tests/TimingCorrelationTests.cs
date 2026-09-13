@@ -86,7 +86,7 @@ public sealed class TimingCorrelationTests : IDisposable
         Assert.Equal(new[] { 3, 4, 5 }, unmatchedGpu);
         Assert.Equal(new[] { 3 }, unmatchedRecorded);
 
-        List<CorrelationQueueMapDto> map = TimingCorrelation.MapQueues([(0, "Main Graphics Queue", "GRAPHICS"), (1, "Async Compute Queue", "COMPUTE"), (2, "Loader", "COPY")],
+        List<CorrelationQueueMapDto> map = TimingCorrelation.MapQueues([(0, "Graphics Queue 0 (Main Graphics Queue)", "GRAPHICS"), (1, "Async Compute Queue", "COMPUTE"), (2, "Loader", "COPY")],
             [("1", "Async Compute Queue", "Compute"), ("2", "Main Graphics Queue", "Direct"), ("3", "Other Compute", "Compute")]);
         Assert.Equal(new[] { ("2", "typeAndName", "medium"), ("1", "typeAndName", "medium"), ((string?)null, "none", "none") }, map.Select(m => (m.RecordedQueueId, m.Method, m.Confidence)));
     }

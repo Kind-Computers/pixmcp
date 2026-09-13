@@ -35,7 +35,16 @@ public sealed class OutputSchemaTests
         Validate("pix_gpu_event", new { @event = evt, parents = Array.Empty<EventDto>(), parentsTruncated = false,
             childCount = 0, children = Array.Empty<EventDto>(), childrenTruncated = false, nextCalls = Array.Empty<ToolCallDto>() });
         Validate("pix_gpu_pipeline_state", pipeline);
-        Validate("pix_gpu_inspect_event", new EventInspectionDto(reference, ["Frame"], evt, null, pipeline, null, []));
+        Validate("pix_gpu_inspect_event", new EventInspectionDto(reference, ["Frame"], evt, "draw", ApiCallParser.Parse("DrawInstanced(3, 1, 0, 0)"), null, pipeline, null, []));
+        var timing = new EventTimingInspectionDto("measured", Metrics.Duration(20, null, 40, 1), null, "TOP timing is unavailable for this event.", null, 100, 120, 1, 3, 1,
+            new SiblingStatsDto(2, 2, 20, 20, 40, 50), false, 10, new EventRef("gpu-1", 0, 11), new PerWorkItemDto("vertices", 3, 6.7), Metrics.Denominators);
+        Validate("pix_gpu_inspect_event", new EventInspectionDto(reference, ["Frame"], evt, "draw", ApiCallParser.Parse("DrawInstanced(3, 1, 0, 0)"), timing, pipeline, null, [])
+        {
+            Targets = new EventTargetsDto("available", [new EventTargetDto("renderTarget", new ResourceRef("gpu-1", "0x16"), "BackBuffer", "R8G8B8A8_UNORM", 640, 480, 1, 0, 307200, 65.1)], null, "boundViews"),
+            Counters = new EventCountersDto("notCollected", [], "No counter collection is cached."),
+            Occupancy = new InspectionSectionStateDto("notJoined", "Use pix_gpu_occupancy."),
+            Hints = new[] { new InsightDto("pipelined", "info", "Overlaps.", new Dictionary<string, object?> { ["previousGapNs"] = -5L }, "Compare EOP durations.", []) },
+        });
         Validate("pix_gpu_shader_code", new ShaderCodeDto(new(reference, 0),
             new(new(reference, 0), 0, "0x1", "PS", null, null, null, null, null, 12, "0x0", ["HLSL"]),
             "HLSL", new(0, 0, 0, null, [], null), null, 1, 0, 0, null, null));

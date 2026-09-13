@@ -58,18 +58,21 @@ internal static class LegacyResultSchemas
     internal sealed record CounterRange(double? Min, double? Max);
     internal sealed record UnavailableResult(bool Unavailable, string Feature, string Reason, string? State, ErrorDto? Error);
     internal sealed record Occupancy(ReplayProvenance Provenance, string TimeOrigin, IReadOnlyList<object> Types,
-        IReadOnlyList<object> Stages, IReadOnlyList<OccupancySeries> Series, IReadOnlyList<string>? Notes);
+        IReadOnlyList<object> Stages, IReadOnlyList<OccupancySeries> Series, IReadOnlyList<string>? Notes, string? Source = null, string? Semantics = null,
+        bool? TimingPassProbe = null, object? Scope = null, object? WindowNs = null, object? Event = null, object? PerEvent = null);
     internal sealed record OccupancySeries(string Type, string Stage, string StageAbbreviation, uint MaxSlotsAvailable,
         ulong PointCount, uint PeakSlots, IReadOnlyList<OccupancyPoint> Points, int ReturnedPoints,
-        string Sampling, IReadOnlyList<ToolCallDto> NextCalls);
-    internal sealed record OccupancyPoint(ulong Index, double TimeNs, uint Slots);
+        string Sampling, IReadOnlyList<ToolCallDto> NextCalls, double? PeakPercent = null, double? TimeWeightedAveragePercent = null, ulong? ActiveDurationNs = null,
+        StepWindowStats? Window = null, ClockCheckDto? ClockCheck = null);
+    internal sealed record OccupancyPoint(ulong Index, double TimeNs, uint Slots, double? Percent = null);
     internal sealed record HighFrequency(ReplayProvenance Provenance, string TimeOrigin, ulong CounterCount,
-        IReadOnlyList<object> Groups, IReadOnlyList<object> Sets, HighFrequencySet? Samples, IReadOnlyList<string>? Notes);
+        IReadOnlyList<object> Groups, IReadOnlyList<object> Sets, HighFrequencySet? Samples, IReadOnlyList<string>? Notes, string? Source = null, bool? TimingPassProbe = null,
+        object? Scope = null, object? WindowNs = null, object? EventWindow = null, object? PerEvent = null, UtilizationRankingDto? UtilizationRanking = null);
     internal sealed record HighFrequencySet(string Set, IReadOnlyList<HighFrequencyCounter> Counters);
     internal sealed record HighFrequencyCounter(string Counter, ulong? BatchId, ulong? SampleCount, double? Min,
         double? Max, double? Average, IReadOnlyList<HighFrequencyPoint>? Samples, int? ReturnedSamples,
         string? Sampling, IReadOnlyList<ToolCallDto>? NextCalls, bool? Unavailable, string? Reason,
-        string? Description = null, string? Unit = null, string? UnitSource = null, string? UnitConfidence = null);
+        string? Description = null, string? Unit = null, string? UnitSource = null, string? UnitConfidence = null, SampleWindowStats? Window = null);
     internal sealed record HighFrequencyPoint(ulong Index, double TimeNs, double Value);
     private sealed record ItemsEnvelope<T>(IReadOnlyList<T> Items);
     private sealed record Queue(int QueueIndex, uint Id, string Name, string Type, uint AdapterId, string AdapterName, string Vendor, uint EventCount);
@@ -104,7 +107,7 @@ internal static class LegacyResultSchemas
     private sealed record WorkerStatus(bool Busy, string? RunningJob, int QueuedCalls, string? Operation,
         DateTimeOffset? StartedAt, double? ElapsedSeconds);
     private sealed record SessionInfo(PixInstall Pix, bool? DeveloperModeEnabled, ServerProcess Process,
-        WorkerStatus Worker, ResultStoreSummary Results, ServerOptionsSummary Options, IReadOnlyList<HandleSummary> Handles, IReadOnlyList<JobDto> Jobs,
+        WorkerStatus Worker, ResultStoreSummary Results, ServerOptionsSummary Options, ToolsetsInfoDto Toolsets, string TextContent, IReadOnlyList<HandleSummary> Handles, IReadOnlyList<JobDto> Jobs,
         PixDiffInfoDto Pixdiff);
     private sealed record TimingCapture(string Handle, string Kind, string Path, DateTimeOffset OpenedAt,
         string CapturePath, string PixStoragePath, bool SymbolsResolved);

@@ -228,6 +228,10 @@ def run(client, capture, candidate=None, report=None):
     def overview():
         value = agent.query("pix_gpu_overview", handle=handle)
         require(bool(value["queues"]) and bool(value["topDraws"]) and bool(value["topPasses"]), "Overview needs queues, timed draws and marker passes")
+        require(value["capture"]["frames"]["count"] >= 1 and sum(b["count"] for b in value["histogram"]["buckets"]) == len(value["topDraws"]), "Overview v2 needs capture frames and an EOP histogram covering the work events")
+        require(all(row["kind"] in ("draw", "dispatch", "executeIndirect") for row in value["topDraws"]), "topDraws must rank only work events")
+        require(any(row["name"].endswith("Frame") for row in value["topPasses"]), "The fixture Frame marker must rank as a pass")
+        require(agent.answer_bytes is not None and agent.answer_bytes < 12000, f"Overview answer is {agent.answer_bytes} bytes (budget 12000)")
         return value
     task("Find GPU hotspots", overview, handle is not None)
     def inspect():
@@ -235,6 +239,9 @@ def run(client, capture, candidate=None, report=None):
         event_ref = draw_page["items"][0]["eventRef"]
         value = agent.query("pix_gpu_inspect_event", eventRef=event_ref)
         require(value["eventRef"] == event_ref, "Inspection changed the event reference")
+        require(value.get("kind") == "draw" and (value.get("parameters") or {}).get("workItems") == 3, "Inspection v2 needs the draw kind and the parsed work items")
+        require((value.get("timing") or {}).get("rankInQueue", 0) >= 1, "Inspection timing lacks rankInQueue")
+        require((value.get("targets") or {}).get("state") == "available", "Inspection targets are not available for the fixture draw")
         if not contains(value, 0x50495831):
             coverage = (value.get("bindings") or {}).get("rootConstantCoverage", [])
             require(bool(coverage), "Known fixture root constant was not returned and has no unavailable evidence")

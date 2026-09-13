@@ -13,70 +13,8 @@ using PixMcp.Pix.Handles;
 namespace PixMcp.Tools;
 
 [McpServerToolType]
-public static class ResourceTools
+public static partial class ResourceTools
 {
-    [McpServerTool(Name = "pix_gpu_resources", Title = "List resources", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Lists the D3D12 resources in a GPU capture (buffers and textures) with dimensions and formats, paged and filterable. No GPU analysis needed. Use pix_gpu_resource for one resource's full details and views, pix_gpu_event_resources for what a draw binds.")]
-    public static Task<string> Resources(
-        PixSession session,
-        [Description("GPU capture handle")] string handle,
-        [Description("First item (default 0).")] int offset = 0,
-        [Description("Maximum items (default 25, max 1000).")] int limit = Paging.DefaultLimit,
-        [Description("Only resources whose name contains this text (case-insensitive).")] string? nameContains = null,
-        [Description("Filter by allocation type: COMMITTED, PLACED, RESERVED.")] string? type = null,
-        [Description("Filter by dimension: BUFFER, TEXTURE1D, TEXTURE2D, TEXTURE3D.")] string? dimension = null,
-        [Description(Shaping.FormatDescription)] string format = "objects",
-        [Description(Shaping.BriefDescription)] bool brief = false,
-        [Description(Shaping.TopNDescription)] int? topN = null,
-        [Description(Shaping.MaxStringLengthDescription)] int? maxStringLength = null,
-        CancellationToken cancellationToken = default)
-    {
-        ShapingOptions shaping = Shaping.Options(format, brief, topN, maxStringLength, offset);
-        return Tools.Run(session, "pix_gpu_resources", () =>
-        {
-            GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
-            (int o, int l) = Shaping.Window(shaping, offset, limit);
-            PIX_D3D12_RESOURCE_TYPE? wantedType = string.IsNullOrEmpty(type) ? null : Tools.ParseEnum<PIX_D3D12_RESOURCE_TYPE>(type);
-            D3D12_RESOURCE_DIMENSION? wantedDim = string.IsNullOrEmpty(dimension) ? null : Tools.ParseEnum<D3D12_RESOURCE_DIMENSION>(dimension);
-
-            IPixD3D12Resources resources = PixApiExtensionsGpuCapture.GetD3D12Resources(h.Document);
-            uint count = resources.GetCount();
-            var page = new List<ResourceSummaryDto>();
-            long total = 0;
-            for (uint i = 0; i < count; i++)
-            {
-                PIX_D3D12_RESOURCE_TYPE? resourceType = PixApiExtensionsGpuCaptureResources.GetType(resources, i);
-                if (wantedType.HasValue && resourceType != wantedType.Value)
-                {
-                    continue;
-                }
-                IPixD3D12Resource resource;
-                try { resource = PixApiExtensionsGpuCaptureResources.GetD3D12Resource<IPixD3D12Resource>(resources, i); }
-                catch { continue; }
-                string name = Interop.W(resource.GetName());
-                if (!Tools.Contains(name, nameContains))
-                {
-                    continue;
-                }
-                D3D12_RESOURCE_DESC2 desc = PixApiExtensionsGpuCaptureResources.GetDesc(resource);
-                if (wantedDim.HasValue && desc.Dimension != wantedDim.Value)
-                {
-                    continue;
-                }
-                if (total >= o && page.Count < l)
-                {
-                    page.Add(new ResourceSummaryDto(i, new ResourceRef(handle, Interop.Hex(resource.GetApiObjectId())),
-                        Interop.Hex(resource.GetApiObjectId()), string.IsNullOrEmpty(name) ? null : name,
-                        resourceType.HasValue ? Json.EnumName(resourceType.Value) : null, Json.EnumName(desc.Dimension),
-                        desc.Width, desc.Height, desc.DepthOrArraySize, desc.MipLevels, Json.EnumName(desc.Format),
-                        desc.SampleDesc.Count, Json.EnumName(desc.Flags)));
-                }
-                total++;
-            }
-            ToolCallDto Call(int at, int? strings) => new("pix_gpu_resources", new { handle, offset = at, limit = l, nameContains, type, dimension, format, brief, maxStringLength = strings });
-            return Shaping.Apply(page, total, o, l, shaping, RowShapes.Resources, handle, null, next => Call(next, maxStringLength), () => Call(o, Shaping.FullStringLength));
-        }, cancellationToken);
-    }
-
     [McpServerTool(Name = "pix_gpu_resource", Title = "Resource detail", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Full details for a resource reference returned by pix_gpu_resources: description, clear value, initial state/layout, castable formats, heap info and independently paged views and bindings.")]
     public static Task<string> Resource(
         PixSession session,
@@ -583,16 +521,135 @@ public static class ResourceTools
         };
     }
 
+    /// <summary>Every readable resource of the capture as a summary row (capture metadata; no replay).</summary>
+    internal static List<ResourceSummaryDto> AllResourceSummaries(GpuCaptureHandle h)
+    {
+        IPixD3D12Resources resources = PixApiExtensionsGpuCapture.GetD3D12Resources(h.Document);
+        uint count = resources.GetCount();
+        var rows = new List<ResourceSummaryDto>();
+        for (uint i = 0; i < count; i++)
+        {
+            PIX_D3D12_RESOURCE_TYPE? resourceType = PixApiExtensionsGpuCaptureResources.GetType(resources, i);
+            IPixD3D12Resource resource;
+            try { resource = PixApiExtensionsGpuCaptureResources.GetD3D12Resource<IPixD3D12Resource>(resources, i); }
+            catch { continue; }
+            string name = Interop.W(resource.GetName());
+            D3D12_RESOURCE_DESC2 desc = PixApiExtensionsGpuCaptureResources.GetDesc(resource);
+            string apiObjectId = Interop.Hex(resource.GetApiObjectId());
+            rows.Add(WithEstimate(new ResourceSummaryDto(i, new ResourceRef(h.Id, apiObjectId), apiObjectId, string.IsNullOrEmpty(name) ? null : name,
+                resourceType.HasValue ? Json.EnumName(resourceType.Value) : null, Json.EnumName(desc.Dimension), desc.Width, desc.Height, desc.DepthOrArraySize,
+                desc.MipLevels, Json.EnumName(desc.Format), desc.SampleDesc.Count, Json.EnumName(desc.Flags))));
+        }
+        return rows;
+    }
+
+    internal const int MaxEventTargets = 8;
+
+    /// <summary>
+    /// Render targets and depth-stencil views bound at an event with their resource sizes. Reads the pipeline's bound views
+    /// first; when they report none and accessed resources were gathered, reads the augmented view collection once.
+    /// </summary>
+    internal static EventTargetsDto QueryBoundTargets(GpuCaptureHandle h, EventRef eventRef)
+    {
+        IPixResourceViewsAtEvent Views()
+        {
+            PIX_EVENT_INFO info = h.EventInfo(eventRef.QueueIndex, eventRef.EventIndex);
+            IPixProgramState programState = PixApiExtensionsGpuCapture.GetProgramState(h.Document, ref info);
+            IPixGenericPipeline pipeline = PixApiExtensionsGpuCaptureResources.GetGpuProgram<IPixGenericPipeline>(programState);
+            return PixApiExtensionsGpuCaptureResources.GetResourceViews(pipeline);
+        }
+        var resources = new ToolCallDto("pix_gpu_event_resources", new { eventRef }, CostHints.Replay);
+        List<EventTargetDto> found;
+        string source = "boundViews";
+        try
+        {
+            found = ReadTargets(h, Views());
+            if (found.Count == 0 && h.AccessedResourcesGathered)
+            {
+                IPixResourceViewsAtEvent augmented = Views();
+                h.GetAnalysis().GetAccessedResources(augmented);
+                found = ReadTargets(h, augmented);
+                source = "accessedResources";
+            }
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            return new EventTargetsDto("unavailable", [], PixErrors.Describe(ex)) { NextCalls = [resources] };
+        }
+        return found.Count == 0
+            ? new EventTargetsDto("none", [], "No render target or depth-stencil view is bound at this event.", source) { NextCalls = [resources] }
+            : new EventTargetsDto("available", found.OrderBy(t => t.ViewType == "renderTarget" ? 0 : 1).ToArray(), null, source);
+    }
+
+    private static List<EventTargetDto> ReadTargets(GpuCaptureHandle h, IPixResourceViewsAtEvent views)
+    {
+        var targets = new List<EventTargetDto>();
+        uint count = views.GetCount();
+        for (uint i = 0; i < count && targets.Count < MaxEventTargets; i++)
+        {
+            PIX_RESOURCE_VIEW_TYPE viewType = PIX_RESOURCE_VIEW_TYPE.PIX_RESOURCE_NONE;
+            _IPixResourceViews_Extensions.GetType(views, i, ref viewType);
+            string kind;
+            object? desc;
+            if (viewType == PIX_RESOURCE_VIEW_TYPE.PIX_RESOURCE_RENDER_TARGET_VIEW)
+            {
+                kind = "renderTarget";
+                desc = Interop.CollapseUnion(Reflect.ToObject(PixApiExtensionsGpuCaptureResources.GetRenderTargetViewDesc(
+                    PixApiExtensionsGpuCaptureResources.GetResourceView<IPixRenderTargetView>(views, i))));
+            }
+            else if (viewType == PIX_RESOURCE_VIEW_TYPE.PIX_RESOURCE_DEPTH_STENCIL_VIEW)
+            {
+                kind = "depthStencil";
+                desc = Interop.CollapseUnion(Reflect.ToObject(PixApiExtensionsGpuCaptureResources.GetDepthStencilViewDesc(
+                    PixApiExtensionsGpuCaptureResources.GetResourceView<IPixDepthStencilView>(views, i))));
+            }
+            else continue;
+            System.Text.Json.JsonElement viewDesc = System.Text.Json.JsonSerializer.SerializeToElement(desc, Json.Options);
+            uint mip = FindUInt(viewDesc, "mipSlice") ?? 0;
+            string? viewFormat = viewDesc.ValueKind == System.Text.Json.JsonValueKind.Object && viewDesc.TryGetProperty("format", out System.Text.Json.JsonElement f)
+                && f.ValueKind == System.Text.Json.JsonValueKind.String ? f.GetString() : null;
+            IPixD3D12Resource? resource = null;
+            try { resource = PixApiExtensionsGpuCaptureResources.GetD3D12Resource(PixApiExtensionsGpuCaptureResources.GetResourceView<IPixD3D12ResourceView>(views, i)); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { }
+            if (resource is null)
+            {
+                targets.Add(new(kind, null, null, viewFormat, 0, 0, 0, mip, 0, null));
+                continue;
+            }
+            D3D12_RESOURCE_DESC2 rd = PixApiExtensionsGpuCaptureResources.GetDesc(resource);
+            string? format = viewFormat is null or "UNKNOWN" ? Json.EnumName(rd.Format) : viewFormat;
+            targets.Add(new(kind, new ResourceRef(h.Id, Interop.Hex(resource.GetApiObjectId())), Interop.WOrNull(resource.GetName()), format,
+                rd.Width, rd.Height, rd.SampleDesc.Count, mip, EventInspection.PixelCount(rd.Width, rd.Height, rd.SampleDesc.Count, mip), null));
+        }
+        return targets;
+    }
+
+    private static uint? FindUInt(System.Text.Json.JsonElement element, string name)
+    {
+        if (element.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+        foreach (System.Text.Json.JsonProperty property in element.EnumerateObject())
+        {
+            if (property.NameEquals(name) && property.Value.ValueKind == System.Text.Json.JsonValueKind.Number && property.Value.TryGetUInt32(out uint value)) return value;
+            if (FindUInt(property.Value, name) is uint nested) return nested;
+        }
+        return null;
+    }
+
     [McpServerTool(Name = "pix_gpu_resource_uses", Title = "Resource uses", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Find observed bindings of a resource, with event references, marker paths, shader stages, registers and binding locations. This is binding/access evidence, not proof of pixel provenance. Missing binding events are reported in coverage. An explicit scope bounds fallback event inspection to that event and its descendants; initial accessed-resource gathering remains capture-wide.")]
     public static async Task<string> ResourceUses(PixSession session, JobManager jobs, [Description("Resource reference { handle, apiObjectId } as returned by pix_gpu_resources or pix_gpu_event_resources.")] ResourceRef resourceRef,
         [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = Paging.DefaultLimit, [Description("Only uses on this queue index; omit for all queues.")] int? queueIndex = null,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
         [Description(EventScope.Description)] EventRef? scope = null,
         [Description(EventScope.PrefixDescription)] string? markerPathPrefix = null,
+        [Description("Only uses with this access: read, write, readWrite, copySrc, copyDst, barrier or unknown.")] string? access = null,
+        [Description("event (default: queue, then event index), access or viewType.")] string sortBy = "event",
         CancellationToken cancellationToken = default)
     {
         ReferenceValidation.Resource(session, resourceRef);
         ReferenceValidation.Page(offset, limit);
+        string? accessName = access is null ? null : RollupTools.Canonical(access, ResourceAccess.Classes, "access");
+        string sort = RollupTools.Canonical(sortBy, ResourceUseSortKeys, "sortBy");
         ScopeSelection selection = EventScope.Resolve(session, resourceRef.Handle, queueIndex, scope, markerPathPrefix);
         queueIndex ??= scope?.QueueIndex;
         if (queueIndex.HasValue) session.Get<GpuCaptureHandle>(resourceRef.Handle).Queue(queueIndex.Value);
@@ -605,15 +662,15 @@ public static class ResourceTools
                 FindResource(h, key);
                 if (!h.ResourceUses.TryGet(new(resourceRef.Handle, key), scope, out ResourceUsesSnapshot snapshot))
                     throw new InvalidOperationException("Resource-use preparation did not publish its completed snapshot.");
-                ResourceUseDto[] rows = snapshot.Items.Where(i => (!queueIndex.HasValue || i.Binding.EventRef?.QueueIndex == queueIndex.Value)
-                    && selection.Contains(h, i.Binding.EventRef)).ToArray();
+                ResourceUseDto[] rows = SortUses(snapshot.Items.Where(i => (!queueIndex.HasValue || i.Binding.EventRef?.QueueIndex == queueIndex.Value)
+                    && selection.Contains(h, i.Binding.EventRef) && (accessName is null || AccessOf(i) == accessName)).Select(Enrich), sort);
                 ResourceUseDto[] items = rows.Skip(offset).Take(limit).ToArray();
                 int? next = offset + (long)items.Length < rows.Length ? offset + items.Length : null;
                 return new ResourceUsesDto(new(resourceRef.Handle, key), snapshot.Evidence, rows.Length, offset, items.Length,
                     next, items, snapshot.Coverage)
                 {
                     NextCalls = next.HasValue ? [new("pix_gpu_resource_uses", new { resourceRef,
-                        offset = next.Value, limit, queueIndex, scope, markerPathPrefix })] : [],
+                        offset = next.Value, limit, queueIndex, scope, markerPathPrefix, access = accessName, sortBy = sort })] : [],
                     Scope = selection.DescribeOrNull(h),
                 };
             }, waitSeconds, cancellationToken).ConfigureAwait(false);
@@ -645,7 +702,7 @@ public static class ResourceTools
                     if (binding.Unavailable || binding.EventRef is null)
                         coverage.Add(new { viewIndex = i, bindingIndex = b, unavailable = true, reason = binding.Reason });
                     if (queueIndex.HasValue && binding.EventRef?.QueueIndex != queueIndex.Value) continue;
-                    if (total >= o && items.Count < l) items.Add(new(resourceRef, i, Json.EnumName(viewType), binding));
+                    if (total >= o && items.Count < l) items.Add(Enrich(new(resourceRef, i, Json.EnumName(viewType), binding)));
                     total++;
                 }
             }
@@ -675,99 +732,13 @@ public static class ResourceTools
             offset = page.NextOffset ?? 0;
         } while (page.NextOffset.HasValue);
         if (page.Coverage.Count == 0 && nativeRows.All(i => i.Binding.EventRef is not null))
-            return new(nativeRows, [], "nativeBinding");
+            return new(nativeRows.Select(Enrich).ToArray(), [], "nativeBinding");
 
         // Some PIX Preview builds return an empty PIX_EVENT_INFO for every native binding.
         // Per-event collections still provide an exact event context. Explicit scopes get
         // isolated indexes; publishing those as capture-wide would hide uses outside the scope.
         job.AddMessage("Native binding events unavailable; indexing per-event resource collections and captured API arguments...");
-        var rows = new List<ResourceUseDto>();
-        var coverage = new List<object>
-        {
-            new { feature = "nativeBindingEvents", state = "unavailable", resourceRef, nativeBindingCount = page.Total, scope,
-                reason = "PIX returned incomplete binding events. Navigation uses per-event draw/dispatch collections and explicit API object arguments; resource-view-only API arguments may be absent." },
-        };
-        var scan = new List<(QueueEntry Queue, EventRecord[] Events, EventRecord[] Selected)>();
-        foreach (QueueEntry queue in h.Queues.Where(q => scope is null || q.Index == scope.QueueIndex))
-        {
-            job.ThrowIfCancellationRequested();
-            EventRecord[] events = h.AllEvents(queue.Index);
-            scan.Add((queue, events, ResourceUseScanEvents(queue.Index, events, scope)));
-        }
-        long total = scan.Sum(q => (long)q.Selected.Length);
-        long completed = 0;
-        var progressTimer = System.Diagnostics.Stopwatch.StartNew();
-        job.SetProgress(0);
-        job.AddMessage($"Indexing {total} event(s)" + (scope is null ? " across the capture." : $" within queue {scope.QueueIndex} event {scope.EventIndex} and descendants."));
-        foreach (var (queue, events, selected) in scan)
-        {
-            foreach (EventRecord record in selected)
-            {
-                job.ThrowIfCancellationRequested();
-                if (progressTimer.Elapsed.TotalSeconds >= 2)
-                {
-                    job.SetProgress(total == 0 ? 0 : (float)completed / total);
-                    job.AddMessage($"Indexed {completed}/{total} event(s); reading queue {queue.Index} event {record.Index}.");
-                    progressTimer.Restart();
-                }
-                completed++;
-                var eventRef = new EventRef(h.Id, queue.Index, record.Index);
-                uint argumentIndex = 0;
-                foreach (var (parameter, objectId) in ResourceArguments(record.ApiCallData))
-                    rows.Add(new(new(h.Id, Interop.Hex(objectId)), null, "API_ARGUMENT",
-                        new BindingDto(argumentIndex++, "API_PARAMETER", eventRef,
-                            EventNavigation.MarkerPath(events, record.Index), new { parameter, apiCall = record.Name })
-                        { EventSource = "capturedApiArgument" }) { ViewIndexScope = "none" });
-                if (!Tools.MatchesKind(record, "work")) continue;
-                try
-                {
-                    PIX_EVENT_INFO info = h.EventInfo(queue.Index, record.Index);
-                    IPixProgramState state = PixApiExtensionsGpuCapture.GetProgramState(h.Document, ref info);
-                    IPixGenericPipeline pipeline = PixApiExtensionsGpuCaptureResources.GetGpuProgram<IPixGenericPipeline>(state);
-                    IPixResourceViewsAtEvent views = PixApiExtensionsGpuCaptureResources.GetResourceViews(pipeline);
-                    h.GetAnalysis().GetAccessedResources(views);
-                    for (uint i = 0; i < views.GetCount(); i++)
-                    {
-                        job.ThrowIfCancellationRequested();
-                        IPixD3D12Resource? resource;
-                        try
-                        {
-                            IPixD3D12ResourceView view = PixApiExtensionsGpuCaptureResources.GetResourceView<IPixD3D12ResourceView>(views, i);
-                            resource = PixApiExtensionsGpuCaptureResources.GetD3D12Resource(view);
-                        }
-                        catch (OperationCanceledException) { throw; }
-                        catch { continue; } // Samplers and root constants have no backing resource.
-                        if (resource is null) continue;
-                        var observedResource = new ResourceRef(h.Id, Interop.Hex(resource.GetApiObjectId()));
-                        PIX_RESOURCE_VIEW_TYPE type = PIX_RESOURCE_VIEW_TYPE.PIX_RESOURCE_NONE;
-                        _IPixResourceViews_Extensions.GetType(views, i, ref type);
-                        IPixResourceView resourceView = PixApiExtensionsGpuCaptureResources.GetResourceView<IPixResourceView>(views, i);
-                        IPixResourceViewBindings bindings = PixApiExtensionsGpuCaptureResources.GetResourceBindings(resourceView);
-                        var nativeBindings = new List<BindingDto>();
-                        for (uint b = 0; b < bindings.GetCount(); b++)
-                        {
-                            job.ThrowIfCancellationRequested();
-                            nativeBindings.Add(ReadBinding(bindings, b, h));
-                        }
-                        // The event-scoped collection proves the view is present here. Keep
-                        // native binding records separate; their empty events are not repaired
-                        // by guessing that every global binding belongs to this event.
-                        rows.Add(new(observedResource, i, Json.EnumName(type),
-                            new BindingDto(0, "VIEW_OBSERVED", eventRef, EventNavigation.MarkerPath(events, record.Index),
-                                new { nativeBindings }) { EventSource = "eventScopedView" }) { ViewIndexScope = "event" });
-                    }
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex) { coverage.Add(new { eventRef, unavailable = true, reason = PixErrors.Describe(ex) }); }
-            }
-        }
-        job.ThrowIfCancellationRequested();
-        var index = new ResourceUseIndex(rows, coverage);
-        job.ThrowIfCancellationRequested();
-        h.ResourceUses.PublishFallback(scope, index);
-        job.SetProgress(1);
-        job.AddMessage($"Indexed {completed}/{total} event(s), retaining {rows.Count} resource-use observation(s).");
-        return index.For(resourceRef);
+        return BuildFallbackIndex(h, job, scope, resourceRef, page.Total).For(resourceRef);
     }
 
     internal static EventRecord[] ResourceUseScanEvents(int queueIndex, EventRecord[] events, EventRef? scope)

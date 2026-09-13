@@ -74,6 +74,8 @@ public static class SessionTools
             },
             results = session.Results.Summary(),
             options = ServerOptions.Current.Describe(),
+            toolsets = Toolsets.Describe(),
+            textContent = ServerOptions.Current.TextContent,
             handles = session.Handles.Select(h => h.Summary()).ToArray(),
             jobs = jobs.All.Select(j => j.ToDto()).ToArray(),
         });

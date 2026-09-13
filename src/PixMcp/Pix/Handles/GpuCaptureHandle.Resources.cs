@@ -8,11 +8,24 @@ public sealed partial class GpuCaptureHandle
     private Exception? _accessedResourcesUnavailable;
     internal Exception? AccessedResourcesUnavailable => _accessedResourcesUnavailable;
     internal ResourceUseCache ResourceUses { get; } = new();
+    /// <summary>Resource summaries with size estimates; capture metadata, so never cleared with the analysis.</summary>
+    internal List<ResourceSummaryDto>? ResourceSummaryCache { get; set; }
 
     internal static Preparation<GpuCaptureHandle> AccessedResourcesPreparation(string handle)
         => new("accessed-resources", "accessed-resources", $"Gather accessed resources for {handle}",
             h => h.AccessedResourcesGathered, (h, job) => h.EnsureAccessedResources(job))
-        { JoinKeys = [PreparationKeys.InspectionBindings, PreparationKeys.InspectionTimingBindings] };
+        { JoinKeys = [PreparationKeys.Inspection] };
+
+    /// <summary>The capture-wide resource-use index: every event's views, API object arguments and barrier arguments, with access classes.</summary>
+    internal static Preparation<GpuCaptureHandle> ResourceUseIndexPreparation(string handle)
+        => new("resource-use-index", "resource-uses", $"Index resource uses across {handle}",
+            h => h.ResourceUses.CaptureWideIndex is not null, (h, job) =>
+            {
+                if (h.ResourceUses.CaptureWideIndex is not null) return;
+                h.EnsureAccessedResources(job);
+                ResourceTools.BuildFallbackIndex(h, job, null);
+            })
+        { JoinKeys = [PreparationKeys.AccessedResources, PreparationKeys.Inspection] };
 
     internal static Preparation<GpuCaptureHandle> ResourceUsesPreparation(string handle, string apiObjectId, EventRef? scope = null)
         => new("resource-uses:" + apiObjectId + (scope is null ? "" : $":scope:{scope.QueueIndex}:{scope.EventIndex}"),
@@ -62,6 +75,9 @@ internal sealed class ResourceUseCache
     private readonly Dictionary<EventRef, Dictionary<string, ResourceUsesSnapshot>> _scopedSnapshots = new();
     private readonly Dictionary<EventRef, ResourceUseIndex> _scopedFallback = new();
     private ResourceUseIndex? _fallback;
+
+    /// <summary>The published capture-wide index, or null until one exists.</summary>
+    internal ResourceUseIndex? CaptureWideIndex => _fallback;
 
     internal bool TryGet(ResourceRef resourceRef, EventRef? scope, out ResourceUsesSnapshot snapshot)
     {

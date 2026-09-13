@@ -18,11 +18,21 @@ public sealed class InspectionWorkflowTests
     }
 
     [Fact]
-    public void MissingTimingSentinelsAreNotReportedAsDurations()
+    public void InspectionSectionsShareOnePreparation()
     {
-        Assert.Null(InspectionTools.AvailableTime(ulong.MaxValue));
-        Assert.Equal(0ul, InspectionTools.AvailableTime(0));
-        Assert.Equal(123ul, InspectionTools.AvailableTime(123));
+        Assert.Equal(PreparationKeys.Inspection, InspectionTools.PreparationFor([InspectionSection.timing]));
+        Assert.Equal(PreparationKeys.Inspection, InspectionTools.PreparationFor([InspectionSection.bindings, InspectionSection.pipeline]));
+        Assert.Equal(PreparationKeys.Inspection, InspectionTools.PreparationFor([InspectionSection.hints]));
+        Assert.Equal(PreparationKeys.Inspection, InspectionTools.PreparationFor(InspectionTools.DefaultSections));
+        Assert.Equal(PreparationKeys.Analysis, InspectionTools.PreparationFor([InspectionSection.pipeline, InspectionSection.shaders, InspectionSection.targets]));
+        Assert.Equal(InspectionTools.CachedOnly, InspectionTools.PreparationFor([InspectionSection.counters, InspectionSection.occupancy, InspectionSection.hf]));
+
+        var timingOnly = InspectionTools.InspectionPreparation("gpu-1", needTiming: true, needBindings: false);
+        var bindingsOnly = InspectionTools.InspectionPreparation("gpu-1", needTiming: false, needBindings: true);
+        Assert.Equal(timingOnly.Key, bindingsOnly.Key);
+        Assert.Equal(new[] { PreparationKeys.Analysis, PreparationKeys.Timing, PreparationKeys.AccessedResources }, timingOnly.JoinKeys);
+        Assert.Contains(PreparationKeys.Inspection, PreparationKeys.StartingAnalysis);
+        Assert.Equal(new[] { PreparationKeys.Inspection, PreparationKeys.Occupancy }, PreparationKeys.CollectingTiming);
     }
 
     [Fact]

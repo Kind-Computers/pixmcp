@@ -59,7 +59,7 @@ public sealed class ToolAnnotationTests
             "pix_gpu_timing_events", "pix_gpu_timing_tree", "pix_gpu_counters_list", "pix_gpu_counters_read", "pix_gpu_occupancy", "pix_gpu_hf_counters",
             "pix_gpu_drpix_experiments", "pix_gpu_pipeline_state", "pix_gpu_shader_code", "pix_gpu_shader_search", "pix_gpu_shader_diagnostics",
             "pix_gpu_inspect_event", "pix_gpu_overview", "pix_gpu_event_resources", "pix_gpu_resource_uses", "pix_gpu_shaders", "pix_gpu_shader_uses",
-            "pix_correlate",
+            "pix_correlate", "pix_gpu_rollup", "pix_gpu_pipelines", "pix_gpu_queue_overlap", "pix_gpu_bubbles", "pix_gpu_resources", "pix_gpu_resource_timeline",
         ];
         foreach (string tool in replaying)
         {

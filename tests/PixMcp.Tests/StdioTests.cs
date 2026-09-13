@@ -5,6 +5,7 @@ using Xunit;
 
 namespace PixMcp.Tests;
 
+[Collection(GpuReplayCollection.Name)]
 public class StdioTests
 {
     [SkippableFact]
@@ -100,6 +101,7 @@ public class StdioTests
             clientInfo = new { name = "pixmcp-tests", version = "1" },
         });
         Assert.Equal("pixmcp", initialized.GetProperty("result").GetProperty("serverInfo").GetProperty("name").GetString());
+        Assert.Equal(ServerHost.Instructions, initialized.GetProperty("result").GetProperty("instructions").GetString());
         await server.Notify("notifications/initialized");
 
         JsonElement listed = (await server.Send("tools/list")).GetProperty("result");
@@ -142,6 +144,15 @@ public class StdioTests
         JsonElement missingHandle = (await server.Send("resources/read", new { uri = "pix://handles/nope" })).GetProperty("result").GetProperty("contents");
         using (var body = JsonDocument.Parse(Assert.Single(missingHandle.EnumerateArray()).GetProperty("text").GetString()!))
             Assert.Equal("unknown_handle", body.RootElement.GetProperty("code").GetString());
+        JsonElement promptList = (await server.Send("prompts/list")).GetProperty("result");
+        string?[] promptNames = promptList.GetProperty("prompts").EnumerateArray().Select(p => p.GetProperty("name").GetString()).ToArray();
+        Assert.Equal(3600000, promptList.GetProperty("ttlMs").GetInt64());
+        Assert.Equal(Playbooks.All.Select(p => p.Name).Order(StringComparer.Ordinal), promptNames);
+        JsonElement prompt = (await server.Send("prompts/get", new { name = "pix_frame_budget", arguments = new { handle = "gpu-9" } })).GetProperty("result");
+        string promptText = prompt.GetProperty("messages")[0].GetProperty("content").GetProperty("text").GetString()!;
+        Assert.Contains("\"handle\":\"gpu-9\"", promptText);
+        Assert.Contains("pix_gpu_overview", promptText);
+
         foreach (JsonElement tool in tools.EnumerateArray())
         {
             string name = tool.GetProperty("name").GetString()!;
@@ -237,6 +248,83 @@ public class StdioTests
         }
     }
 
+    [SkippableFact]
+    public async Task ToolsetsHideToolsAndPromptsAndSummaryModeShortensText()
+    {
+        Skip.If(PixDiscovery.InstallDir is null, "The server only starts with a PIX Preview install; discovery found none.");
+        ProcessStartInfo start = ServerStart();
+        start.Environment["PIXMCP_TOOLSETS"] = "gpu";
+        start.Environment["PIXMCP_TEXT_CONTENT"] = "summary";
+        await using var server = new StdioClient(start);
+        await server.Send("initialize", new { protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "pixmcp-tests", version = "1" } });
+        await server.Notify("notifications/initialized");
+
+        JsonElement tools = (await server.Send("tools/list")).GetProperty("result").GetProperty("tools");
+        string?[] names = tools.EnumerateArray().Select(t => t.GetProperty("name").GetString()).ToArray();
+        Assert.Contains("pix_gpu_overview", names);
+        Assert.Contains("pix_info", names);
+        Assert.DoesNotContain("pix_dump_open", names);
+        Assert.DoesNotContain("pix_timing_sql", names);
+        Assert.DoesNotContain("pix_gpu_sql", names);
+
+        JsonElement disabled = (await server.Send("tools/call", new { name = "pix_dump_open", arguments = new { path = "missing.dxdmp_preview" } })).GetProperty("result");
+        Assert.True(disabled.GetProperty("isError").GetBoolean());
+        Assert.Equal("tool_disabled", disabled.GetProperty("structuredContent").GetProperty("code").GetString());
+
+        JsonElement info = (await server.Send("tools/call", new { name = "pix_info", arguments = new { } })).GetProperty("result");
+        string text = info.GetProperty("content")[0].GetProperty("text").GetString()!;
+        Assert.InRange(System.Text.Encoding.UTF8.GetByteCount(text), 1, 512);
+        Assert.Contains("Full result in structuredContent", text);
+        JsonElement structured = info.GetProperty("structuredContent");
+        Assert.Equal(new[] { "gpu", "session" }, structured.GetProperty("toolsets").GetProperty("enabled").EnumerateArray().Select(v => v.GetString()));
+        Assert.Equal("summary", structured.GetProperty("textContent").GetString());
+        OutputSchemaTests.AssertMatches(structured, tools.EnumerateArray().Single(t => t.GetProperty("name").GetString() == "pix_info").GetProperty("outputSchema"));
+
+        string?[] prompts = (await server.Send("prompts/list")).GetProperty("result").GetProperty("prompts").EnumerateArray().Select(p => p.GetProperty("name").GetString()).ToArray();
+        Assert.Contains("pix_frame_budget", prompts);
+        Assert.DoesNotContain("pix_crash_triage", prompts);
+        Assert.DoesNotContain("pix_cpu_vs_gpu", prompts);
+        JsonElement hidden = await server.Send("prompts/get", new { name = "pix_crash_triage" });
+        Assert.True(hidden.TryGetProperty("error", out _), hidden.GetRawText());
+        Assert.Equal(0, await server.Close());
+    }
+
+    [SkippableFact]
+    public async Task ForwardsReplayProgressToAClientThatSendsAProgressToken()
+    {
+        Skip.If(PixDiscovery.InstallDir is null, "The server only starts with a PIX Preview install; discovery found none.");
+        string? capture = TestArtifacts.Capture;
+        Skip.If(capture is null || !TestArtifacts.AnalysisEnabled, "Set PIX_TEST_CAPTURE and PIX_TEST_ANALYSIS=1 to replay a capture.");
+        // PIX refuses (0x8ABC000B) a capture that another process already has open, and the in-process native tests may hold this one.
+        using var directory = new DirectoryCleanup();
+        string copy = Path.Combine(directory.Path, "progress.wpix");
+        File.Copy(capture!, copy);
+        await using var server = new StdioClient(ServerStart());
+        await server.Send("initialize", new { protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "pixmcp-tests", version = "1" } });
+        await server.Notify("notifications/initialized");
+        JsonElement opened = (await server.Send("tools/call", new { name = "pix_gpu_open", arguments = new { path = copy } })).GetProperty("result");
+        JsonElement openedContent = default, openedHandle = default;
+        Assert.True(opened.TryGetProperty("structuredContent", out openedContent) && openedContent.TryGetProperty("handle", out openedHandle), opened.GetRawText());
+        string handle = openedHandle.GetString()!;
+
+        JsonElement prepared = (await server.Send("tools/call", new Dictionary<string, object?>
+        {
+            ["name"] = "pix_gpu_timing_prepare",
+            ["arguments"] = new { handle, waitSeconds = 600 },
+            ["_meta"] = new { progressToken = "timing-progress" },
+        }, TimeSpan.FromMinutes(10))).GetProperty("result");
+        Assert.False(prepared.TryGetProperty("isError", out JsonElement isError) && isError.GetBoolean(), prepared.GetRawText());
+        Assert.True(prepared.GetProperty("structuredContent").GetProperty("status").GetString() == "succeeded", prepared.GetRawText());
+        JsonElement[] progress = server.Notifications
+            .Where(n => n.GetProperty("method").GetString() == "notifications/progress"
+                && n.GetProperty("params").GetProperty("progressToken").GetString() == "timing-progress").ToArray();
+        Assert.True(progress.Length >= 2, $"{progress.Length} progress notifications");
+        double[] values = progress.Select(n => n.GetProperty("params").GetProperty("progress").GetDouble()).ToArray();
+        Assert.Equal(values.Order(), values);
+        Assert.Equal(100, values[^1]);
+        Assert.Equal(0, await server.Close());
+    }
+
     private static ProcessStartInfo ServerStart()
     {
         var start = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "PixMcp.exe"))
@@ -254,6 +342,8 @@ public class StdioTests
         private readonly Task<string> _stderr;
         private int _id;
         private bool _closed;
+        /// <summary>Server notifications read while waiting for responses.</summary>
+        public List<JsonElement> Notifications { get; } = new();
 
         public StdioClient(ProcessStartInfo start)
         {
@@ -267,21 +357,22 @@ public class StdioTests
             await _process.StandardInput.FlushAsync();
         }
 
-        public async Task<JsonElement> Send(string method, object? parameters = null)
+        public async Task<JsonElement> Send(string method, object? parameters = null, TimeSpan? timeout = null)
         {
             int id = ++_id;
             await _process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { jsonrpc = "2.0", id, method, @params = parameters }));
             await _process.StandardInput.FlushAsync();
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            using var deadline = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(30));
             while (true)
             {
-                string? line = await _process.StandardOutput.ReadLineAsync(timeout.Token);
+                string? line = await _process.StandardOutput.ReadLineAsync(deadline.Token);
                 Assert.True(line is not null, "Server closed stdout: " + (_stderr.IsCompleted ? await _stderr : "stderr still open"));
                 using JsonDocument document = JsonDocument.Parse(line!);
                 JsonElement response = document.RootElement;
                 Assert.Equal("2.0", response.GetProperty("jsonrpc").GetString());
                 if (response.TryGetProperty("id", out JsonElement responseId) && responseId.GetInt32() == id)
                     return response.Clone();
+                if (!response.TryGetProperty("id", out _) && response.TryGetProperty("method", out _)) Notifications.Add(response.Clone());
             }
         }
 

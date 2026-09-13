@@ -89,15 +89,18 @@ public sealed class PartialResultTests
         OutputSchemaTests.AssertMatches(section, StructuredToolResults.Export<PendingSectionDto>());
 
         var overview = new CaptureOverviewDto("gpu-1",
+            new OverviewCaptureDto("capture.wpix", 29, 1, new VendorIdentity(GpuVendor.Nvidia, "GPU", "captureQueueAdapter"), new OverviewFrameInfoDto(1, 0, "indexOnly", null), OverviewBuilder.Semantics),
             [new QueueOverviewDto(0, "Graphics", "direct", 29, new Dictionary<string, int> { ["work"] = 4 }, null)],
-            new Dictionary<string, CapabilityDto>(), null, null, [], [], [new("pix_job_wait", new { jobId = "job-1" }, "job")])
+            new Dictionary<string, CapabilityDto>(), null, null, [], [], null, null, [new("pix_job_wait", new { jobId = "job-1" }, "job")])
         { Timing = JsonSerializer.Deserialize<PendingSectionDto>(section.GetRawText(), Json.Options) };
         OutputSchemaTests.AssertMatches(JsonSerializer.SerializeToElement(overview, Json.Options), StructuredToolResults.SchemaFor("pix_gpu_overview"));
 
         PendingSectionDto pending = JsonSerializer.Deserialize<PendingSectionDto>(section.GetRawText(), Json.Options)!;
+        var sectionPending = new InspectionPendingDto(true, pending.JobId);
         var inspection = new EventInspectionDto(new EventRef("gpu-1", 0, 3), ["Frame"],
-            new EventDto(0, 3, 7, 1, "DrawInstanced(3,1,0,0)", "DrawInstanced(3,1,0,0)", 1, null), pending, pending, pending, [])
-        { Preparation = pending, NextCalls = pending.NextCalls };
+            new EventDto(0, 3, 7, 1, "DrawInstanced(3,1,0,0)", "DrawInstanced(3,1,0,0)", 1, null), "draw", ApiCallParser.Parse("DrawInstanced(3,1,0,0)"),
+            sectionPending, sectionPending, sectionPending, [])
+        { Targets = sectionPending, Hints = sectionPending, Preparation = pending, NextCalls = pending.NextCalls };
         OutputSchemaTests.AssertMatches(JsonSerializer.SerializeToElement(inspection, Json.Options), StructuredToolResults.SchemaFor("pix_gpu_inspect_event"));
         gate.Release.Set();
     }

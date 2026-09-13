@@ -290,6 +290,13 @@ public static class PipelineTools
         return shaders.Get<IPixShader>((ulong)shaderRef.ShaderIndex);
     }
 
+    /// <summary>HLSL of a shader's first code node, or null when PIX has no HLSL for it.</summary>
+    internal static string? ReadHlsl(GpuCaptureHandle h, ShaderRef shaderRef)
+    {
+        IPixCollection nodes = ReadNodes(ReadShader(h, shaderRef), Tools.ParseEnum<PIX_SHADER_CODE_TYPE>("HLSL"));
+        return nodes.GetCount() == 0 ? null : ReadCode(nodes, 0);
+    }
+
     [McpServerTool(Name = "pix_gpu_shader_code", Title = "Shader code", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Retrieve HLSL, IL or ISA using one-based line windows. Every line is retrievable with nextStartLine. Code nodes are paged independently; nodeIndex=-1 lists nodes only.")]
     public static Task<string> ShaderCode(PixSession session, JobManager jobs,
         [Description("Shader reference returned by pipeline inspection.")] ShaderRef shaderRef,
