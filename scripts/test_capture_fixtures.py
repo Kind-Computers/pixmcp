@@ -38,7 +38,7 @@ class FakeInvestigator:
 
 
 class FixtureMainTests(unittest.TestCase):
-    def invoke(self, *, cleanup_error=None, shutdown_error=None, server_exit=0, fixture_error=None, primary_error=None):
+    def invoke(self, *, cleanup_error=None, shutdown_error=None, server_exit=0, fixture_error=None, primary_error=None, adapter_name=None):
         client = Mock(timeout=60)
         client.call.side_effect = cleanup_error
         client.close.side_effect = shutdown_error
@@ -53,11 +53,15 @@ class FixtureMainTests(unittest.TestCase):
             for path in (app, app.with_suffix(".pdb"), directory / "WinPixEventRuntime.dll"):
                 path.write_bytes(b"mock dependency")
             stderr = io.StringIO()
-            with patch("sys.argv", ["capture_fixtures.py", "server.exe", "--app", str(app), "--output-dir", str(directory)]), \
+            arguments = ["capture_fixtures.py", "server.exe", "--app", str(app), "--output-dir", str(directory)]
+            if adapter_name is not None:
+                arguments += ["--adapter-name", adapter_name]
+            with patch("sys.argv", arguments), \
                     patch("capture_fixtures.Client", return_value=client), \
-                    patch("capture_fixtures.generate", return_value=generated, side_effect=primary_error), \
+                    patch("capture_fixtures.generate", return_value=generated, side_effect=primary_error) as generated_call, \
                     patch("sys.stdout", new=io.StringIO()), patch("sys.stderr", new=stderr):
                 status = main()
+                self.assertEqual(adapter_name, generated_call.call_args.kwargs["adapter_name"])
             report = json.loads((directory / "fixture-report.json").read_text(encoding="utf-8"))
         client.call.assert_called_once_with("pix_close_all")
         client.close.assert_called_once_with()
@@ -70,6 +74,19 @@ class FixtureMainTests(unittest.TestCase):
         self.assertEqual(0, report["serverExitCode"])
         self.assertEqual([], report["errors"])
         self.assertEqual("", stderr)
+
+    def test_cli_passes_adapter_filter_to_generation(self):
+        status, report, _ = self.invoke(adapter_name="Intel Arc B580")
+        self.assertEqual(0, status)
+        self.assertEqual([], report["errors"])
+
+    def test_cli_rejects_empty_adapter_filter_before_starting_server(self):
+        with patch("sys.argv", ["capture_fixtures.py", "server.exe", "--adapter-name", "  "]), \
+                patch("capture_fixtures.Client") as client, patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                main()
+        self.assertEqual(2, error.exception.code)
+        client.assert_not_called()
 
     def test_cleanup_errors_fail_and_still_close(self):
         for error in (SmokeError("tool cleanup failed"), OSError("cleanup pipe failed")):
@@ -118,6 +135,32 @@ class FixtureMainTests(unittest.TestCase):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_adapter_filter_is_quoted_for_both_gpu_and_timing_launches(self):
+        # Spaces, embedded quotes and a trailing slash must remain one Win32 argument.
+        adapter_name = 'Intel Arc "B580"\\'
+        with tempfile.TemporaryDirectory() as folder:
+            agent = FakeInvestigator(folder)
+            with patch("capture_fixtures.Investigator", return_value=agent):
+                report = generate(None, Path(folder) / "app.exe", Path(folder) / "out",
+                                  sleep=lambda _: None, adapter_name=adapter_name)
+            self.assertEqual([], report["errors"])
+            launches = [row["arguments"] for row in agent.calls if row["tool"] == "pix_device_launch"]
+            self.assertEqual([True, True, False], [row["underGpuCapture"] for row in launches])
+            expected_suffix = r'--adapter-name "Intel Arc \"B580\"\\"'
+            for launch in launches:
+                self.assertTrue(launch["arguments"].endswith(expected_suffix), launch["arguments"])
+                self.assertEqual(1, launch["arguments"].count("--adapter-name"))
+            self.assertEqual(adapter_name, report["requestedAdapterName"])
+            self.assertEqual([row["arguments"] for row in launches],
+                             [row["arguments"] for row in report["launches"]])
+
+    def test_empty_adapter_filter_is_rejected_before_any_mcp_work(self):
+        with patch("capture_fixtures.Investigator") as agent:
+            for adapter_name in ("", " \t", "B580\0"):
+                with self.subTest(adapter_name=adapter_name), self.assertRaises(ValueError):
+                    generate(None, "unused.exe", "unused-output", adapter_name=adapter_name)
+        agent.assert_not_called()
+
     def test_cleanup_failure_keeps_the_original_capture_error(self):
         with tempfile.TemporaryDirectory() as folder:
             agent = FakeInvestigator(folder, fail_baseline=True)
@@ -150,6 +193,8 @@ class FixtureTests(unittest.TestCase):
             self.assertTrue(calls[timing_start]["arguments"]["captureSysmonCounters"])
             self.assertEqual(3, sum(row["tool"] == "pix_device_detach" for row in calls))
             self.assertTrue(all("--hang" not in row["arguments"].get("arguments", "") for row in calls))
+            self.assertTrue(all("--adapter-name" not in row["arguments"].get("arguments", "") for row in calls))
+            self.assertIsNone(report["requestedAdapterName"])
             self.assertEqual("pix_device_detach", calls[-1]["tool"])
             persisted = json.loads((Path(folder) / "out" / "fixture-report.json").read_text(encoding="utf-8"))
             self.assertEqual(3, len(persisted["fixtures"]))

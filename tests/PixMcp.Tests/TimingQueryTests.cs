@@ -65,6 +65,31 @@ public sealed class TimingQueryTests
     }
 
     [Fact]
+    public void ExecutionTimingMatchesEveryPageEventIdAndItsExactOccurrence()
+    {
+        using var fixture = new Fixture();
+        fixture.Execute("""
+            INSERT INTO PixCpuExecution VALUES(200,240,1,1,2,0),(300,330,0,1,2,0);
+            INSERT INTO PixCpuExecutionTimes VALUES
+                (40,31,9,1,200,240),(40,22,18,2,200,240),(30,12,18,2,300,330),
+                (30,29,1,1,300,330),(40,39,1,99,200,240);
+            """);
+        using var database = fixture.Open();
+        TimingEventsDto page = database.Events("timing-1", "cpu", 42, 7, null, null, 190, 340, "start", 0, 25);
+        Assert.Equal(3, page.Events.Total);
+        Assert.All(page.Events.Items, row => Assert.Equal("available", row.ExecutionTimingState));
+        RecordedTimingEventDto firstId = Assert.Single(page.Events.Items, row => row.EventId == "1");
+        Assert.Equal("31", firstId.ExecutionNs);
+        Assert.Equal("9", firstId.StallNs);
+        RecordedTimingEventDto sameInterval = Assert.Single(page.Events.Items, row => row.EventId == "2" && row.BeginNs == "200");
+        Assert.Equal("22", sameInterval.ExecutionNs);
+        Assert.Equal("18", sameInterval.StallNs);
+        RecordedTimingEventDto repeatedId = Assert.Single(page.Events.Items, row => row.EventId == "2" && row.BeginNs == "300");
+        Assert.Equal("12", repeatedId.ExecutionNs);
+        Assert.Equal("18", repeatedId.StallNs);
+    }
+
+    [Fact]
     public void CounterMetadataAndExactSamplePagesPreserveUnitsAndBoundaries()
     {
         using var fixture = new Fixture();

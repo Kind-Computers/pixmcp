@@ -127,7 +127,11 @@ internal sealed partial class TimingDatabase
                         " JOIN wanted w ON w.Id=cpu.EventId AND w.BeginTime=cpu.BeginTimestamp AND w.EndTime=cpu.EndTimestamp" +
                         " GROUP BY cpu.EventId,cpu.BeginTimestamp,cpu.EndTimestamp)" +
                         " SELECT e.EventId,e.BeginTimestamp,e.EndTimestamp,e.Execution,e.Stall,c.Total FROM PixCpuExecutionTimes e" +
-                        " JOIN occurrences c ON c.EventId=e.EventId AND c.BeginTimestamp=e.BeginTimestamp AND c.EndTimestamp=e.EndTimestamp";
+                        " JOIN occurrences c ON c.EventId=e.EventId AND c.BeginTimestamp=e.BeginTimestamp AND c.EndTimestamp=e.EndTimestamp" +
+                        // PixStorage recognizes this explicit EventId constraint; deriving it from
+                        // the join alone can enumerate execution/stall timing for the entire capture.
+                        // Keep the exact tuple join and cross-lane occurrence count unchanged.
+                        " WHERE e.EventId IN (" + string.Join(",", Enumerable.Range(0, wanted.Length).Select(i => $"$id{i}")) + ")";
                     foreach (var row in Rows(timingSql,
                         r => (id: Id(r, 0), begin: Id(r, 1), end: Id(r, 2), execution: Number(r, 3), stall: Number(r, 4), occurrences: Number(r, 5)), timingParameters.ToArray()))
                     {

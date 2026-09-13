@@ -5,7 +5,7 @@ namespace PixMcp.Pix;
 
 public sealed record ImageCrop(int X, int Y, int Width, int Height);
 internal sealed record RenderedImage(byte[] Png, uint OriginalWidth, uint OriginalHeight, uint Width, uint Height,
-    ImageCrop? Crop, bool Resized);
+    ImageCrop? Crop, bool Resized, bool AlphaIgnored = false);
 
 /// <summary>Transforms detached PNG data using the Windows codecs; never enters the PIX worker.</summary>
 internal static class ImageRenderer
@@ -14,7 +14,7 @@ internal static class ImageRenderer
     private const ulong MaxDecodedPixels = 64 * 1024 * 1024;
 
     internal static async Task<RenderedImage> Render(byte[] png, ImageCrop? crop = null, int? maxDimension = null,
-        CancellationToken cancellationToken = default)
+        bool ignoreAlpha = false, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var (originalWidth, originalHeight) = Tools.PreviewTools.PngDimensions(png);
@@ -22,7 +22,7 @@ internal static class ImageRenderer
         uint width = (uint)(crop?.Width ?? (int)originalWidth), height = (uint)(crop?.Height ?? (int)originalHeight);
         int? bound = maxDimension ?? (png.Length > MaxInlineBytes ? 1024 : null);
         var (outputWidth, outputHeight) = Fit(width, height, bound);
-        if (crop is null && outputWidth == width && outputHeight == height && png.Length <= MaxInlineBytes)
+        if (!ignoreAlpha && crop is null && outputWidth == width && outputHeight == height && png.Length <= MaxInlineBytes)
             return new(png, originalWidth, originalHeight, width, height, null, false);
         if ((ulong)originalWidth * originalHeight > MaxDecodedPixels)
             throw new PixToolException("image_too_large", "The image exceeds the 64 megapixel decoding limit. Retrieve its original bytes instead.");
@@ -41,9 +41,27 @@ internal static class ImageRenderer
             transform.Bounds = new BitmapBounds { X = (uint)crop.X, Y = (uint)crop.Y, Width = (uint)crop.Width, Height = (uint)crop.Height };
         // Windows transforms scale before cropping. A crop-only decode followed by resize-only
         // encoding preserves our contract that crop coordinates always refer to original pixels.
-        using SoftwareBitmap bitmap = await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied,
+        // Render-target alpha need not represent opacity. Ignore it during decoding,
+        // before premultiplication could destroy useful RGB values where alpha is zero.
+        using SoftwareBitmap bitmap = await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8,
+            ignoreAlpha ? BitmapAlphaMode.Ignore : BitmapAlphaMode.Premultiplied,
             transform, ExifOrientationMode.IgnoreExifOrientation, ColorManagementMode.DoNotColorManage)
             .AsTask(cancellationToken).ConfigureAwait(false);
+        if (ignoreAlpha)
+        {
+            // Ignore prevents alpha multiplication while decoding, but the Windows
+            // PNG encoder still reads the stored alpha bytes when scaling/encoding.
+            // Make those bytes opaque before either operation can consume them.
+            var pixels = new byte[checked(bitmap.PixelWidth * bitmap.PixelHeight * 4)];
+            var buffer = new Windows.Storage.Streams.Buffer((uint)pixels.Length);
+            bitmap.CopyToBuffer(buffer);
+            using (DataReader reader = DataReader.FromBuffer(buffer)) reader.ReadBytes(pixels);
+            for (int i = 3; i < pixels.Length; i += 4) pixels[i] = 255;
+            cancellationToken.ThrowIfCancellationRequested();
+            using var writer = new DataWriter();
+            writer.WriteBytes(pixels);
+            bitmap.CopyFromBuffer(writer.DetachBuffer());
+        }
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -61,7 +79,7 @@ internal static class ImageRenderer
                 byte[] rendered = new byte[(int)output.Size];
                 reader.ReadBytes(rendered);
                 return new(rendered, originalWidth, originalHeight, outputWidth, outputHeight, crop,
-                    outputWidth != width || outputHeight != height);
+                    outputWidth != width || outputHeight != height, ignoreAlpha);
             }
             (outputWidth, outputHeight) = Fit(width, height, Math.Max(1, (int)Math.Max(outputWidth, outputHeight) / 2));
         }

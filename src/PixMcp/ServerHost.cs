@@ -76,7 +76,7 @@ internal static class ServerHost
                     "pix_csv_compare uses optional pixdiff to compare recorded Unreal CSVs (candidate minus baseline, median by default). " +
                     "Read the saved resultRef and use pix_csv_pass_candidates to locate possible PIX markers by CSV pass name. " +
                     "CSV comparisons run independently of the PIX worker. Name matches do not establish identity or make CSV and replay timings equivalent. " +
-                    "pix_gpu_preview_image retrieves preview or screenshot artifacts with optional crop/maxDimension; byte retrieval preserves originals. " +
+                    "pix_gpu_preview_image retrieves preview or screenshot artifacts with optional crop/maxDimension; use ignoreAlpha=true to view stored RGB as opaque when render-target alpha hides scene colors. Byte retrieval preserves originals. " +
                     "Live GPU capture waits for target readiness (default 30 seconds) with optional warmup (default zero). " +
                     "Cancellation is best effort; cancellationRequested does not mean an operation was interrupted. " +
                     "Call pix_close when done with a handle.";

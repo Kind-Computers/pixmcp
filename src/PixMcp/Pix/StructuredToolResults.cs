@@ -360,7 +360,7 @@ internal static class StructuredToolResults
 
     // The preview tools return mixed MCP content, so these describe only their JSON metadata.
     private sealed record PreviewImageSchemaDto(string ArtifactRef, string MimeType, int PngBytes,
-        uint? OriginalWidth, uint? OriginalHeight, uint? Width, uint? Height, ImageCrop? Crop, bool? Resized);
+        uint? OriginalWidth, uint? OriginalHeight, uint? Width, uint? Height, ImageCrop? Crop, bool? Resized, bool AlphaIgnored);
     private sealed record PreviewBytesSchemaDto(string ArtifactRef, string MimeType, int Offset,
         int TotalBytes, int ReturnedBytes, string Base64, int? NextOffset, IReadOnlyList<ToolCallDto>? NextCalls);
 }

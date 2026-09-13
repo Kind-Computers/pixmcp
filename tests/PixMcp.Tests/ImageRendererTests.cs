@@ -20,6 +20,39 @@ public sealed class ImageRendererTests
         Assert.Same(original, rendered.Png);
         Assert.Equal((2u, 1u), (rendered.Width, rendered.Height));
         Assert.False(rendered.Resized);
+        Assert.False(rendered.AlphaIgnored);
+    }
+
+    [Fact]
+    public async Task OpaqueRgbViewKeepsTransparentColorsAndBypassesOriginalFastPath()
+    {
+        byte[] original = PngImage(2, 1, [240, 80, 40, 0, 20, 180, 100, 128]);
+        byte[] retained = original.ToArray();
+        RenderedImage normal = await ImageRenderer.Render(original);
+        Assert.Same(original, normal.Png);
+        Assert.False(normal.AlphaIgnored);
+
+        RenderedImage opaque = await ImageRenderer.Render(original, ignoreAlpha: true);
+        Assert.NotSame(original, opaque.Png);
+        Assert.False(opaque.Resized);
+        Assert.True(opaque.AlphaIgnored);
+        Assert.Equal(new byte[] { 240, 80, 40, 255, 20, 180, 100, 255 }, await Pixels(opaque.Png));
+        Assert.Equal(retained, original);
+        using var result = System.Text.Json.JsonDocument.Parse(Json.Serialize(PreviewTools.ImageResult("preview-test", opaque)));
+        Assert.True(result.RootElement.GetProperty("structuredContent").GetProperty("alphaIgnored").GetBoolean());
+    }
+
+    [Fact]
+    public async Task OpaqueRgbViewDiscardsAlphaBeforeCroppingAndScaling()
+    {
+        byte[] original = PngImage(4, 2, [
+            255, 0, 0, 255, 255, 0, 0, 255, 24, 120, 200, 0, 24, 120, 200, 0,
+            255, 0, 0, 255, 255, 0, 0, 255, 24, 120, 200, 0, 24, 120, 200, 0]);
+        RenderedImage opaque = await ImageRenderer.Render(original, new(2, 0, 2, 2), 1, ignoreAlpha: true);
+        Assert.True(opaque.Resized);
+        Assert.True(opaque.AlphaIgnored);
+        Assert.Equal((1u, 1u), (opaque.Width, opaque.Height));
+        Assert.Equal(new byte[] { 24, 120, 200, 255 }, await Pixels(opaque.Png));
     }
 
     [Fact]
@@ -55,6 +88,33 @@ public sealed class ImageRendererTests
         Assert.True(rendered.Png.Length <= ImageRenderer.MaxInlineBytes);
         Assert.InRange(rendered.Width, 1u, 1024u);
         Assert.Equal(rendered.Width / 2, rendered.Height);
+        Assert.Same(original, artifacts.Get(reference, _ => true));
+    }
+
+    [Fact]
+    public async Task OversizedTransparentRenderTargetProducesVisibleOpaqueThumbnail()
+    {
+        const int width = 2048, height = 1024;
+        var pixels = new byte[width * height * 4];
+        new Random(9).NextBytes(pixels);
+        for (int i = 3; i < pixels.Length; i += 4) pixels[i] = 0;
+        // A known flat patch makes the resampling assertion independent of random noise.
+        for (int y = 0; y < 64; y++)
+            for (int x = 0; x < 64; x++)
+            {
+                int i = (y * width + x) * 4;
+                pixels[i] = 160; pixels[i + 1] = 80; pixels[i + 2] = 40;
+            }
+        byte[] original = PngImage(width, height, pixels);
+        Assert.True(original.Length > ImageRenderer.MaxInlineBytes);
+        var artifacts = new PreviewArtifacts();
+        string reference = artifacts.Add("gpu-1", original);
+        RenderedImage rendered = await ImageRenderer.Render(artifacts.Get(reference, _ => true), ignoreAlpha: true);
+        Assert.True(rendered.Resized);
+        Assert.True(rendered.AlphaIgnored);
+        Assert.True(rendered.Png.Length <= ImageRenderer.MaxInlineBytes);
+        Assert.Equal((1024u, 512u), (rendered.Width, rendered.Height));
+        Assert.Equal(new byte[] { 160, 80, 40, 255 }, (await Pixels(rendered.Png))[..4]);
         Assert.Same(original, artifacts.Get(reference, _ => true));
     }
 

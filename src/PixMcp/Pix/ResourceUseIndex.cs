@@ -1,6 +1,6 @@
 namespace PixMcp.Pix;
 
-/// <summary>Detached capture-wide evidence. A fallback scan publishes this only after completing.</summary>
+/// <summary>Detached evidence for a completed capture-wide or scoped fallback scan.</summary>
 internal sealed class ResourceUseIndex
 {
     private readonly IReadOnlyDictionary<string, ResourceUseDto[]> _byResource;

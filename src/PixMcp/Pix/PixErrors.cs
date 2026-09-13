@@ -30,6 +30,9 @@ public static class PixErrors
     {
         COMException com => com.HResult,
         ExternalException ext => ext.ErrorCode,
+        // COM interop projects E_NOTIMPL to this managed exception, not COMException.
+        // Preserve its HRESULT so optional native capabilities can cache unsupported.
+        NotImplementedException notImplemented => notImplemented.HResult,
         _ => null,
     };
 

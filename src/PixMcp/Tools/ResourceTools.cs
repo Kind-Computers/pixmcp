@@ -571,7 +571,7 @@ public static class ResourceTools
         };
     }
 
-    [McpServerTool(Name = "pix_gpu_resource_uses", ReadOnly = true), Description("Find observed bindings of a resource, with event references, marker paths, shader stages, registers and binding locations. This is binding/access evidence, not proof of pixel provenance. Missing binding events are reported in coverage.")]
+    [McpServerTool(Name = "pix_gpu_resource_uses", ReadOnly = true), Description("Find observed bindings of a resource, with event references, marker paths, shader stages, registers and binding locations. This is binding/access evidence, not proof of pixel provenance. Missing binding events are reported in coverage. An explicit scope bounds fallback event inspection to that event and its descendants; initial accessed-resource gathering remains capture-wide.")]
     public static async Task<string> ResourceUses(PixSession session, JobManager jobs, ResourceRef resourceRef,
         int offset = 0, int limit = Paging.DefaultLimit, int? queueIndex = null,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
@@ -586,10 +586,11 @@ public static class ResourceTools
         // join an active index job. The preparation validates resource existence before replay.
         string key = Interop.Hex(Tools.ParseId(resourceRef.ApiObjectId, "apiObjectId"));
         return await Tools.RunWhenReady(session, jobs, "pix_gpu_resource_uses", resourceRef.Handle,
-            GpuCaptureHandle.ResourceUsesPreparation(resourceRef.Handle, key), h =>
+            GpuCaptureHandle.ResourceUsesPreparation(resourceRef.Handle, key, scope), h =>
             {
                 FindResource(h, key);
-                ResourceUsesSnapshot snapshot = h.ResourceUseFallbackIndex?.For(new(resourceRef.Handle, key)) ?? h.ResourceUseSnapshots[key];
+                if (!h.ResourceUses.TryGet(new(resourceRef.Handle, key), scope, out ResourceUsesSnapshot snapshot))
+                    throw new InvalidOperationException("Resource-use preparation did not publish its completed snapshot.");
                 ResourceUseDto[] rows = snapshot.Items.Where(i => (!queueIndex.HasValue || i.Binding.EventRef?.QueueIndex == queueIndex.Value)
                     && EventScope.Contains(h, i.Binding.EventRef, scope)).ToArray();
                 ResourceUseDto[] items = rows.Skip(offset).Take(limit).ToArray();
@@ -604,7 +605,7 @@ public static class ResourceTools
     }
 
     internal static ResourceUsesDto QueryResourceUses(GpuCaptureHandle h, ResourceRef resourceRef,
-        int offset = 0, int limit = Paging.DefaultLimit, int? queueIndex = null)
+        int offset = 0, int limit = Paging.DefaultLimit, int? queueIndex = null, Job? job = null)
     {
         (int o, int l) = Paging.Normalize(offset, limit);
         if (queueIndex.HasValue) h.Queue(queueIndex.Value);
@@ -615,6 +616,7 @@ public static class ResourceTools
         long total = 0;
         for (uint i = 0; i < views.GetCount(); i++)
         {
+            job?.ThrowIfCancellationRequested();
             try
             {
                 PIX_RESOURCE_VIEW_TYPE viewType = PIX_RESOURCE_VIEW_TYPE.PIX_RESOURCE_NONE;
@@ -623,6 +625,7 @@ public static class ResourceTools
                 IPixResourceViewBindings bindings = PixApiExtensionsGpuCaptureResources.GetResourceBindings(view);
                 for (uint b = 0; b < bindings.GetCount(); b++)
                 {
+                    job?.ThrowIfCancellationRequested();
                     BindingDto binding = ReadBinding(bindings, b, h);
                     if (binding.Unavailable || binding.EventRef is null)
                         coverage.Add(new { viewIndex = i, bindingIndex = b, unavailable = true, reason = binding.Reason });
@@ -631,6 +634,7 @@ public static class ResourceTools
                     total++;
                 }
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex) { coverage.Add(new { viewIndex = i, unavailable = true, reason = PixErrors.Describe(ex) }); }
         }
         int? next = (long)o + items.Count < total ? o + items.Count : null;
@@ -640,9 +644,9 @@ public static class ResourceTools
         };
     }
 
-    internal static ResourceUsesSnapshot BuildResourceUseSnapshot(GpuCaptureHandle h, ResourceRef resourceRef, Job job)
+    internal static ResourceUsesSnapshot BuildResourceUseSnapshot(GpuCaptureHandle h, ResourceRef resourceRef, Job job, EventRef? scope = null)
     {
-        if (h.ResourceUseFallbackIndex is not null) return h.ResourceUseFallbackIndex.For(resourceRef);
+        if (h.ResourceUses.TryGet(resourceRef, scope, out ResourceUsesSnapshot cached)) return cached;
         job.AddMessage("Reading native resource bindings...");
         var nativeRows = new List<ResourceUseDto>();
         int offset = 0;
@@ -650,7 +654,7 @@ public static class ResourceTools
         do
         {
             job.ThrowIfCancellationRequested();
-            page = QueryResourceUses(h, resourceRef, offset, Paging.MaxLimit);
+            page = QueryResourceUses(h, resourceRef, offset, Paging.MaxLimit, job: job);
             nativeRows.AddRange(page.Items);
             if (page.Coverage.Count > 0 || page.Items.Any(i => i.Binding.EventRef is null)) break;
             offset = page.NextOffset ?? 0;
@@ -659,21 +663,39 @@ public static class ResourceTools
             return new(nativeRows, [], "nativeBinding");
 
         // Some PIX Preview builds return an empty PIX_EVENT_INFO for every native binding.
-        // Per-event collections still provide an exact event context; build that index once
-        // in a preparation job instead of fabricating identities from the zero-filled struct.
+        // Per-event collections still provide an exact event context. Explicit scopes get
+        // isolated indexes; publishing those as capture-wide would hide uses outside the scope.
         job.AddMessage("Native binding events unavailable; indexing per-event resource collections and captured API arguments...");
         var rows = new List<ResourceUseDto>();
         var coverage = new List<object>
         {
-            new { feature = "nativeBindingEvents", state = "unavailable", resourceRef, nativeBindingCount = page.Total,
+            new { feature = "nativeBindingEvents", state = "unavailable", resourceRef, nativeBindingCount = page.Total, scope,
                 reason = "PIX returned incomplete binding events. Navigation uses per-event draw/dispatch collections and explicit API object arguments; resource-view-only API arguments may be absent." },
         };
-        foreach (QueueEntry queue in h.Queues)
+        var scan = new List<(QueueEntry Queue, EventRecord[] Events, EventRecord[] Selected)>();
+        foreach (QueueEntry queue in h.Queues.Where(q => scope is null || q.Index == scope.QueueIndex))
         {
+            job.ThrowIfCancellationRequested();
             EventRecord[] events = h.AllEvents(queue.Index);
-            foreach (EventRecord record in events)
+            scan.Add((queue, events, ResourceUseScanEvents(queue.Index, events, scope)));
+        }
+        long total = scan.Sum(q => (long)q.Selected.Length);
+        long completed = 0;
+        var progressTimer = System.Diagnostics.Stopwatch.StartNew();
+        job.SetProgress(0);
+        job.AddMessage($"Indexing {total} event(s)" + (scope is null ? " across the capture." : $" within queue {scope.QueueIndex} event {scope.EventIndex} and descendants."));
+        foreach (var (queue, events, selected) in scan)
+        {
+            foreach (EventRecord record in selected)
             {
                 job.ThrowIfCancellationRequested();
+                if (progressTimer.Elapsed.TotalSeconds >= 2)
+                {
+                    job.SetProgress(total == 0 ? 0 : (float)completed / total);
+                    job.AddMessage($"Indexed {completed}/{total} event(s); reading queue {queue.Index} event {record.Index}.");
+                    progressTimer.Restart();
+                }
+                completed++;
                 var eventRef = new EventRef(h.Id, queue.Index, record.Index);
                 uint argumentIndex = 0;
                 foreach (var (parameter, objectId) in ResourceArguments(record.ApiCallData))
@@ -691,12 +713,14 @@ public static class ResourceTools
                     h.GetAnalysis().GetAccessedResources(views);
                     for (uint i = 0; i < views.GetCount(); i++)
                     {
+                        job.ThrowIfCancellationRequested();
                         IPixD3D12Resource? resource;
                         try
                         {
                             IPixD3D12ResourceView view = PixApiExtensionsGpuCaptureResources.GetResourceView<IPixD3D12ResourceView>(views, i);
                             resource = PixApiExtensionsGpuCaptureResources.GetD3D12Resource(view);
                         }
+                        catch (OperationCanceledException) { throw; }
                         catch { continue; } // Samplers and root constants have no backing resource.
                         if (resource is null) continue;
                         var observedResource = new ResourceRef(h.Id, Interop.Hex(resource.GetApiObjectId()));
@@ -705,7 +729,11 @@ public static class ResourceTools
                         IPixResourceView resourceView = PixApiExtensionsGpuCaptureResources.GetResourceView<IPixResourceView>(views, i);
                         IPixResourceViewBindings bindings = PixApiExtensionsGpuCaptureResources.GetResourceBindings(resourceView);
                         var nativeBindings = new List<BindingDto>();
-                        for (uint b = 0; b < bindings.GetCount(); b++) nativeBindings.Add(ReadBinding(bindings, b, h));
+                        for (uint b = 0; b < bindings.GetCount(); b++)
+                        {
+                            job.ThrowIfCancellationRequested();
+                            nativeBindings.Add(ReadBinding(bindings, b, h));
+                        }
                         // The event-scoped collection proves the view is present here. Keep
                         // native binding records separate; their empty events are not repaired
                         // by guessing that every global binding belongs to this event.
@@ -719,9 +747,17 @@ public static class ResourceTools
             }
         }
         job.ThrowIfCancellationRequested();
-        h.ResourceUseFallbackIndex = new ResourceUseIndex(rows, coverage);
-        return h.ResourceUseFallbackIndex.For(resourceRef);
+        var index = new ResourceUseIndex(rows, coverage);
+        job.ThrowIfCancellationRequested();
+        h.ResourceUses.PublishFallback(scope, index);
+        job.SetProgress(1);
+        job.AddMessage($"Indexed {completed}/{total} event(s), retaining {rows.Count} resource-use observation(s).");
+        return index.For(resourceRef);
     }
+
+    internal static EventRecord[] ResourceUseScanEvents(int queueIndex, EventRecord[] events, EventRef? scope)
+        => scope is null ? events : queueIndex != scope.QueueIndex ? [] :
+            events.Where(record => EventNavigation.IsWithin(events, record.Index, scope.EventIndex)).ToArray();
 
     private static readonly Regex ObjectArgument = new("<(?<parameter>[A-Za-z_][A-Za-z0-9_]*)>obj#(?<id>[0-9]+)</\\k<parameter>>",
         RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));

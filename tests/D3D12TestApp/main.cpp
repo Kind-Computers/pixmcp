@@ -4,12 +4,15 @@
 // draws, a dispatch, two queues, a PSO, a root signature with a descriptor table, vertex/index/
 // constant buffers, a texture SRV, a UAV and per-event timing.
 //
-// Usage: D3D12TestApp.exe [--frames N] [--variant baseline|candidate] [--duplicate-markers] [--hidden] [--hang [--hang-after N]]
+// Usage: D3D12TestApp.exe [--frames N] [--variant baseline|candidate] [--adapter-name TEXT] [--duplicate-markers] [--hidden] [--hang [--hang-after N]]
 //   --frames N      stop after N frames (default: run until the window is closed)
 //   --variant       deterministic baseline (default) or candidate: altered shader, an extra pass,
 //                   larger compute resource, and distinct root constants; marker paths remain stable.
 //   --duplicate-markers  emit a second "Triangle pass" to test ambiguous marker matching
 //   --hidden        keep the test window hidden for automated capture runs
+//   --adapter-name  case-insensitive hardware-adapter name substring; no fallback on a missing match.
+//                   Omit for the first usable high-performance adapter. Startup logs the selected
+//                   adapter name, vendor/device IDs and LUID to stdout and flushes before rendering.
 //   --startup-delay-ms N  wait before creating the D3D12 device (readiness regression fixture)
 //   --timing-workload     emit named CPU PIX events/counter and spend CPU time in known noinline functions
 //   --hang          submit a never-terminating compute shader after --hang-after frames (default 30)
@@ -85,6 +88,7 @@ namespace
     bool g_quit = false;
     bool g_candidate = false;
     bool g_duplicateMarkers = false;
+    std::wstring g_adapterName;
     volatile double g_timingSink = 0;
 
     __declspec(noinline) void FixtureTimingInner()
@@ -336,12 +340,29 @@ void CSHang(uint3 id : SV_DispatchThreadID)
         Check(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
 
         ComPtr<IDXGIAdapter1> adapter;
+        if (!g_adapterName.empty())
+            std::wprintf(L"Adapter request: %ls (case-insensitive substring)\n", g_adapterName.c_str());
         for (UINT i = 0; SUCCEEDED(factory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter))); ++i)
         {
-            DXGI_ADAPTER_DESC1 desc;
-            adapter->GetDesc1(&desc);
+            DXGI_ADAPTER_DESC1 desc = {};
+            Check(adapter->GetDesc1(&desc), "GetDesc1");
             if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
-            if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&g_device)))) { std::wprintf(L"Adapter: %s\n", desc.Description); break; }
+            if (!g_adapterName.empty() && FindStringOrdinal(FIND_FROMSTART, desc.Description, -1,
+                g_adapterName.c_str(), -1, TRUE) < 0) continue;
+            if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&g_device))))
+            {
+                std::wprintf(L"Adapter: %ls; vendor=0x%04X; device=0x%04X; LUID=%08X:%08X\n", desc.Description,
+                    desc.VendorId, desc.DeviceId, static_cast<unsigned>(desc.AdapterLuid.HighPart),
+                    static_cast<unsigned>(desc.AdapterLuid.LowPart));
+                std::fflush(stdout);
+                break;
+            }
+        }
+        if (!g_device && !g_adapterName.empty())
+        {
+            std::fwprintf(stderr, L"No usable D3D12 hardware adapter matches --adapter-name '%ls'. No other adapter was selected.\n",
+                g_adapterName.c_str());
+            std::exit(1);
         }
         if (!g_device) Check(E_FAIL, "No D3D12 adapter");
         SetName(g_device.Get(), L"D3D12TestApp Device");
@@ -648,6 +669,15 @@ int wmain(int argc, wchar_t** argv)
             g_candidate = std::wcscmp(variant, L"candidate") == 0;
         }
         else if (std::wcscmp(argv[i], L"--duplicate-markers") == 0) g_duplicateMarkers = true;
+        else if (std::wcscmp(argv[i], L"--adapter-name") == 0 && i + 1 < argc)
+        {
+            g_adapterName = argv[++i];
+            if (g_adapterName.find_first_not_of(L" \t\r\n") == std::wstring::npos)
+            {
+                std::fprintf(stderr, "--adapter-name must be a nonempty adapter-name substring.\n");
+                return 2;
+            }
+        }
         else if (std::wcscmp(argv[i], L"--hidden") == 0) hidden = true;
         else if (std::wcscmp(argv[i], L"--timing-workload") == 0) timingWorkload = true;
         else if (std::wcscmp(argv[i], L"--startup-delay-ms") == 0 && i + 1 < argc)

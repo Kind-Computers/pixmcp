@@ -232,6 +232,10 @@ remain last. Use `pix_result_export` to save complete differences.
 `pix_gpu_screenshot` reads the image embedded in the capture and shares the preview
 artifact retrieval tools. `pix_gpu_preview_image` accepts a `crop` in original pixel
 coordinates and `maxDimension` for proportional resizing without upscaling.
+Set `ignoreAlpha: true` to view stored RGB as opaque before cropping or resizing.
+Render targets can contain useful scene colors with zero alpha, which otherwise
+appear transparent or black. This option defaults to false and reports the opaque
+transformation in image metadata; byte paging still returns the original PNG.
 `pix_gpu_preview` uses the installed `pixtool.exe` to replay and export an RTV slot or
 depth target. It returns an artifact reference, dimensions, and selection metadata;
 `pix_gpu_preview_image` retrieves inline MCP image content and
@@ -471,6 +475,47 @@ time remain advisory measurements.
 GPU hang generation is never part of the default tests or benchmark.
 The optional `provoke-hang` scenario deliberately resets the GPU and exists only
 for manual dump testing.
+
+### UE tutorial walkthrough
+
+Run the tutorial against the published MCP server from the repository root:
+
+```powershell
+python scripts/tutorial_validation.py --session tutorial-YYYYMMDD-HHMMSS
+```
+
+The runner defaults to `dist/PixMcp.exe`, a built Unreal Editor and CitySample under
+`W:\UE5\UnrealEngine`, Intel Arc B580 and NVIDIA RTX 4070 Ti adapters, and the
+`APT_DetFlyby1` automated performance sequence. It also needs the PIX Preview/runtime
+requirements above, the companion `pixdiff`, and enough free space for CitySample
+captures and C++ exports. These workload paths and adapter defaults are defined in
+the runner.
+
+The baseline uses DX12 at 2560×1440, TSR at 100% screen percentage, dynamic resolution
+disabled, VSync off, and Quinlight disabled. CSV collection discards one warmup and
+records three measured runs per adapter, followed by an Intel 50% screen-percentage
+cross-check. Startup allows 900 seconds; measured runs with recorded compilation,
+incorrect CSV resolution/VSync metadata, or missing/mismatched startup console
+settings are rejected and retried once. Console echoes verify settings before the
+flyby starts; they do not establish those settings on every recorded frame.
+GPU investigations explicitly verify the
+replay adapter and TSR markers; hardware-dependent capabilities retain their reported
+unsupported outcomes.
+
+For a separate investigation of UE background command-list translation crashes,
+`--serial-translation` disables `r.RHICmd.ParallelTranslate.Enable` through a
+temporary startup override. Use a new session: the runner refuses to mix this
+diagnostic profile with standard baseline measurements.
+
+Select `--stage csv`, `--stage gpu`, `--stage timing`, or `--stage dumps` to run one
+stage in the same session; the default is `all`. `--adapter intel` or `--adapter nvidia`
+restricts CSV/GPU workloads, while timing recording targets Intel. Captures and images
+go to `E:\PixCaptures\<session>` by default (`--artifact-root` overrides this).
+JSON/Markdown reports, tool schemas, raw MCP transcripts, and server diagnostics go
+to ignored `tests/artifacts/<session>`. Task evidence files have unique names so
+resumed investigations retain earlier evidence. Independent stages continue after failures.
+GPUView, building/running generated C++, and deliberate GPU-hang generation are
+excluded; the dump stage inspects an existing suitable dump when available.
 
 ## Limitations and troubleshooting
 

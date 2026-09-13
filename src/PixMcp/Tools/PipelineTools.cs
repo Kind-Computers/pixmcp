@@ -86,7 +86,10 @@ public static class PipelineTools
                     {
                         IPixPipelineState ps = PixApiExtensionsGpuCaptureResources.GetPipelineState(gp);
                         List<D3D12_STATE_SUBOBJECT> list = PixApiExtensionsGpuCaptureResources.GetSubobjects(ps);
-                        subobjects = list.Select((so, i) => new { index = i, type = so.Type, detail = SubobjectDetail(so) }).ToArray();
+                        // GetSubobjects copies structs, not the native pDesc storage and strings.
+                        // Keep the COM owner alive until every borrowed pointer has been decoded.
+                        subobjects = ReadWithNativeOwner(ps,
+                            () => list.Select((so, i) => new { index = i, type = so.Type, detail = SubobjectDetail(so) }).ToArray());
                     }
                     generic = new { pipelineType, subobjects };
                 }
@@ -124,6 +127,12 @@ public static class PipelineTools
             return new PipelineStateDto(eventRef, EventNavigation.MarkerPath(h.AllEvents(queueIndex), eventIndex),
                 h.DescribeEvent(queueIndex, record), programType.HasValue ? Json.EnumName(programType.Value) : null,
                 rootSignature, shaders, generic, raytracing);
+    }
+
+    internal static T ReadWithNativeOwner<T>(object owner, Func<T> read)
+    {
+        try { return read(); }
+        finally { GC.KeepAlive(owner); }
     }
 
     private static object? SubobjectDetail(D3D12_STATE_SUBOBJECT subobject)

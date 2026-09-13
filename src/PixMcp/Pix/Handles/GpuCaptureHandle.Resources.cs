@@ -7,21 +7,24 @@ public sealed partial class GpuCaptureHandle
     public bool AccessedResourcesGathered { get; private set; }
     private Exception? _accessedResourcesUnavailable;
     internal Exception? AccessedResourcesUnavailable => _accessedResourcesUnavailable;
-    internal Dictionary<string, ResourceUsesSnapshot> ResourceUseSnapshots { get; } = new(StringComparer.OrdinalIgnoreCase);
-    internal ResourceUseIndex? ResourceUseFallbackIndex { get; set; }
+    internal ResourceUseCache ResourceUses { get; } = new();
 
     internal static Preparation<GpuCaptureHandle> AccessedResourcesPreparation(string handle)
         => new("accessed-resources", "accessed-resources", $"Gather accessed resources for {handle}",
             h => h.AccessedResourcesGathered, (h, job) => h.EnsureAccessedResources(job));
 
-    internal static Preparation<GpuCaptureHandle> ResourceUsesPreparation(string handle, string apiObjectId)
-        => new("resource-uses:" + apiObjectId, "resource-uses", $"Index resource uses for {apiObjectId} in {handle}",
-            h => h.ResourceUseFallbackIndex is not null || h.ResourceUseSnapshots.ContainsKey(apiObjectId), (h, job) =>
+    internal static Preparation<GpuCaptureHandle> ResourceUsesPreparation(string handle, string apiObjectId, EventRef? scope = null)
+        => new("resource-uses:" + apiObjectId + (scope is null ? "" : $":scope:{scope.QueueIndex}:{scope.EventIndex}"),
+            "resource-uses", $"Index resource uses for {apiObjectId} in {handle}" +
+                (scope is null ? "" : $" within queue {scope.QueueIndex} event {scope.EventIndex} and descendants"),
+            h => h.ResourceUses.TryGet(new(h.Id, apiObjectId), scope, out _), (h, job) =>
             {
+                if (h.ResourceUses.TryGet(new(h.Id, apiObjectId), scope, out _)) return;
                 ResourceTools.FindResource(h, apiObjectId);
                 h.EnsureAccessedResources(job);
-                if (!h.ResourceUseSnapshots.ContainsKey(apiObjectId))
-                    h.ResourceUseSnapshots[apiObjectId] = ResourceTools.BuildResourceUseSnapshot(h, new(h.Id, apiObjectId), job);
+                ResourceUsesSnapshot snapshot = ResourceTools.BuildResourceUseSnapshot(h, new(h.Id, apiObjectId), job, scope);
+                job.ThrowIfCancellationRequested();
+                h.ResourceUses.StoreSnapshot(apiObjectId, scope, snapshot);
             });
 
     internal void EnsureAccessedResources(Job? job)
@@ -47,7 +50,61 @@ public sealed partial class GpuCaptureHandle
     {
         AccessedResourcesGathered = false;
         _accessedResourcesUnavailable = null;
-        ResourceUseSnapshots.Clear();
-        ResourceUseFallbackIndex = null;
+        ResourceUses.Clear();
+    }
+}
+
+/// <summary>Only completed scans are stored. Scoped evidence must never satisfy a capture-wide query.</summary>
+internal sealed class ResourceUseCache
+{
+    private readonly Dictionary<string, ResourceUsesSnapshot> _snapshots = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<EventRef, Dictionary<string, ResourceUsesSnapshot>> _scopedSnapshots = new();
+    private readonly Dictionary<EventRef, ResourceUseIndex> _scopedFallback = new();
+    private ResourceUseIndex? _fallback;
+
+    internal bool TryGet(ResourceRef resourceRef, EventRef? scope, out ResourceUsesSnapshot snapshot)
+    {
+        if (_fallback is not null)
+        {
+            snapshot = _fallback.For(resourceRef);
+            return true;
+        }
+        if (_snapshots.TryGetValue(resourceRef.ApiObjectId, out snapshot!)) return true;
+        if (scope is not null)
+        {
+            if (_scopedFallback.TryGetValue(scope, out ResourceUseIndex? index))
+            {
+                snapshot = index.For(resourceRef);
+                return true;
+            }
+            if (_scopedSnapshots.TryGetValue(scope, out var snapshots) && snapshots.TryGetValue(resourceRef.ApiObjectId, out snapshot!)) return true;
+        }
+        snapshot = null!;
+        return false;
+    }
+
+    internal void StoreSnapshot(string apiObjectId, EventRef? scope, ResourceUsesSnapshot snapshot)
+    {
+        if (scope is null) _snapshots[apiObjectId] = snapshot;
+        else
+        {
+            if (!_scopedSnapshots.TryGetValue(scope, out var snapshots))
+                _scopedSnapshots.Add(scope, snapshots = new(StringComparer.OrdinalIgnoreCase));
+            snapshots[apiObjectId] = snapshot;
+        }
+    }
+
+    internal void PublishFallback(EventRef? scope, ResourceUseIndex index)
+    {
+        if (scope is null) _fallback = index;
+        else _scopedFallback[scope] = index;
+    }
+
+    internal void Clear()
+    {
+        _snapshots.Clear();
+        _scopedSnapshots.Clear();
+        _scopedFallback.Clear();
+        _fallback = null;
     }
 }

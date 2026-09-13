@@ -80,16 +80,19 @@ public static class PreviewTools
         }), waitSeconds, cancellationToken);
     }
 
-    [McpServerTool(Name = "pix_gpu_preview_image", ReadOnly = true), Description("Returns a preview or embedded screenshot as inline PNG. Optional crop uses original pixel coordinates, then maxDimension bounds the longest edge without upscaling. Originals above 4 MiB automatically get a thumbnail. Original bytes remain available through pix_gpu_preview_bytes. Artifacts expire on capture close or cache eviction.")]
+    [McpServerTool(Name = "pix_gpu_preview_image", ReadOnly = true), Description("Returns a preview or embedded screenshot as inline PNG. Optional crop uses original pixel coordinates, then maxDimension bounds the longest edge without upscaling. Set ignoreAlpha=true to view render-target RGB as opaque when stored alpha hides useful colors. Originals above 4 MiB automatically get a thumbnail. Original bytes remain available through pix_gpu_preview_bytes. Artifacts expire on capture close or cache eviction.")]
     public static async Task<CallToolResult> Image(PixSession session, string artifactRef, ImageCrop? crop = null,
-        int? maxDimension = null, CancellationToken cancellationToken = default)
-        => ImageResult(artifactRef, await ImageRenderer.Render(GetArtifact(session, artifactRef), crop, maxDimension, cancellationToken).ConfigureAwait(false));
+        int? maxDimension = null,
+        [Description("Display stored RGB as opaque before crop/resize; default false preserves alpha. Original artifact bytes are unchanged.")] bool ignoreAlpha = false,
+        CancellationToken cancellationToken = default)
+        => ImageResult(artifactRef, await ImageRenderer.Render(GetArtifact(session, artifactRef), crop, maxDimension, ignoreAlpha, cancellationToken).ConfigureAwait(false));
 
     internal static CallToolResult ImageResult(string artifactRef, RenderedImage rendered)
     {
         string json = Json.Serialize(new { artifactRef, mimeType = "image/png", pngBytes = rendered.Png.Length,
             originalWidth = rendered.OriginalWidth, originalHeight = rendered.OriginalHeight,
-            width = rendered.Width, height = rendered.Height, crop = rendered.Crop, resized = rendered.Resized });
+            width = rendered.Width, height = rendered.Height, crop = rendered.Crop, resized = rendered.Resized,
+            alphaIgnored = rendered.AlphaIgnored });
         return new CallToolResult
         {
             Content = [new TextContentBlock { Text = json }, ImageContentBlock.FromBytes(rendered.Png, "image/png")],
