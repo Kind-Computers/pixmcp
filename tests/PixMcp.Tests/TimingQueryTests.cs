@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using PixMcp.Pix.Handles;
 using PixMcp.Tools;
 using PixMcp.Pix;
+using PixMcp.Pix.Sql;
 using Xunit;
 
 namespace PixMcp.Tests;
@@ -29,7 +30,7 @@ public sealed class TimingQueryTests
         Assert.Equal("available", crossing.ExecutionTimingState);
         Assert.Contains(data.Events.Items, e => e.BeginNs == "100" && e.EndNs == "100");
         Assert.DoesNotContain(data.Events.Items, e => e.BeginNs == "500");
-        Assert.Equal(1, database.Events("timing-1", "gpu", 42, null, "1", null, null, null, "duration", 0, 25).Events.Total);
+        Assert.Equal(1, database.Events("timing-1", "gpuMarkers", 42, null, "1", null, null, null, "duration", 0, 25).Events.Total);
     }
 
     [Fact]
@@ -46,7 +47,7 @@ public sealed class TimingQueryTests
         Assert.Equal("ambiguous", first.Events.Items[0].ExecutionTimingState);
         Assert.Null(first.Events.Items[0].ExecutionNs);
         Assert.Empty(database.Events("timing-1", "all", null, null, null, "' OR 1=1 --", null, null, "start", 0, 25).Events.Items);
-        Assert.Equal("invalid_arguments", Assert.Throws<PixToolException>(() => database.Events("timing-1", "gpu", null, 7, null, null, null, null, "start", 0, 25)).Detail.Code);
+        Assert.Equal("invalid_arguments", Assert.Throws<PixToolException>(() => database.Events("timing-1", "gpuMarkers", null, 7, null, null, null, null, "start", 0, 25)).Detail.Code);
     }
 
     [Fact]
@@ -225,8 +226,8 @@ public sealed class TimingQueryTests
         using var fixture = new Fixture();
         fixture.Execute("DROP TABLE PixGpuExecution");
         using var database = fixture.Open();
-        Assert.Equal("timing_schema_unsupported", Assert.Throws<PixToolException>(() => database.Events("timing-1", "gpu", null, null, null, null, null, null, "start", 0, 25)).Detail.Code);
-        Assert.Equal("unsupported", database.Overview("timing-1", null, 0, 25).Capabilities["gpuEvents"].State);
+        Assert.Equal("timing_schema_unsupported", Assert.Throws<PixToolException>(() => database.Events("timing-1", "gpuMarkers", null, null, null, null, null, null, "start", 0, 25)).Detail.Code);
+        Assert.Equal("unsupported", database.Overview("timing-1", null, 0, 25).Capabilities["gpuMarkers"].State);
         Assert.Equal("invalid_arguments", Assert.Throws<PixToolException>(() => database.Range(200, 100)).Detail.Code);
         Assert.Throws<PixToolException>(() => TimingDatabase.ParseNs("9223372036854775808", "startNs"));
         Assert.Throws<PixToolException>(() => TimingDatabase.ParseNs("-1", "startNs"));
@@ -268,7 +269,7 @@ public sealed class TimingQueryTests
         using var db = new TimingDatabase(capture!, System.IO.Path.Combine(PixDiscovery.InstallDir!, "pixstorage.dll"));
         TimingEventsDto events = db.Events("timing-native", "cpu", null, null, null, "Fixture CPU Work", null, null, "start", 0, 25);
         Assert.NotEmpty(events.Events.Items);
-        uint pid = events.Events.Items[0].ProcessId;
+        uint pid = events.Events.Items[0].ProcessId ?? throw new Xunit.Sdk.XunitException("CPU event rows carry their process id.");
         TimingSampleAnalysisDto samples = db.Samples("timing-native", pid, null, null, null);
         Assert.True(samples.Coverage.SamplesWithStacks > 0);
         Assert.Contains(samples.Hotspots, h => h.Function.Function?.Contains("FixtureTimingInner", StringComparison.Ordinal) == true && h.ExclusiveSamples > 0);
@@ -311,10 +312,10 @@ public sealed class TimingQueryTests
                 await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 try
                 {
-                    JsonElement pending = JsonSerializer.Deserialize<JsonElement>(await TimingQueryTools.Overview(session, jobs, handle, waitSeconds: 0).WaitAsync(TimeSpan.FromSeconds(1)));
-                    JsonElement joined = JsonSerializer.Deserialize<JsonElement>(await TimingQueryTools.Overview(session, jobs, handle, waitSeconds: 0).WaitAsync(TimeSpan.FromSeconds(1)));
-                    Assert.True(pending.GetProperty("pending").GetBoolean());
-                    Assert.Equal(pending.GetProperty("jobId").GetString(), joined.GetProperty("jobId").GetString());
+                    // Recorded-timing queries run off the PIX worker: a busy worker does not delay them.
+                    JsonElement overview = JsonSerializer.Deserialize<JsonElement>(await TimingQueryTools.Overview(session, jobs, handle, waitSeconds: 8).WaitAsync(TimeSpan.FromSeconds(9)));
+                    Assert.False(overview.TryGetProperty("pending", out _));
+                    Assert.False(blocker.IsCompleted);
                     Assert.Single(jobs.All);
                 }
                 finally { release.Set(); await blocker; }
@@ -355,6 +356,104 @@ public sealed class TimingQueryTests
             Assert.False(session.Results.IsAvailable(profile));
         }
         finally { directory.Delete(true); }
+    }
+
+    [SkippableFact]
+    public async Task NativeSqlRunsOverPixStorageAndWritersInterruptRunningQueries()
+    {
+        string? source = TestArtifacts.TimingCapture;
+        Skip.If(source is null || !File.Exists(source) || PixDiscovery.InstallDir is null, "Set PIX_TEST_TIMING_CAPTURE to a timing capture.");
+        DirectoryInfo directory = Directory.CreateTempSubdirectory("pixmcp-timing-sql-native-");
+        try
+        {
+            string path = System.IO.Path.Combine(directory.FullName, "capture.wpix");
+            File.Copy(source!, path);
+            using var worker = new PixWorker();
+            using var session = new PixSession(worker, NullLogger<PixSession>.Instance);
+            using var jobs = new JobManager(worker, session, () => null);
+            string handle = JsonSerializer.Deserialize<JsonElement>(await TimingCaptureTools.Open(session, path)).GetProperty("handle").GetString()!;
+            TimingCaptureHandle capture = session.Get<TimingCaptureHandle>(handle);
+
+            SqlResultDto? executions = null, switches = null, stack = null;
+            PixToolException? pragma = null;
+            Job sql = capture.QueryJob(jobs, session.Results, "test", new { query = "native-sql" }, db =>
+            {
+                executions = SqlQuery.Execute(db, new SqlRequest("SELECT COUNT(*) FROM PixCpuExecution"), "pixstorage", handle);
+                switches = SqlQuery.Execute(db, new SqlRequest("SELECT * FROM ContextSwitch LIMIT 5") { Explain = true }, "pixstorage", handle);
+                stack = SqlQuery.Execute(db, new SqlRequest("SELECT typeof(findstackid(0, 0))"), "pixstorage", handle);
+                try { SqlQuery.Execute(db, new SqlRequest("PRAGMA table_xinfo(ContextSwitch)"), "pixstorage", handle); }
+                catch (PixToolException ex) { pragma = ex; }
+                return new { done = true };
+            }, out _);
+            await sql.WaitAsync(TimeSpan.FromSeconds(120), CancellationToken.None);
+            Assert.True(sql.Status == JobStatus.Succeeded, sql.Error);
+            Assert.True(Convert.ToInt64(executions!.Rows[0][0]) > 0);
+            Assert.Contains("PixCpuExecution", executions.ReferencedTables);
+            Assert.Equal(5, switches!.RowCount);
+            Assert.Contains("ContextSwitch", switches.ReferencedTables);
+            Assert.NotEmpty(switches.Plan!);
+            Assert.Equal(1, stack!.RowCount);
+            Assert.Equal("sql_forbidden", pragma?.Detail.Code);
+
+            const string bomb = "WITH RECURSIVE x(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM x) SELECT count(*) FROM x";
+            var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Job running = capture.QueryJob(jobs, session.Results, "test", new { query = "bomb-save" }, db =>
+            {
+                started.TrySetResult();
+                return SqlQuery.Execute(db, new SqlRequest(bomb) { TimeoutSeconds = 120 }, "pixstorage", handle);
+            }, out _);
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            await Task.Delay(200);
+            await TimingCaptureTools.Save(session, handle).WaitAsync(TimeSpan.FromSeconds(10));
+            await running.WaitAsync(TimeSpan.FromSeconds(10), CancellationToken.None);
+            Assert.Equal(JobStatus.Failed, running.Status);
+            Assert.Equal("timing_query_invalidated", running.ErrorDetail?.Code);
+
+            var closingStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Job closing = capture.QueryJob(jobs, session.Results, "test", new { query = "bomb-close" }, db =>
+            {
+                closingStarted.TrySetResult();
+                return SqlQuery.Execute(db, new SqlRequest(bomb) { TimeoutSeconds = 120 }, "pixstorage", handle);
+            }, out _);
+            await closingStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            await Task.Delay(200);
+            await session.Run(() => session.Close(handle)).WaitAsync(TimeSpan.FromSeconds(15));
+            await closing.WaitAsync(TimeSpan.FromSeconds(10), CancellationToken.None);
+            Assert.Equal("timing_query_invalidated", closing.ErrorDetail?.Code);
+        }
+        finally { directory.Delete(true); }
+    }
+
+    [Fact]
+    public void SamplesFilterAndCountByCoreEfficiencyClass()
+    {
+        using (var plain = new Fixture())
+        using (var database = plain.Open())
+        {
+            Assert.Null(database.Samples("timing-1", 42, 7, null, null).Coverage.SamplesByEfficiencyClass);
+            Assert.Equal("timing_schema_unsupported", Assert.Throws<PixToolException>(() => database.Samples("timing-1", 42, 7, null, null, efficiencyClass: 0)).Detail.Code);
+        }
+
+        using var fixture = new Fixture();
+        // Core 0 is a performance core (class 1); cores 1 and 2 are efficiency cores (class 0).
+        fixture.Execute("CREATE TABLE PhysicalCores(Id INTEGER PRIMARY KEY, EfficiencyClass INTEGER); INSERT INTO PhysicalCores VALUES(0,1),(1,0),(2,0);" +
+            "CREATE TABLE Cores(Id INTEGER PRIMARY KEY, StartingThreadId INTEGER, ContextSwitchCount INTEGER, MaxPixEventLevel INTEGER, SampleCount INTEGER, PhysicalCoreId INTEGER);" +
+            "INSERT INTO Cores VALUES(0,0,0,0,0,0),(1,0,0,0,0,1),(2,0,0,0,0,2);");
+        using var db = fixture.Open();
+        TimingSampleAnalysisDto every = db.Samples("timing-1", 42, 7, null, null);
+        Assert.Equal(3, every.Coverage.TotalSamples);
+        Assert.Equal(new Dictionary<string, long> { ["0"] = 1, ["1"] = 2 }, every.Coverage.SamplesByEfficiencyClass);
+        Assert.NotEmpty(every.Hotspots);
+        Assert.All(every.Hotspots, h => Assert.Equal(h.InclusiveSamples, h.InclusiveByEfficiencyClass!.Values.Sum()));
+
+        TimingSampleAnalysisDto performance = db.Samples("timing-1", 42, 7, null, null, efficiencyClass: 1);
+        Assert.Equal((2L, 1L), (performance.Coverage.TotalSamples, performance.Selection.EfficiencyClass!.Value));
+        Assert.Equal(new Dictionary<string, long> { ["1"] = 2 }, performance.Coverage.SamplesByEfficiencyClass);
+        Assert.Equal(1, db.Samples("timing-1", 42, 7, null, null, efficiencyClass: 0).Coverage.TotalSamples);
+
+        PixToolException unknown = Assert.Throws<PixToolException>(() => db.Samples("timing-1", 42, 7, null, null, efficiencyClass: 5));
+        Assert.Equal("invalid_arguments", unknown.Detail.Code);
+        Assert.Contains("0, 1", unknown.Detail.Message);
     }
 
     private sealed class BlockingTimingResult(TaskCompletionSource entered, ManualResetEventSlim release)

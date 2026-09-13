@@ -3,6 +3,7 @@ using System.Reflection;
 using ModelContextProtocol.Server;
 using PixMcp.Pix;
 using Xunit;
+using PixMcp.Pix.Handles;
 
 namespace PixMcp.Tests;
 
@@ -122,6 +123,35 @@ public sealed class OutputSchemaTests
         var job = new Job("job-1", "export-cpp", "Export frame").ToDto();
         Validate("pix_gpu_export_cpp", job);
         Validate("pix_csv_compare", job);
+    }
+
+    [Fact]
+    public void RecordedTimingAnalysisSchemasValidate()
+    {
+        var range = new TimingRangeDto("0", "10000", "0", "5000") { RangeMode = "full" };
+        var stats = new RecordedStatsDto(2, 10, 10, 12, 12, 0, 0, 0, 0);
+        RecordedLaneTotalsDto totals = RecordedTiming.Totals([(100L, 300L), (200L, 400L)], 0, 1000)!;
+        var queue = new TimingGpuQueueRollupDto("1", "Graphics", "Direct", null, 3, 2, new Dictionary<string, long> { ["zeroDuration"] = 1 }, totals, stats, stats,
+            [new("10", 42, 7, "Render", 3, 2, stats)], [new("submission:timing-1:0:1", "10", "90", "100", 200, 0.0, 10)]);
+        Validate("pix_timing_gpu_summary", new TimingGpuSummaryDto("timing-1", range, 42, "selection", [queue],
+            [new("45", "3D", null, 2, totals, 1)], [new("1", "Monitor", 2, 16.667, 16.667, 16.667, 16.667, 60)],
+            new("empty", 0, 0, 0, "reason"), TimingDatabase.GpuSummaryDenominators, ["note"], [], [new("pix_timing_submissions", new { handle = "timing-1" })]));
+        var node = new RecordedTreeNodeDto("Frame", "Frame", 1, 2, RecordedTiming.Duration(200, 200, 200, null, 1), RecordedTiming.Duration(50, 200, 200), 170, true, 20,
+            RecordedTiming.Stats([100L, 100L])!, 170, 30, "available", 3, "0", "0", "100");
+        Validate("pix_timing_tree", new RecordedMarkerTreeDto("timing-1", range, "cpu", new("thread", "10", "Render", 42, 7, totals, 7, 2, 0, 1), null, 2, "inclusive", null,
+            new(1, 0, 1, null, [node], null), false, null, new("available"), TimingDatabase.MarkerTreeDenominators, "interpretation", ["note"], []));
+        var frame = new TimingFrameVerdictDto(0, "0", 100, 0.0, 10, 90, 5, 5, 0, 1, 0.0, 0.0, null, "cpuBound");
+        Validate("pix_timing_verdict", new TimingVerdictDto("timing-1", range, 42, new("vsync", "VSync lane 1", "requested", 5, 5, false, null),
+            new("10", 42, 7, "Render", 4, "mostSubmissions"),
+            new("cpuBound", 100, "low", new Dictionary<string, long> { ["cpuBound"] = 5 }, 10, 90, 5, 5, 0, stats, stats, "implication"),
+            [frame], new(1, 0, 1, null, [frame], null), [new("blocked", 6, "UserRequest", 5, 0.0, 1, 1)], [new("1", "Graphics", 10)],
+            new("available", 9, 2, 4, 3, 100), new("unavailable", "none"), VerdictRules.RulesDto, VerdictRules.Semantics, []));
+        var correlation = new CorrelationRowDto("Frame/Lighting", new EventRef("gpu-1", 0, 7), 2, 400, 0.0, 0.0, "measured", "Frame/Lighting", "cpu", 1, 50, stats, ["threadRowId 10"],
+            "pathMatch", ["legacyPixPrefix"], "medium", 1, 10, 10, 0.25, []);
+        Validate("pix_correlate", new CorrelationDto("gpu-1", "timing-1", TimingCorrelation.Identity, null, new ReplayProvenance("replay", "2606.18", null, null, null, "semantics"),
+            range, 42, new(4, 6, false, 5, 7, false, 3, 2, 1, 1, 2), new(1, 0, 1, null, [correlation], null),
+            [new("GpuOnly", 1, 0.0, new EventRef("gpu-1", 1, 2), null)], [new("Frame", 2, 0.0, null, "cpu")],
+            [new(0, "Graphics", "GRAPHICS", "1", "Graphics", "Direct", "typeAndName", "medium")], TimingDatabase.CorrelationSemantics, [], []));
     }
 
     private static void Validate(string tool, object value)

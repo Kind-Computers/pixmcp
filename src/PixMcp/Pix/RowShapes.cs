@@ -107,7 +107,8 @@ public static class RowShapes
     public static readonly RowShape<RecordedTimingEventDto> RecordedTimingEvents = new(
     [
         Col<RecordedTimingEventDto>("eventId", "string", "Marker definition id within the timing capture", true, r => r.EventId),
-        Col<RecordedTimingEventDto>("domain", "string", "cpu or gpu lane family", true, r => r.Domain),
+        Col<RecordedTimingEventDto>("domain", "string", "cpu, cpuMarkers, gpuMarkers, gpuSubmissions or gpuHardware", true, r => r.Domain),
+        Col<RecordedTimingEventDto>("source", "string", "pixCpuEvent, pixCpuMarker, pixGpuMarker, apiSubmission or hardwareQueue", false, r => r.Source),
         Col<RecordedTimingEventDto>("name", "string", "Event name", true, r => r.Name),
         Col<RecordedTimingEventDto>("beginNs", "string", "Begin timestamp (decimal string)", true, r => r.BeginNs, "ns"),
         Col<RecordedTimingEventDto>("endNs", "string", "Exclusive end timestamp", false, r => r.EndNs, "ns"),
@@ -119,9 +120,15 @@ public static class RowShapes
         Col<RecordedTimingEventDto>("threadName", "string", "Thread name", false, r => r.ThreadName),
         Col<RecordedTimingEventDto>("queueId", "string", "Recorded queue id", true, r => r.QueueId),
         Col<RecordedTimingEventDto>("queueName", "string", "Recorded queue name", false, r => r.QueueName),
+        Col<RecordedTimingEventDto>("submitNs", "string", "CPU submit timestamp of a gpuSubmissions row", false, r => r.SubmitNs, "ns"),
+        Col<RecordedTimingEventDto>("submitLatencyNs", "string", "GPU begin minus CPU submit (null when begin precedes submit)", true, r => r.SubmitLatencyNs, "ns"),
+        Col<RecordedTimingEventDto>("commandListCount", "integer", "Command lists in the submission", false, r => r.CommandListCount),
+        Col<RecordedTimingEventDto>("submissionRef", "string", "Reference for pix_timing_submissions", false, r => r.SubmissionRef),
+        Col<RecordedTimingEventDto>("hardwareQueueName", "string", "Hardware queue of a gpuHardware range", false, r => r.HardwareQueueName),
         Col<RecordedTimingEventDto>("executionNs", "string", "Recorded CPU execution time", false, r => r.ExecutionNs, "ns"),
         Col<RecordedTimingEventDto>("stallNs", "string", "Recorded CPU stall time", false, r => r.StallNs, "ns"),
-        Col<RecordedTimingEventDto>("executionTimingState", "string", "available, ambiguous or unavailable", false, r => r.ExecutionTimingState),
+        Col<RecordedTimingEventDto>("executionTimingState", "string", "available, ambiguous, inconsistent, unavailable or unsupported", false, r => r.ExecutionTimingState),
+        Col<RecordedTimingEventDto>("executionTimingMethod", "string", "rowId (CpuExecutionRowId lookup) or tupleMatch", false, r => r.ExecutionTimingMethod),
     ], new Dictionary<string, RefRecipe>(), new Dictionary<string, string> { ["timestamps"] = "decimal nanosecond strings on the capture clock; endNs is exclusive; nested events overlap" },
     r => r with { ThreadName = null, QueueName = null, ExecutionNs = null, StallNs = null, ExecutionTimingState = null });
 

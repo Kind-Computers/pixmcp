@@ -88,10 +88,19 @@ public static class PixErrors
         public const string TimingCounterNotFound = "timing_counter_not_found";
         public const string TimingCaptureInvalid = "timing_capture_invalid";
         public const string TimingCaptureBusy = "timing_capture_busy";
+        public const string SqlSyntaxError = "sql_syntax_error";
+        public const string SqlExecutionError = "sql_execution_error";
+        public const string SqlForbidden = "sql_forbidden";
+        public const string SqlNotReadOnly = "sql_not_read_only";
+        public const string SqlMultipleStatements = "sql_multiple_statements";
+        public const string SqlMissingParameter = "sql_missing_parameter";
+        public const string SqlInvalidParameter = "sql_invalid_parameter";
+        public const string SqlTimeout = "sql_timeout";
+        public const string SqlInterrupted = "sql_interrupted";
         public const string ToolError = "tool_error";
 
         /// <summary>Codes that describe a transient condition the caller may retry after following nextCalls.</summary>
-        public static readonly IReadOnlySet<string> Retryable = new HashSet<string>(StringComparer.Ordinal) { AnalysisActive, PreparationUnavailable, ResultCapacityExceeded, Timeout, TimingCaptureBusy, TimingQueryInterrupted, TimingQueryInvalidated, WorkerBusy };
+        public static readonly IReadOnlySet<string> Retryable = new HashSet<string>(StringComparer.Ordinal) { AnalysisActive, PreparationUnavailable, ResultCapacityExceeded, SqlInterrupted, SqlTimeout, Timeout, TimingCaptureBusy, TimingQueryInterrupted, TimingQueryInvalidated, WorkerBusy };
 
         /// <summary>Every code, sorted; derived from the constants so nothing can be emitted that is not documented.</summary>
         public static readonly IReadOnlyList<string> All = typeof(Codes).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)

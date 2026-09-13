@@ -32,10 +32,15 @@ public sealed partial class TimingCaptureHandle : PixHandle
 
     public override void Close(List<string> warnings)
     {
-        InvalidateQueries();
-        try { Document.Close(); }
-        catch (Exception ex) { warnings.Add("Close: " + PixErrors.Describe(ex)); }
-        Document = null!;
+        bool exclusive = DocumentGate.WriteOrForce(() =>
+        {
+            InvalidateQueries();
+            try { Document.Close(); }
+            catch (Exception ex) { warnings.Add("Close: " + PixErrors.Describe(ex)); }
+            Document = null!;
+        });
+        if (!exclusive)
+            warnings.Add("Close: a running timing query did not stop within 5 s; the capture was closed anyway and that query will fail.");
     }
 }
 

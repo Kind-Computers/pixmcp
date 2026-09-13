@@ -66,7 +66,8 @@ internal static class ServerHost
                     "pix_info shows the active operation and storage usage. Queued cancellation is immediate; running native cancellation is best effort. " +
                     "Use pix_gpu_counters_prepare to collect counters in the background before paging pix_gpu_counters_read. " +
                     "Timing describes GPU replay; nested marker sums and replay queue spans are not application frame latency. " +
-                    "Recorded timing captures use pix_timing_overview, pix_timing_events, pix_timing_counters_list/read, " +
+                    "Recorded timing queries run off the PIX thread; save, symbol resolution and close interrupt them (repeat on timing_query_invalidated). " +
+                    "Recorded timing captures use pix_timing_overview, pix_timing_gpu_summary (per-queue busy, latency and VSync), pix_timing_tree (recorded PIX event paths per thread or queue), pix_timing_verdict (experimental CPU/GPU/sync-bound frame verdict), pix_correlate (GPU capture passes to recorded markers by name), pix_timing_events, pix_timing_counters_list/read, " +
                     "pix_timing_hotspots and pix_timing_calltree without GPU replay. Times are nanoseconds with exclusive interval ends. " +
                     "CPU samples are statistical counts, not exact CPU time; inspect stack/symbol coverage and explicitly resolve symbols when needed. " +
                     "Use pix_timing_submissions for recorded CPU queue submission to GPU execution correlation, then follow threadRowId " +

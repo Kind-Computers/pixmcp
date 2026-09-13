@@ -191,7 +191,7 @@ def run_timing(ctx, capture_path, process_id):
                 limitation("process", "The launched process ID was not found in the recorded capture.")
             threads = overview["items"]["threads"]
 
-        for domain in ("cpu", "gpu"):
+        for domain in ("cpu", "gpuSubmissions"):
             events = stage(domain + " marker events and continuation", lambda domain=domain: _pages(
                 ctx, "pix_timing_events", "events", **selection, domain=domain, orderBy="duration", limit=25))
             if events:

@@ -241,9 +241,9 @@ public sealed class JobManager : IDisposable
         => StartAfter(kind, description, null, work, owner);
 
     /// <summary>Runs managed work independently of the PIX worker and native factory. Results are owned by <paramref name="owner"/> (or the call's handles).</summary>
-    internal Job StartManaged(string kind, string description, Func<Job, Task<object?>> work, string? owner = null)
+    internal Job StartManaged(string kind, string description, Func<Job, Task<object?>> work, string? owner = null, IReadOnlyCollection<string>? ownerIds = null)
     {
-        string[] owners = owner is null ? StructuredToolResults.CurrentOwners() : [owner];
+        string[] owners = ownerIds?.Distinct(StringComparer.Ordinal).ToArray() ?? (owner is null ? StructuredToolResults.CurrentOwners() : [owner]);
         var job = new Job($"job-{Interlocked.Increment(ref _next)}", kind, description, _session.Results, owners: owners, origin: StructuredToolResults.CurrentCall());
         lock (_managedGate)
         {

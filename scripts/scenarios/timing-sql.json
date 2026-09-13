@@ -1,0 +1,11 @@
+[
+ ["pix_timing_open", {"path": "$env.PIX_TEST_TIMING_CAPTURE"}],
+ ["pix_timing_schema", {"handle": "$pix_timing_open.handle", "includeColumns": false, "limit": 5, "waitSeconds": 60}, {"census.virtualTables": 8, "capabilities.gpuSubmissions.state": "available"}],
+ ["pix_timing_schema", {"handle": "$pix_timing_open.handle", "table": "ContextSwitch", "includeQueries": false, "waitSeconds": 60}, {"table.table.kind": "virtual", "tables.total": 1}],
+ ["pix_timing_sql", {"handle": "$pix_timing_open.handle", "query": "gpu_busy_per_queue", "waitSeconds": 60}, {"rowCount": 2, "query": "gpu_busy_per_queue"}],
+ ["pix_timing_sql", {"handle": "$pix_timing_open.handle", "sql": "SELECT Core, COUNT(*) AS switches FROM ContextSwitch WHERE Timestamp >= :start AND Timestamp < :end GROUP BY Core ORDER BY switches DESC", "maxRows": 3, "waitSeconds": 60}, {"rowCount": 3, "hasMore": true, "nextOffset": 3, "boundParameters.0.source": "prebound"}],
+ ["pix_timing_gpu_summary", {"handle": "$pix_timing_open.handle", "waitSeconds": 60}, {"queues.0.submissions": 404, "cpuGpuCausality.state": "empty"}],
+ ["pix_timing_tree", {"handle": "$pix_timing_open.handle", "threadRowId": "10067", "waitSeconds": 60}, {"lane.events": 868, "nodes.total": 2, "executionTiming.state": "available"}],
+ ["pix_timing_verdict", {"handle": "$pix_timing_open.handle", "waitSeconds": 60}, {"frames.source": "cpuMarker", "summary.dominantVerdict": "cpuBound"}],
+ ["pix_close_all", {}]
+]

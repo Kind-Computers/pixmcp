@@ -161,6 +161,62 @@ add to this section until the release is tagged.
   PIX assembly, with a `pix_info { probe: true }` nextCall. Capability states
   `resourceContents`, `pixelHistory` and `captureShaderStepping` come from type probes of the
   loaded assembly (naming its file version) instead of hard-coded verdicts.
+- `pix_timing_hotspots` and `pix_timing_calltree` take `efficiencyClass` (samples taken on cores
+  of that `PhysicalCores.EfficiencyClass`); on heterogeneous CPUs coverage reports
+  `samplesByEfficiencyClass` and each hotspot `inclusiveByEfficiencyClass`. A capture without
+  core classes rejects the filter with `timing_schema_unsupported`, and an unrecorded class with
+  `invalid_arguments` listing the recorded ones.
+- `pix_timing_overview.sections`: `capture` (analysis-relevant CaptureData keys), `dataQuality`, `gpu`,
+  `frames`, `cores`, `modules` and `vram` summaries computed with the named query library, `insights` (up to eight findings with
+  evidence, implication and follow-up calls) and `unavailable` (sections the capture cannot supply).
+- `pix_timing_sql` and `pix_timing_schema`: read-only SQL over a timing capture's PixStorage
+  database with pre-bound window and fact parameters (`rangeMode` full or reliable), documented
+  columns, joins and caveats (embedded `pixstorage-docs.json`, observed on 2606.18), capability
+  probes, capture facts, and a named query library: `capture_facts`, `dropped_data`,
+  `module_symbols`, `core_efficiency`, `gpu_busy_per_queue`, `submit_latency_per_thread`,
+  `gpu_hardware_queues`, `frames_vsync`, `frames_present`, `thread_summary`,
+  `context_switches_per_thread`, `context_switch_waits`, `ready_thread_latency`,
+  `cpu_execution_rollup`, `cpu_markers`, `counters_bucketed`, `vram_budget`, `file_io_summary` and
+  `memory_summary`. Named query parameters can be required; percentiles use the nearest-rank method.
+- `pix_timing_gpu_summary`: recorded GPU work per API command queue without replay. Each queue
+  reports valid submissions and `invalidReasons`, `totals` (busy as the union of execution
+  intervals clipped to the window, idle, span, summed execution, `busyPercentOfWindow`),
+  submit-latency and execution statistics (nearest-rank p50/p95), `topSubmittingThreads` and
+  `longestExecutions` with `submissionRef`. The response adds hardware queue busy time, VSync pacing
+  per monitor and `cpuGpuCausality` (whether CPU marker to GPU work links were recorded).
+- `pix_timing_tree`: a thread's recorded PIX CPU events (`threadRowId`) or a queue's GPU-side
+  events (`queueId`) nested by recorded level and interval and aggregated by marker path, with
+  occurrences, clipped inclusive and self `DurationDto`s (shares of lane span, top-level sum and
+  parent), occurrence duration statistics, execution/stall sums from `PixCpuExecutionTimes`,
+  malformed-nesting flags, `parentPath`/`depth`/`sortBy`/`minSelfNs`, paging, and follow-ups to the
+  slowest occurrence. `pix_timing_overview` suggests it for the thread with the most PIX events, and
+  `pix_timing_gpu_summary` for the busiest queue when GPU-side markers exist.
+- `pix_timing_verdict` (experimental until a bottleneck fixture validates its thresholds): recorded
+  frames from GpuFrame presents, the render thread's repeated top-level PIX event, VSync markers or
+  submission cadence, with per-frame GPU busy time and render-thread on-CPU, blocked and
+  ready-not-running time rebuilt from context switches and ready events. Ordered heuristic rules
+  (`gpuBound`, `unknown`, `presentBound`, `cpuBound`, `syncBound`, `waitBound`, `contended`,
+  `balanced`) are returned with their thresholds; the response adds the dominant verdict and
+  confidence, frame and ready-latency statistics, the longest frames, wait reasons with probable
+  KWAIT_REASON names, per-queue busy shares, a VRAM budget check, a paged per-frame table and
+  follow-up calls. `pix_timing_gpu_summary` suggests it.
+- `pix_correlate`: a GPU capture's timed marker paths joined to a timing capture's recorded PIX
+  marker paths by name (full path, then a unique leaf; case, whitespace, legacy PIX prefix and
+  trailing numbers normalized and reported), with replayed inclusive EOP time, recorded occurrence
+  statistics, submissions inside the recorded occurrences, the emitting threads' blocked and ready
+  time, `ratioRecordedToReplay`, unmatched paths on both sides, a queue map and an explicit
+  `identity` statement. Results are owned by both handles. The checked-in fixture captures record
+  different marker names on the GPU and timing sides, so native validation covers unmatched lists
+  and queue mapping until the fixture emits shared GPU marker names.
+- Read-only SQL engine (`Pix/Sql`): `ReadOnlySqlite` (private read-only connection, `query_only`,
+  statement budgets, interruption), `SqlStatementGuard` (SQLite limits plus an authorizer that
+  allows only SELECT, READ, RECURSIVE and non-file functions and records the tables read) and
+  `SqlQuery` (one statement, SQLite's read-only verdict, named `$`/`@`/`:` parameters, server
+  pre-bound values, JSON-safe cells, maxRows/maxBytes/maxStringLength truncation with an exact
+  offset continuation, `countTotal`, `EXPLAIN QUERY PLAN`). New error codes `sql_syntax_error`,
+  `sql_execution_error`, `sql_forbidden`, `sql_not_read_only`, `sql_multiple_statements`,
+  `sql_missing_parameter`, `sql_invalid_parameter`, `sql_timeout` and `sql_interrupted`. The
+  tools that expose it arrive with R11.
 - `scripts/check_versions.py` (hosted CI) keeps README, CLAUDE.md and the sources on the
   verified PIX version; `.github/pull_request_template.md` asks for a CHANGELOG entry.
 
@@ -224,8 +280,43 @@ add to this section until the release is tagged.
   clients must not derive one id from another. A malformed `PIXMCP_RESULT_*_BYTES` value
   now fails startup instead of failing the first tool call.
 
+- `pix_timing_events.domain` is `cpu`, `cpuMarkers`, `gpuMarkers`, `gpuSubmissions`, `gpuHardware` or
+  `all`; `gpu` is removed because `PixGpuExecution` is empty unless the application emits GPU-side PIX
+  events, while real GPU work is in `ApiQueueExecution` (`gpuSubmissions`) and `GpuWorkRange`
+  (`gpuHardware`). Rows gain `source`, `submitNs`, `submitLatencyNs`, `commandListCount`,
+  `submissionRef`, `hardwareQueueId`, `hardwareQueueName`, `overlapLevel`, `color` and
+  `executionTimingMethod`; `processId` can be null (hardware ranges without an API queue); the
+  response lists `sources` with their state and matching rows; new filters `queueName` and
+  `hardwareQueueId`. CPU execution/stall times come from one `CpuExecutionRowId` lookup per event
+  (`rowId`, with an `inconsistent` state when Execution + Stall differs from the duration) and fall
+  back to the (EventId, begin, end) tuple match (`tupleMatch`) when the hidden column is absent.
+- `pix_timing_overview` capability keys: `gpuEvents` is now `gpuMarkers` and `submissions` is now
+  `gpuSubmissions`; new `cpuMarkers` and `gpuHardware`; recorded families carry `rows` and report
+  `empty` when their table has no rows. Threads gain `startNs`, `endNs`, `pixEventCount`,
+  `contextSwitchCount` and `markerCount`; queues gain `adapterName`, `beginNs`, `endNs`,
+  `apiExecutionCount`, `commandListCount` and `maxWorkLevel`; a new `hardwareQueues` page lists the
+  hardware queues with GPU work ranges. nextCalls lead to the `gpuSubmissions`, `gpuHardware` and
+  `cpu` event domains and to `pix_timing_schema`.
+- `pix_timing_overview` pages (processes, threads, queues, hardware queues) default to 5 rows
+  instead of 25 to leave room for the new sections; page with `offset` and `limit`.
 - Discovery no longer silently picks the newest of several eligible PIX Preview installs
   (build and runtime); choose one with `PIX_DIR` or opt into the newest explicitly.
+
+- Every recorded-timing tool (`pix_timing_overview`, `pix_timing_events`, `pix_timing_submissions`,
+  `pix_timing_thread_switches`, `pix_timing_counters_read`, `pix_timing_hotspots`,
+  `pix_timing_calltree`, `pix_timing_sql`, `pix_timing_schema`) takes `rangeMode` and defaults to
+  `full`: the window now runs from the first reliable timestamp (CaptureFacts 2) through the
+  capture end (CaptureFacts 3) instead of stopping at the capture stop timestamp (CaptureFacts 24),
+  which excluded most recorded data in captures that keep recording after stop. `rangeMode=reliable`
+  restores the old end. Counts, totals and percentages over the default window change accordingly.
+  The provenance range gains `rangeMode`, `captureEndNs`, a `note`, and `coverage` (in-window and
+  total rows for context switches, CPU events, GPU submissions and GPU hardware ranges).
+- Recorded-timing queries (`pix_timing_overview`, `pix_timing_events`, hotspots, calltree,
+  counters, submissions, thread switches) run as managed jobs off the PIX worker, so a GPU
+  replay no longer delays them. `pix_timing_save`, `pix_timing_resolve_symbols` and `pix_close`
+  take the document's writer gate: running timing queries are interrupted and fail with
+  `timing_query_invalidated` (retryable), a query that does not stop within 5 s makes save and
+  symbol resolution fail with `timing_capture_busy`, and close proceeds with a warning.
 
 ### Removed
 

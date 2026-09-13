@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Globalization;
 using Microsoft.Data.Sqlite;
 
 namespace PixMcp.Pix;
@@ -17,15 +18,32 @@ internal sealed partial class TimingDatabase
     {
         public TimingFunctionDto Function { get; } = function;
         public long Inclusive, Exclusive;
+        public SortedDictionary<string, long> ByClass { get; } = new(StringComparer.Ordinal);
     }
 
-    internal TimingSampleAnalysisDto Samples(string handle, uint? processId, uint? threadId, long? start, long? end) => Guard<TimingSampleAnalysisDto>(() =>
+    internal TimingSampleAnalysisDto Samples(string handle, uint? processId, uint? threadId, long? start, long? end, string rangeMode = RangeModeFull,
+        long? efficiencyClass = null) => Guard<TimingSampleAnalysisDto>(() =>
     {
-        var (a, b, provenance) = Range(start, end);
+        var (a, b, provenance) = Range(start, end, rangeMode);
         Require("CpuSample", "Timestamp", "Core", "ProcThreadId");
         bool stacks = Has("Stacks", "Id", "NumFrames", "Addresses") &&
             Has("StackEvents", "OSThreadId", "StartTimestamp", "EndTimestamp", "StackEventData") && HasFunction("FindStackId", 2);
         InitializeSymbols(processId, a, b);
+        // Heterogeneous CPUs record PhysicalCores.EfficiencyClass; CpuSample.Core is assumed to be a Cores.Id.
+        var coreClasses = new Dictionary<long, long>();
+        if (Has("Cores", "Id", "PhysicalCoreId") && Has("PhysicalCores", "Id", "EfficiencyClass"))
+            foreach ((long core, long cls) in Rows("SELECT c.Id, pc.EfficiencyClass FROM Cores c JOIN PhysicalCores pc ON pc.Id = c.PhysicalCoreId", r => (r.GetInt64(0), r.GetInt64(1))))
+                coreClasses[core] = cls;
+        long[] recordedClasses = coreClasses.Values.Distinct().Order().ToArray();
+        bool heterogeneous = recordedClasses.Length > 1;
+        if (efficiencyClass is long requested)
+        {
+            if (coreClasses.Count == 0)
+                throw new PixToolException(PixErrors.Codes.TimingSchemaUnsupported, "This timing capture does not record core efficiency classes (Cores.PhysicalCoreId and PhysicalCores.EfficiencyClass).");
+            if (!recordedClasses.Contains(requested))
+                throw PixErrors.InvalidArguments($"efficiencyClass {requested} was not recorded in this capture; recorded classes: {string.Join(", ", recordedClasses)}.");
+        }
+        var classSamples = new SortedDictionary<string, long>(StringComparer.Ordinal);
         var hotspots = new Dictionary<string, Hotspot>(StringComparer.Ordinal);
         var root = new SampleNode("root", null, null);
         var nodes = new List<SampleNode> { root };
@@ -43,6 +61,11 @@ internal sealed partial class TimingDatabase
             while (reader.Read())
             {
                 Check();
+                long sampleCore = reader.GetInt64(1);
+                bool knownCore = coreClasses.TryGetValue(sampleCore, out long coreClass);
+                if (efficiencyClass is long wanted && (!knownCore || coreClass != wanted)) continue;
+                string sampleClass = knownCore ? coreClass.ToString(CultureInfo.InvariantCulture) : "unknown";
+                if (heterogeneous) classSamples[sampleClass] = classSamples.GetValueOrDefault(sampleClass) + 1;
                 samples++; root.Inclusive++;
                 if (reader.IsDBNull(3)) { root.Exclusive++; continue; }
                 ulong[]? addresses = ReadStack(reader.GetInt64(3));
@@ -60,7 +83,11 @@ internal sealed partial class TimingDatabase
                     TimingFunctionDto frame = frames[i];
                     if (!hotspots.TryGetValue(frame.Key, out Hotspot? hotspot)) hotspots.Add(frame.Key, hotspot = new(frame));
                     // Inclusive function counts count a recursive function once per sample.
-                    if (visited.Add(frame.Key)) hotspot.Inclusive++;
+                    if (visited.Add(frame.Key))
+                    {
+                        hotspot.Inclusive++;
+                        if (heterogeneous) hotspot.ByClass[sampleClass] = hotspot.ByClass.GetValueOrDefault(sampleClass) + 1;
+                    }
                     if (i == 0) hotspot.Exclusive++;
                 }
                 SampleNode parent = root;
@@ -79,16 +106,16 @@ internal sealed partial class TimingDatabase
         }
         double Percent(long count) => samples == 0 ? 0 : count * 100d / samples;
         var rows = hotspots.Values.OrderByDescending(h => h.Inclusive).ThenByDescending(h => h.Exclusive).ThenBy(h => h.Function.Key, StringComparer.Ordinal)
-            .Select(h => new TimingHotspotDto(h.Function, h.Inclusive, h.Exclusive, Percent(h.Inclusive), Percent(h.Exclusive))).ToArray();
+            .Select(h => new TimingHotspotDto(h.Function, h.Inclusive, h.Exclusive, Percent(h.Inclusive), Percent(h.Exclusive)) { InclusiveByEfficiencyClass = heterogeneous ? h.ByClass : null }).ToArray();
         // Persist sibling order once so calltree pages can stream the snapshot with O(limit)
         // retained rows, even when a root has many distinct sampled callers.
         var tree = nodes.OrderBy(n => n.Parent?.Id, StringComparer.Ordinal).ThenByDescending(n => n.Inclusive)
             .ThenBy(n => n.Function?.Key, StringComparer.Ordinal)
             .Select(n => new TimingCallNodeDto(n.Id, n.Parent?.Id, n.Function, n.Inclusive, n.Exclusive, Percent(n.Inclusive), n.Children.Count)).ToArray();
-        return new(handle, provenance, new(processId, threadId),
+        return new(handle, provenance, new(processId, threadId, efficiencyClass),
             new(samples, withStacks, samples - withStacks, invalidStacks, unresolvedSamples, resolvedFrames, unresolvedFrames,
                 !stacks ? "unsupported" : withStacks > 0 ? "available" : "empty",
-                !_hasSymbols ? "unsupported" : resolvedFrames == 0 ? "unresolved" : unresolvedFrames > 0 ? "partial" : "resolved"), rows, tree);
+                !_hasSymbols ? "unsupported" : resolvedFrames == 0 ? "unresolved" : unresolvedFrames > 0 ? "partial" : "resolved") { SamplesByEfficiencyClass = heterogeneous ? classSamples : null }, rows, tree);
     });
 
     internal static ulong[]? DecodeStack(long count, byte[]? bytes)

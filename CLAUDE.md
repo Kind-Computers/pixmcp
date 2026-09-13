@@ -36,7 +36,10 @@ enforces it). See README.md.
   do not time out native work after execution starts. Managed capture readiness/warmup
   belongs in `JobManager.StartAfter`, outside the worker.
 - Timing analysis reads the document's PixStorage path using private, read-only SQLite
-  connections in cancellable jobs. Close queries before save/symbol resolution; invalidate
+  connections in cancellable managed jobs off the PIX worker (`TimingCaptureHandle.QueryJob`
+  behind `DocumentGate`); save, symbol resolution and close go through `WithDocumentWriter`,
+  which interrupts and drains readers. All caller-supplied SQL runs through `SqlQuery` and
+  `SqlStatementGuard` (`Pix/Sql`), never through `SqliteCommand`. Close queries before save/symbol resolution; invalidate
   cached profiles after document changes. Recorded sample counts are not exact CPU time.
 - Exact PIX API signatures: reflect over the DLL (see the `reflect` scratch project pattern in git
   history/README) or read the official samples at https://github.com/microsoft/pix-samples.

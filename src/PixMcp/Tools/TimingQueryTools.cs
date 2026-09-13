@@ -9,18 +9,21 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class TimingQueryTools
 {
-    private const string WaitDescription = "Seconds to wait for the cached SQLite query job (default 2, max 3600). Pending responses include exact wait and retry calls. Queries do not replay the GPU.";
-    private const string TimeDescription = "Optional decimal nanosecond timestamp in the recorded capture clock. The default interval is first reliable timestamp through capture stop; endNs is exclusive.";
+    internal const string WaitDescription = "Seconds to wait for the cached SQLite query job (default 2, max 3600). Pending responses include exact wait and retry calls. Queries do not replay the GPU.";
+    internal const string EfficiencyClassDescription = "Only CPU samples taken on cores of this PhysicalCores.EfficiencyClass (higher is more performant; see the core_efficiency named query). Coverage and hotspots report per-class counts when the CPU has more than one class.";
+    internal const string TimeDescription = "Window start as a decimal nanosecond timestamp in the recorded capture clock; default: the first reliable timestamp (the window then ends per rangeMode, and endNs is exclusive).";
 
     [McpServerTool(Name = "pix_timing_overview", Title = "Timing capture overview", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Summarizes recorded timing data: reliable interval, process/thread/queue pages, recorded counters, sample/callstack coverage and symbol availability. Start here for a CPU/GPU timing investigation; no GPU replay is performed.")]
     public static Task<string> Overview(PixSession session, JobManager jobs, [Description("Timing capture handle (from pix_timing_open).")] string handle, [Description("Recorded process id; default: the capture's target process.")] uint? processId = null,
-        [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = 25, [Description(WaitDescription)] double waitSeconds = 2,
+        [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum processes, threads, queues and hardware queues per page (default 5, max 1000).")] int limit = 5, [Description(WaitDescription)] double waitSeconds = 2,
+        [Description(TimingSqlTools.RangeModeDescription)] string rangeMode = TimingDatabase.RangeModeFull,
         [Description(Tools.IncludeProvenanceDescription)] bool includeProvenance = false,
         CancellationToken cancellationToken = default)
     {
         TimingDatabase.ValidatePage(offset, limit);
-        return Query(session, jobs, "pix_timing_overview", handle, new { query = "overview", processId, offset, limit },
-            db => db.Overview(handle, processId, offset, limit), waitSeconds, cancellationToken);
+        string mode = TimingDatabase.NormalizeRangeMode(rangeMode);
+        return Query(session, jobs, "pix_timing_overview", handle, new { query = "overview", processId, offset, limit, mode },
+            db => db.Overview(handle, processId, offset, limit, mode), waitSeconds, cancellationToken);
     }
 
     [McpServerTool(Name = "pix_timing_submissions", Title = "Recorded GPU submissions", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Pages recorded queue submissions correlated directly to their GPU execution. Returns the submitting thread, CPU submit timestamp, GPU start/end and validated latency. This is queue submission correlation, not individual draw or named-marker correlation. Zero or inconsistent GPU timing remains explicitly unavailable. Submission references expire on save, symbol resolution or close.")]
@@ -28,38 +31,42 @@ public static class TimingQueryTools
         [Description("Exact submission reference returned by this tool; omit process/thread/queue/time filters when supplied.")] string? submissionRef = null,
         [Description("Recorded process id; default: the capture's target process.")] uint? processId = null, [Description("Only rows of this recorded thread id.")] uint? threadId = null, [Description("Only submissions to this recorded queue id.")] string? queueId = null,
         [Description("Optional decimal nanoseconds. The [startNs,endNs) interval selects CPU submission timestamps; original GPU timing is retained outside the selection. Defaults to the reliable capture interval.")] string? startNs = null,
-        [Description("Window end in capture nanoseconds (exclusive); default: the end of the capture range.")] string? endNs = null, [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = 25,
+        [Description("Window end in capture nanoseconds (exclusive); default: per rangeMode.")] string? endNs = null, [Description(TimingSqlTools.RangeModeDescription)] string rangeMode = TimingDatabase.RangeModeFull, [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = 25,
         [Description(WaitDescription)] double waitSeconds = 2,
         [Description(Tools.IncludeProvenanceDescription)] bool includeProvenance = false,
         CancellationToken cancellationToken = default)
     {
         TimingDatabase.ValidatePage(offset, limit);
         long? start = TimingDatabase.ParseNs(startNs, nameof(startNs)), end = TimingDatabase.ParseNs(endNs, nameof(endNs));
+        string mode = TimingDatabase.NormalizeRangeMode(rangeMode);
         return Query(session, jobs, "pix_timing_submissions", handle,
-            new { query = "submissions", submissionRef, processId, threadId, queueId, start, end, offset, limit },
-            (db, generation) => db.Submissions(handle, generation, submissionRef, processId, threadId, queueId, start, end, offset, limit), waitSeconds, cancellationToken);
+            new { query = "submissions", submissionRef, processId, threadId, queueId, start, end, offset, limit, mode },
+            (db, generation) => db.Submissions(handle, generation, submissionRef, processId, threadId, queueId, start, end, offset, limit, mode), waitSeconds, cancellationToken);
     }
 
     [McpServerTool(Name = "pix_timing_thread_switches", Title = "Recorded thread switches", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Pages recorded switch-in/out scheduling evidence for one capture-local thread lifetime. Switch-out rows include the raw wait-reason code and the stack recorded at that exact timestamp when present; unresolved addresses remain visible. These records do not establish blocked duration, waited-on objects, or the cause of a GPU gap.")]
     public static Task<string> ThreadSwitches(PixSession session, JobManager jobs, [Description("Timing capture handle (from pix_timing_open).")] string handle,
         [Description("Capture-local threadRowId from pix_timing_overview or pix_timing_submissions; not an OS thread ID.")] string threadRowId,
-        [Description(TimeDescription)] string? startNs = null, [Description("Window end in capture nanoseconds (exclusive); default: the end of the capture range.")] string? endNs = null, [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = 25,
+        [Description(TimeDescription)] string? startNs = null, [Description("Window end in capture nanoseconds (exclusive); default: per rangeMode.")] string? endNs = null, [Description(TimingSqlTools.RangeModeDescription)] string rangeMode = TimingDatabase.RangeModeFull, [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = 25,
         [Description(WaitDescription)] double waitSeconds = 2,
         [Description(Tools.IncludeProvenanceDescription)] bool includeProvenance = false,
         CancellationToken cancellationToken = default)
     {
         TimingDatabase.ValidatePage(offset, limit); TimingDatabase.ParseId(threadRowId, nameof(threadRowId));
         long? start = TimingDatabase.ParseNs(startNs, nameof(startNs)), end = TimingDatabase.ParseNs(endNs, nameof(endNs));
+        string mode = TimingDatabase.NormalizeRangeMode(rangeMode);
         return Query(session, jobs, "pix_timing_thread_switches", handle,
-            new { query = "thread-switches", threadRowId, start, end, offset, limit },
-            db => db.ThreadSwitches(handle, threadRowId, start, end, offset, limit), waitSeconds, cancellationToken);
+            new { query = "thread-switches", threadRowId, start, end, offset, limit, mode },
+            db => db.ThreadSwitches(handle, threadRowId, start, end, offset, limit, mode), waitSeconds, cancellationToken);
     }
 
     [McpServerTool(Name = "pix_timing_events", Title = "Recorded timing events", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Pages recorded PIX CPU/GPU executions with event names, lanes, original durations and overlap with the selected [startNs,endNs) interval. Event IDs identify marker definitions within this timing capture, not GPU-capture EventRefs. Nested event durations overlap and must not be summed into frame latency.")]
     public static Task<string> Events(PixSession session, JobManager jobs, [Description("Timing capture handle (from pix_timing_open).")] string handle,
-        [Description("cpu, gpu, or all (default all).")] string domain = "all", [Description("Recorded process id; default: the capture's target process.")] uint? processId = null, [Description("Only rows of this recorded thread id.")] uint? threadId = null,
-        [Description("Recorded queue ID from pix_timing_overview; requires domain=gpu.")] string? queueId = null,
-        [Description("Only rows whose name contains this text (case-insensitive).")] string? nameContains = null, [Description(TimeDescription)] string? startNs = null, [Description("Window end in capture nanoseconds (exclusive); default: the end of the capture range.")] string? endNs = null,
+        [Description("cpu (PIX CPU events), cpuMarkers (PIX CPU point markers), gpuMarkers (GPU-side PIX events), gpuSubmissions (ExecuteCommandLists: CPU submit and GPU begin/end), gpuHardware (hardware queue work ranges) or all (default).")] string domain = "all", [Description("Recorded process id; default: the capture's target process.")] uint? processId = null, [Description("Only rows of this recorded thread id.")] uint? threadId = null,
+        [Description("Recorded API queue id from pix_timing_overview; gpuMarkers, gpuSubmissions, gpuHardware or all.")] string? queueId = null,
+        [Description("Only GPU rows whose queue name contains this text (case-insensitive).")] string? queueName = null,
+        [Description("Only gpuHardware rows of this HardwareCommandQueue id.")] string? hardwareQueueId = null,
+        [Description("Only rows whose name contains this text (case-insensitive).")] string? nameContains = null, [Description(TimeDescription)] string? startNs = null, [Description("Window end in capture nanoseconds (exclusive); default: per rangeMode.")] string? endNs = null, [Description(TimingSqlTools.RangeModeDescription)] string rangeMode = TimingDatabase.RangeModeFull,
         [Description("start (chronological, default) or duration (longest first).")] string orderBy = "start",
         [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = 25, [Description(WaitDescription)] double waitSeconds = 2,
         [Description(Shaping.FormatDescription)] string format = "objects",
@@ -73,12 +80,13 @@ public static class TimingQueryTools
         ShapingOptions shaping = Shaping.Options(format, brief, topN, maxStringLength, offset);
         (int o, int l) = Shaping.Window(shaping, offset, limit);
         long? start = TimingDatabase.ParseNs(startNs, nameof(startNs)), end = TimingDatabase.ParseNs(endNs, nameof(endNs));
-        return Query(session, jobs, "pix_timing_events", handle, new { query = "events", domain, processId, threadId, queueId, nameContains, start, end, orderBy, offset = o, limit = l },
-            db => db.Events(handle, domain, processId, threadId, queueId, nameContains, start, end, orderBy, o, l), waitSeconds, cancellationToken,
+        string mode = TimingDatabase.NormalizeRangeMode(rangeMode);
+        return Query(session, jobs, "pix_timing_events", handle, new { query = "events", domain, processId, threadId, queueId, queueName, hardwareQueueId, nameContains, start, end, orderBy, offset = o, limit = l, mode },
+            (db, generation) => db.Events(handle, domain, processId, threadId, queueId, nameContains, start, end, orderBy, o, l, mode, queueName, hardwareQueueId, generation), waitSeconds, cancellationToken,
             (reference, generation) =>
             {
                 TimingEventsDto dto = Metadata<TimingEventsDto>(session.Results, reference, "", cancellationToken);
-                ToolCallDto Call(int at, int? strings) => new("pix_timing_events", new { handle, domain, processId, threadId, queueId, nameContains, startNs, endNs, orderBy,
+                ToolCallDto Call(int at, int? strings) => new("pix_timing_events", new { handle, domain, processId, threadId, queueId, queueName, hardwareQueueId, nameContains, startNs, endNs, orderBy, rangeMode = mode,
                     offset = at, limit = l, format, brief, maxStringLength = strings });
                 if (shaping.Table)
                     return Shaping.Apply(dto.Events.Items, dto.Events.Total, o, l, shaping, RowShapes.RecordedTimingEvents, handle,
@@ -105,20 +113,21 @@ public static class TimingQueryTools
 
     [McpServerTool(Name = "pix_timing_counters_read", Title = "Read recorded counter", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Pages exact recorded samples for one timing-capture counter in [startNs,endNs). Values retain the counter's native units; no downsampling or GPU replay occurs.")]
     public static Task<string> CounterSamples(PixSession session, JobManager jobs, [Description("Timing capture handle (from pix_timing_open).")] string handle, [Description("Recorded counter id from pix_timing_counters_list.")] string counterId,
-        [Description(TimeDescription)] string? startNs = null, [Description("Window end in capture nanoseconds (exclusive); default: the end of the capture range.")] string? endNs = null, [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = 25,
+        [Description(TimeDescription)] string? startNs = null, [Description("Window end in capture nanoseconds (exclusive); default: per rangeMode.")] string? endNs = null, [Description(TimingSqlTools.RangeModeDescription)] string rangeMode = TimingDatabase.RangeModeFull, [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = 25,
         [Description(WaitDescription)] double waitSeconds = 2,
         [Description(Tools.IncludeProvenanceDescription)] bool includeProvenance = false,
         CancellationToken cancellationToken = default)
     {
         TimingDatabase.ValidatePage(offset, limit); TimingDatabase.ParseId(counterId, nameof(counterId));
         long? start = TimingDatabase.ParseNs(startNs, nameof(startNs)), end = TimingDatabase.ParseNs(endNs, nameof(endNs));
-        return Query(session, jobs, "pix_timing_counters_read", handle, new { query = "counter-samples", counterId, start, end, offset, limit },
-            db => db.CounterSamples(handle, counterId, start, end, offset, limit), waitSeconds, cancellationToken);
+        string mode = TimingDatabase.NormalizeRangeMode(rangeMode);
+        return Query(session, jobs, "pix_timing_counters_read", handle, new { query = "counter-samples", counterId, start, end, offset, limit, mode },
+            db => db.CounterSamples(handle, counterId, start, end, offset, limit, mode), waitSeconds, cancellationToken);
     }
 
     [McpServerTool(Name = "pix_timing_hotspots", Title = "CPU sample hotspots", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Ranks CPU sampled functions/addresses by inclusive sample count. Recursion counts once per function per sample; exclusive counts use the sampled leaf. Percentages use all selected samples, including samples without callstacks. Counts are statistical observations, not exact CPU time. Unresolved addresses remain visible; symbol resolution is always explicit.")]
-    public static Task<string> Hotspots(PixSession session, JobManager jobs, [Description("Timing capture handle (from pix_timing_open).")] string handle, [Description("Recorded process id; default: the capture's target process.")] uint? processId = null, [Description("Only rows of this recorded thread id.")] uint? threadId = null,
-        [Description(TimeDescription)] string? startNs = null, [Description("Window end in capture nanoseconds (exclusive); default: the end of the capture range.")] string? endNs = null, [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = 25,
+    public static Task<string> Hotspots(PixSession session, JobManager jobs, [Description("Timing capture handle (from pix_timing_open).")] string handle, [Description(EfficiencyClassDescription)] long? efficiencyClass = null, [Description("Recorded process id; default: the capture's target process.")] uint? processId = null, [Description("Only rows of this recorded thread id.")] uint? threadId = null,
+        [Description(TimeDescription)] string? startNs = null, [Description("Window end in capture nanoseconds (exclusive); default: per rangeMode.")] string? endNs = null, [Description(TimingSqlTools.RangeModeDescription)] string rangeMode = TimingDatabase.RangeModeFull, [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = 25,
         [Description(WaitDescription)] double waitSeconds = 2,
         [Description(Shaping.FormatDescription)] string format = "objects",
         [Description(Shaping.BriefDescription)] bool brief = false,
@@ -130,8 +139,9 @@ public static class TimingQueryTools
         TimingDatabase.ValidatePage(offset, limit);
         ShapingOptions shaping = Shaping.Options(format, brief, topN, maxStringLength, offset);
         long? start = TimingDatabase.ParseNs(startNs, nameof(startNs)), end = TimingDatabase.ParseNs(endNs, nameof(endNs));
-        return Query(session, jobs, "pix_timing_hotspots", handle, new { query = "samples", processId, threadId, start, end },
-            db => db.Samples(handle, processId, threadId, start, end), waitSeconds, cancellationToken, (reference, generation) =>
+        string mode = TimingDatabase.NormalizeRangeMode(rangeMode);
+        return Query(session, jobs, "pix_timing_hotspots", handle, new { query = "samples", processId, threadId, start, end, mode, efficiencyClass },
+            db => db.Samples(handle, processId, threadId, start, end, mode, efficiencyClass), waitSeconds, cancellationToken, (reference, generation) =>
             {
                 session.Get<TimingCaptureHandle>(handle).RememberProfile(reference, generation);
                 ResultStore store = session.Results;
@@ -141,7 +151,7 @@ public static class TimingQueryTools
                 (int o, int l) = Shaping.Window(shaping, offset, limit);
                 TimingHotspotDto[] rows = store.EnumerateArray(reference, "/hotspots", Tools.MaxResultBytes, cancellationToken)
                     .Skip(o).Take(l).Select(e => e.Deserialize<TimingHotspotDto>(Json.Options)!).ToArray();
-                ToolCallDto Call(int at, int? strings) => new("pix_timing_hotspots", new { handle, processId, threadId, startNs, endNs, offset = at, limit = l, format, brief, maxStringLength = strings });
+                ToolCallDto Call(int at, int? strings) => new("pix_timing_hotspots", new { handle, processId, threadId, startNs, endNs, rangeMode = mode, efficiencyClass, offset = at, limit = l, format, brief, maxStringLength = strings });
                 var calltree = new ToolCallDto("pix_timing_calltree", new { handle, profileRef = reference });
                 if (shaping.Table)
                     return Shaping.Apply(rows, total, o, l, shaping, RowShapes.Hotspots, handle, new { profileRef = reference, provenance, coverage, calltree },
@@ -158,20 +168,22 @@ public static class TimingQueryTools
     public static Task<string> Calltree(PixSession session, JobManager jobs, [Description("Timing capture handle (from pix_timing_open).")] string handle,
         [Description("Existing sampled profile; omit process/thread/time filters when supplied.")] string? profileRef = null,
         [Description("root, or a child node ID accompanied by its profileRef. Default: root.")] string parentNodeId = "root",
-        [Description("Recorded process id; default: the capture's target process.")] uint? processId = null, [Description("Only rows of this recorded thread id.")] uint? threadId = null, [Description(TimeDescription)] string? startNs = null, [Description("Window end in capture nanoseconds (exclusive); default: the end of the capture range.")] string? endNs = null,
+        [Description(EfficiencyClassDescription)] long? efficiencyClass = null,
+        [Description("Recorded process id; default: the capture's target process.")] uint? processId = null, [Description("Only rows of this recorded thread id.")] uint? threadId = null, [Description(TimeDescription)] string? startNs = null, [Description("Window end in capture nanoseconds (exclusive); default: per rangeMode.")] string? endNs = null, [Description(TimingSqlTools.RangeModeDescription)] string rangeMode = TimingDatabase.RangeModeFull,
         [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = 25, [Description(WaitDescription)] double waitSeconds = 2,
         [Description(Tools.IncludeProvenanceDescription)] bool includeProvenance = false,
         CancellationToken cancellationToken = default)
     {
         TimingDatabase.ValidatePage(offset, limit);
         long? start = TimingDatabase.ParseNs(startNs, nameof(startNs)), end = TimingDatabase.ParseNs(endNs, nameof(endNs));
-        if (profileRef is not null && (processId.HasValue || threadId.HasValue || start.HasValue || end.HasValue))
+        string mode = TimingDatabase.NormalizeRangeMode(rangeMode);
+        if (profileRef is not null && (processId.HasValue || threadId.HasValue || start.HasValue || end.HasValue || efficiencyClass.HasValue))
             throw new PixToolException(PixErrors.Codes.InvalidArguments, "Use profileRef to retain its sample selection, or omit profileRef to select new filters.");
         if (profileRef is null && parentNodeId != "root") throw new PixToolException(PixErrors.Codes.InvalidArguments, "A parentNodeId requires its profileRef.");
         if (profileRef is not null)
             return PixErrors.Guard("pix_timing_calltree", () => Task.FromResult(Tools.Serialize(Project(profileRef), "pix_timing_calltree", session, handle)));
-        return Query(session, jobs, "pix_timing_calltree", handle, new { query = "samples", processId, threadId, start, end },
-            db => db.Samples(handle, processId, threadId, start, end), waitSeconds, cancellationToken, (reference, generation) =>
+        return Query(session, jobs, "pix_timing_calltree", handle, new { query = "samples", processId, threadId, start, end, mode, efficiencyClass },
+            db => db.Samples(handle, processId, threadId, start, end, mode, efficiencyClass), waitSeconds, cancellationToken, (reference, generation) =>
             { session.Get<TimingCaptureHandle>(handle).RememberProfile(reference, generation); return Project(reference); });
 
         TimingCalltreeDto Project(string reference)
@@ -210,18 +222,19 @@ public static class TimingQueryTools
     private static T Metadata<T>(ResultStore store, string reference, string pointer, CancellationToken cancellationToken)
         => store.ReadElement(reference, pointer, Tools.MaxResultBytes, cancellationToken).Deserialize<T>(Json.Options)!;
 
-    private static Task<string> Query(PixSession session, JobManager jobs, string tool, string handle, object key,
+    internal static Task<string> Query(PixSession session, JobManager jobs, string tool, string handle, object key,
         Func<TimingDatabase, object> query, double waitSeconds, CancellationToken cancellationToken, Func<string, int, object>? project = null)
         => Query(session, jobs, tool, handle, key, (database, _) => query(database), waitSeconds, cancellationToken, project);
 
-    private static Task<string> Query(PixSession session, JobManager jobs, string tool, string handle, object key,
-        Func<TimingDatabase, int, object> query, double waitSeconds, CancellationToken cancellationToken, Func<string, int, object>? project = null)
+    internal static Task<string> Query(PixSession session, JobManager jobs, string tool, string handle, object key,
+        Func<TimingDatabase, int, object> query, double waitSeconds, CancellationToken cancellationToken, Func<string, int, object>? project = null,
+        IReadOnlyCollection<string>? owners = null)
         => PixErrors.Guard(tool, async () =>
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!double.IsFinite(waitSeconds) || waitSeconds is < 0 or > 3600) throw new PixToolException(PixErrors.Codes.InvalidArguments, "waitSeconds must be between 0 and 3600.");
             TimingCaptureHandle capture = session.Get<TimingCaptureHandle>(handle);
-            Job job = capture.QueryJob(jobs, session.Results, tool, key, query, out int generation);
+            Job job = capture.QueryJob(jobs, session.Results, tool, key, query, out int generation, owners);
             if (!job.IsFinished && waitSeconds > 0)
             {
                 try { await job.WaitAsync(TimeSpan.FromSeconds(waitSeconds), cancellationToken).ConfigureAwait(false); }

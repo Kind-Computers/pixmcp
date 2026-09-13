@@ -31,7 +31,7 @@ public static class CostHints
     };
     private static readonly HashSet<string> TimingTools = new(StringComparer.Ordinal)
     {
-        "pix_gpu_timing_events", "pix_gpu_timing_tree", "pix_gpu_overview", "pix_gpu_queue_overlap", "pix_gpu_bubbles", "pix_gpu_rollup",
+        "pix_gpu_timing_events", "pix_gpu_timing_tree", "pix_gpu_overview", "pix_gpu_queue_overlap", "pix_gpu_bubbles", "pix_gpu_rollup", "pix_correlate",
     };
     private static readonly HashSet<string> AnalysisTools = new(StringComparer.Ordinal)
     {

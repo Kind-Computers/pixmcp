@@ -40,9 +40,8 @@ public static class TimingCaptureTools
             {
                 throw PixErrors.InvalidArguments("pdbSearchPath is required.");
             }
-            Job job = jobs.StartForHandle<TimingCaptureHandle>("symbols", $"Resolve symbols for {handle}", handle, (j, h) =>
+            Job job = jobs.StartForHandle<TimingCaptureHandle>("symbols", $"Resolve symbols for {handle}", handle, (j, h) => h.WithDocumentWriter<object>(() =>
             {
-                h.InvalidateQueries();
                 var settings = new TimingCaptureSymbolSettings
                 {
                     IncludeKernelSymbols = includeKernelSymbols,
@@ -54,7 +53,7 @@ public static class TimingCaptureTools
                 h.SymbolsResolved = true;
                 h.RefreshCapturePath();
                 return h.Summary();
-            });
+            }));
             return Json.Serialize(await jobs.WaitOrStatus(job, waitSeconds, cancellationToken).ConfigureAwait(false));
         }
         catch (Exception ex)
@@ -73,16 +72,19 @@ public static class TimingCaptureTools
         => Tools.Run(session, "pix_timing_save", () =>
         {
             TimingCaptureHandle h = session.Get<TimingCaptureHandle>(handle);
-            h.InvalidateQueries();
-            if (string.IsNullOrWhiteSpace(asPath))
+            string? full = string.IsNullOrWhiteSpace(asPath) ? null : Tools.PrepareOutputPath(asPath, overwrite, session.Results);
+            // Exclusive: running timing queries are interrupted (timing_query_invalidated); timing_capture_busy if one does not stop in 5 s.
+            return h.WithDocumentWriter<object>(() =>
             {
-                h.Document.Save();
+                if (full is null)
+                {
+                    h.Document.Save();
+                    h.RefreshCapturePath();
+                    return new { saved = h.CapturePath };
+                }
+                _IPixTimingCaptureDocument_Extensions.SaveAs(h.Document, full);
                 h.RefreshCapturePath();
-                return new { saved = h.CapturePath };
-            }
-            string full = Tools.PrepareOutputPath(asPath, overwrite, session.Results);
-            _IPixTimingCaptureDocument_Extensions.SaveAs(h.Document, full);
-            h.RefreshCapturePath();
-            return new { saved = full };
+                return new { saved = full };
+            });
         }, cancellationToken);
 }

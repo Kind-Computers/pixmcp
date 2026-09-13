@@ -278,6 +278,15 @@ transient condition to retry after following `nextCalls`.
 | `result_expired` |  | The result snapshot was closed, evicted or never existed; nextCalls repeat the originating call. |
 | `result_too_large` |  | The selected value exceeds the response budget; read bounded windows (outline first). |
 | `server_shutting_down` |  | The server is stopping; queued calls are not started. |
+| `sql_execution_error` |  | SQLite failed while running a prepared statement (for example malformed JSON passed to json_each); the message carries SQLite's text. |
+| `sql_forbidden` |  | The statement touches something read-only SQL may not (writes, schema changes, PRAGMA, ATTACH, transactions, file or extension functions); the message names the denied action. |
+| `sql_interrupted` | yes | SQLite interrupted the statement without a timeout or invalidation; repeat it. |
+| `sql_invalid_parameter` |  | A parameter value is not a string, number, boolean or null (pass arrays as JSON text and read them with json_each), uses a positional ? placeholder, or shadows a server-bound name. |
+| `sql_missing_parameter` |  | The statement declares a parameter that params does not supply; nextCalls carry a params skeleton. |
+| `sql_multiple_statements` |  | Only one statement per call; the text after the first statement is not a comment. |
+| `sql_not_read_only` |  | SQLite reports the statement would write (for example VACUUM). |
+| `sql_syntax_error` |  | SQLite could not prepare the statement (syntax, unknown table, column or function); the message carries SQLite's text and nextCalls the schema. |
+| `sql_timeout` | yes | The statement exceeded timeoutSeconds; narrow the window, add indexed predicates or LIMIT, or raise the budget. |
 | `timeout` | yes | A bounded wait elapsed (retryable). |
 | `timing_capture_busy` | yes | The timing capture is being saved or resolved; retry (retryable). |
 | `timing_capture_invalid` |  | The file is not a recorded timing capture. |
@@ -576,13 +585,50 @@ injection (`-attachPIX`, or `underGpuCapture=true`) for separate GPU-capture run
 
 Start recorded analysis with `pix_timing_overview`, then use `pix_timing_events`,
 `pix_timing_counters_list`, and `pix_timing_counters_read`. These query the timing
-document's PixStorage database read-only; they do not replay the GPU. Times use decimal
-nanoseconds and half-open `[startNs,endNs)` intervals, defaulting to the reliable capture
-range. Rows preserve original event duration and selected-range overlap; execution and
-stall information are present when recorded.
+document's PixStorage database read-only, off the PIX worker; they do not replay the GPU.
+Times use decimal nanoseconds and half-open `[startNs,endNs)` intervals. The default
+`rangeMode=full` runs from the first reliable timestamp through the capture end;
+`rangeMode=reliable` stops at the capture stop timestamp. Every response's provenance
+reports both ends and `coverage` (in-window versus total context switches, CPU events,
+GPU submissions and GPU hardware ranges), so a truncating window is visible.
+
+`pix_timing_events` pages one or all recorded families (`domain`):
+
+- `cpu`: PIX CPU events with nesting level and thread. `executionNs` and `stallNs` come
+  from one `CpuExecutionRowId` lookup per event (`executionTimingMethod: rowId`), or from
+  the (event, begin, end) tuple when that column is absent (`tupleMatch`).
+- `cpuMarkers`: PIX CPU point markers (zero-length rows).
+- `gpuMarkers`: GPU-side PIX events, empty unless the application emits them.
+- `gpuSubmissions`: one row per ExecuteCommandLists with `submitNs`, `submitLatencyNs`,
+  `commandListCount` and a `submissionRef` for `pix_timing_submissions`. This is the real
+  GPU timeline of a timing capture.
+- `gpuHardware`: hardware queue work ranges (`hardwareQueueName`, `overlapLevel`); rows
+  are containers of many packets, not individual work items.
+
+Rows preserve original event duration and selected-range overlap; `sources` lists each
+family's state and matching rows.
+
+`pix_timing_overview` reports every recorded family (`cpuEvents`, `cpuMarkers`, `gpuMarkers`,
+`gpuSubmissions`, `gpuHardware`, `threadSwitches` and more) with its state and row count, thread
+lifetimes with per-thread event, marker and context-switch counts, API queues with their adapter,
+lifetime and command-list counts, and a `hardwareQueues` page of the kernel queues that carried
+GPU work. Pages default to 5 rows.
+
+Its `sections` summarise the capture with the same named queries `pix_timing_sql` runs, so the two
+never disagree: `capture` (target process, PIX version, OS, CPU, memory, GPU and capture options as
+recorded), `dataQuality` (dropped, truncated and lost ETW
+events, effective samples per second), `gpu` (per-queue submissions, busy share of the window and
+submit latency), `frames` (VSync pacing), `cores`, `modules` (symbol state) and `vram` (usage
+against budget). `insights` lists up to eight findings, warnings first, each with its evidence,
+what it implies, and the exact follow-up calls, for example `window_truncates_data`,
+`dropped_data`, `vram_over_budget`, `gpu_idle_high`, `submit_latency_high` and `no_gpu_markers`.
+A section whose tables the capture lacks is null and named in `unavailable`.
 
 `pix_timing_hotspots` ranks sampled CPU functions and addresses;
 `pix_timing_calltree` pages caller-to-callee paths using a reusable `profileRef`.
+On CPUs with more than one core efficiency class, both report `samplesByEfficiencyClass` in
+coverage and `inclusiveByEfficiencyClass` per hotspot, and `efficiencyClass` restricts the profile
+to samples taken on cores of that class (the `core_efficiency` named query lists the classes).
 Inclusive and exclusive sample counts are statistical observations, not exact CPU time.
 Coverage includes samples without stacks and unresolved symbols. Symbol resolution is
 explicit through `pix_timing_resolve_symbols`; save and symbol resolution invalidate
@@ -603,6 +649,101 @@ wait-reason codes and exact-timestamp stacks when recorded. Missing stacks and u
 symbols remain distinct. A transition does not identify a waited-on object or establish
 blocked duration or the cause of a GPU gap. These queries do not calculate GPUView's
 hardware-queue busy percentage.
+
+`pix_timing_gpu_summary` rolls recorded GPU work up per API command queue of the target process
+(or `processId`, `queueId`). Submissions are selected by CPU submit timestamp, like
+`pix_timing_submissions`, and each queue reports:
+
+- `submissions`, `validSubmissions` and `invalidReasons` (`missingTimestamps`, `zeroDuration`,
+  `inconsistentTimestamps`).
+- `totals`: busy (the union of valid execution intervals clipped to the window, so overlapping
+  submissions count once), idle, span and summed execution, each with its share of the span and
+  the sum, plus `busyPercentOfWindow`.
+- `submitLatency` and `execution` statistics (count, average, nearest-rank p50/p95, maximum).
+- `topSubmittingThreads` with per-thread latency and `longestExecutions` with their `submissionRef`.
+
+The response also carries busy time per hardware queue (system-wide), VSync pacing per monitor, and
+`cpuGpuCausality`, which is `empty` unless the application emitted GPU-side PIX markers. Recorded
+execution spans whole ExecuteCommandLists calls, not individual draws.
+
+`pix_timing_tree` aggregates one lane's recorded PIX events by marker path: a thread's CPU events
+(`threadRowId`) or an API queue's GPU-side events (`queueId`, empty unless the application emits GPU
+markers). Events nest by recorded level and interval. Each path reports `occurrences`, `inclusive`
+and `self` time clipped to the window (with shares of the lane span, the top-level sum and the
+parent path), complete-occurrence duration statistics, `executionNs` and `stallNs` sums on thread
+lanes (up to 2000 events per call), and `childrenExceedMeasured` with `childOverflowNs` when a child
+runs past its parent. Walk it with `parentPath`, `depth`, `sortBy` (`inclusive`, `self`,
+`occurrences`, `name`, `firstStart`) and `minSelfNs`, and sum siblings, never ancestors. The
+slowest occurrence of the first path links to `pix_timing_hotspots` and `pix_timing_thread_switches`.
+
+`pix_timing_verdict` (experimental) classifies recorded frames without replay:
+
+- Frames come from `frameSource`: `present` (GpuFrame), `cpuMarker` (the render thread's most
+  repeated top-level PIX event, or `frameMarkerName`), `vsync` (the busiest VSync lane) or
+  `submission` (render-thread submit cadence); `auto` takes the first available in that order.
+- The render thread is the thread with the most submissions unless `renderThreadRowId` is given.
+- Per frame it measures GPU busy time (the union of recorded queue execution) and the render
+  thread's on-CPU, blocked and ready-not-running time from its context switches. ContextSwitch does
+  not record thread states, so wait reasons 30-33 and 38 count as ready and other waits are blocked
+  until the ready event named by the next switch-in.
+- Ordered rules, returned with their thresholds, assign `gpuBound`, `unknown`, `presentBound`,
+  `cpuBound`, `syncBound` (blocked while the GPU is busy), `waitBound` (blocked while the GPU is
+  idle), `contended` or `balanced`.
+
+The response carries the dominant verdict with a confidence, duration-weighted shares, frame and
+ready-latency statistics, the five longest frames, time per wait reason with probable KWAIT_REASON
+names, per-queue busy shares, a video-memory budget check, a paged per-frame table (`maxFrames`,
+`offset`, `limit`) and follow-up calls to hotspots, thread switches and the marker tree of the
+relevant frames.
+
+`pix_correlate` joins a GPU capture's timed marker passes (`gpuHandle`, optionally `queueIndex`,
+`scope`, `markerPathPrefix`) to a timing capture's recorded PIX markers (`timingHandle`,
+`processId`, window). It matches the full marker path first and then a leaf name unique on both
+sides, after normalizing case, whitespace, the legacy `<deprecated - use pix3.h instead>` prefix
+and trailing numbers (each match lists the normalizations it needed). Each match reports the
+replayed inclusive EOP time, the recorded occurrences and duration statistics, submissions made
+inside those occurrences, the emitting threads' blocked and ready time and
+`ratioRecordedToReplay`; unmatched paths on both sides and a queue map by type and name follow.
+Names are not identity: `identity` says so, recorded occurrences are averaged and the clocks
+differ. The GPU side replays the capture when its timing is not prepared.
+
+### SQL over timing captures
+
+`pix_timing_schema` describes the capture's PixStorage SQLite database: base tables, the PixStorage
+virtual tables (`ContextSwitch`, `PixCpuExecution`, `PixCpuExecutionTimes`, `PixCounters`,
+`PixCpuMarker`, `PixGpuExecution`, `FileEvents`, `CpuMemoryEvent`) with hidden constraint columns,
+documented units, joins and caveats, `findstackid`, capture facts, capability probes, the
+pre-bound parameters and the named query library. Pass `table` for DDL, indexes and sample rows.
+
+`pix_timing_sql` runs one read-only statement, or `query` naming a library entry, off the PIX worker:
+
+```json
+{ "handle": "timing-1", "sql": "SELECT Core, COUNT(*) AS switches FROM ContextSwitch WHERE Timestamp >= $start AND Timestamp < $end GROUP BY Core ORDER BY switches DESC", "maxRows": 10 }
+```
+
+- `$start` and `$end` (the window per `rangeMode` = `full` or `reliable`, or `startNs`/`endNs`),
+  `$reliableStart`, `$reliableEnd`, `$captureEnd` and `$targetPid` are bound when the statement
+  declares them. `params` binds your own `$name` values (scalars; arrays as JSON text read through
+  `json_each`).
+- Rows are positional, with `columns` (declared type, affinity, documented unit),
+  `referencedTables`, `boundParameters`, truncation state (`hasMore`, `truncationReason`,
+  `nextOffset` and an exact continuation call), `countTotal` and `explain` (EXPLAIN QUERY PLAN).
+- A SQLite authorizer allows only SELECT, reads, recursive CTEs and non-file functions. Writes,
+  PRAGMA, ATTACH, transactions and `load_extension` fail with `sql_forbidden`; a second statement
+  fails with `sql_multiple_statements`; `timeoutSeconds` (default 30, max 120) bounds execution
+  (`sql_timeout`). Save, symbol resolution and close interrupt running statements
+  (`timing_query_invalidated`).
+- Named queries (`pix_timing_schema` lists their parameters, requirements and caveats):
+  - Capture and data quality: `capture_facts`, `dropped_data`, `module_symbols`, `core_efficiency`.
+  - GPU: `gpu_busy_per_queue` (busy time as the union of execution intervals),
+    `submit_latency_per_thread`, `gpu_hardware_queues`.
+  - Frames: `frames_vsync` (intervals and p50/p95 per monitor), `frames_present`.
+  - Scheduling: `thread_summary`, `context_switches_per_thread`, `context_switch_waits` (time
+    switched out per raw wait reason), `ready_thread_latency`.
+  - CPU, counters and memory: `cpu_execution_rollup`, `cpu_markers`, `counters_bucketed`
+    (requires `counterId`), `vram_budget`, `file_io_summary`, `memory_summary`.
+- Row ids are not OS ids: submissions, markers and executions reference `Threads.Id`, and queues
+  and counters reference `Processes.Id`; `pix_timing_schema` documents each join.
 
 ### Dump triage
 
@@ -634,7 +775,7 @@ reading the preceding bytes because the native blob API only exposes prefix read
 | C++ export | `pix_gpu_export_cpp` |
 | Unreal CSV | `pix_csv_compare`, `pix_csv_pass_candidates` |
 | Dr. PIX | `pix_gpu_drpix_experiments`, `pix_gpu_drpix_run` |
-| Timing captures | `pix_timing_open`, `pix_timing_overview`, `pix_timing_events`, `pix_timing_submissions`, `pix_timing_thread_switches`, `pix_timing_counters_list`, `pix_timing_counters_read`, `pix_timing_hotspots`, `pix_timing_calltree`, `pix_timing_resolve_symbols`, `pix_timing_save` |
+| Timing captures | `pix_timing_open`, `pix_timing_overview`, `pix_timing_gpu_summary`, `pix_timing_tree`, `pix_timing_verdict`, `pix_correlate`, `pix_timing_schema`, `pix_timing_sql`, `pix_timing_events`, `pix_timing_submissions`, `pix_timing_thread_switches`, `pix_timing_counters_list`, `pix_timing_counters_read`, `pix_timing_hotspots`, `pix_timing_calltree`, `pix_timing_resolve_symbols`, `pix_timing_save` |
 | Live device | `pix_device_connect`, `pix_device_info`, `pix_device_processes`, `pix_device_packaged_apps`, `pix_device_counters`, `pix_device_d3d_settings`, `pix_device_d3d_settings_set`, `pix_device_launch`, `pix_device_attach`, `pix_device_take_gpu_capture`, `pix_device_timing_capture_start`, `pix_device_timing_capture_stop`, `pix_device_detach` |
 | Capture format | `pix_capture_format`, `pix_capture_upgrade` |
 | Dump investigation | `pix_dump_open`, `pix_dump_info`, `pix_dump_triage`, `pix_dump_queues`, `pix_dump_events`, `pix_dump_event`, `pix_dump_page_faults`, `pix_dump_breadcrumbs`, `pix_dump_resources`, `pix_dump_gpu_state`, `pix_dump_blobs`, `pix_dump_journal` |
@@ -715,6 +856,9 @@ python scripts\smoke.py src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\P
 `take-capture` produces a capture. `open-capture`, `analysis-pending`, and
 `inspect-extras` accept `PIX_TEST_CAPTURE`. Tool/protocol errors, failed jobs,
 unresolved references, and failed assertions fail the scenario.
+
+`timing-sql` accepts `PIX_TEST_TIMING_CAPTURE`. It checks the PixStorage schema census, one table detail, a
+named query and a paged `ContextSwitch` query through the stdio transport.
 
 `tutorial-gpu-extras` also accepts `PIX_TEST_CAPTURE` and a new destination directory
 through `PIX_TEST_CPP_OUTPUT`. It verifies C++ export, shader diagnostics, and preview
@@ -817,8 +961,10 @@ excluded; the dump stage inspects an existing suitable dump when available.
 results; GPU handles cache events and preparations. `Jobs` tracks cancellation,
 progress, and retention. `StructuredToolResults` provides output schemas, errors,
 and response budgets; `ResultStore` implements leased, bounded retrieval and exports.
-Readiness waits run outside the worker. Timing SQL runs in cancellable preparation
-jobs with private, read-only SQLite connections closed before native document changes.
+Readiness waits run outside the worker. Recorded-timing SQL runs in cancellable managed
+jobs off the PIX worker, each with a private, read-only SQLite connection; a document gate
+interrupts and drains those readers before save, symbol resolution or close. Caller-supplied
+SQL (`Pix/Sql`) is limited to one read-only statement under a SQLite authorizer and limits.
 Tools compose these primitives into small, navigable investigations.
 
 `Program.cs` must not directly reference Microsoft.PIX types before discovery

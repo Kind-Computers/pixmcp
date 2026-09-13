@@ -381,6 +381,24 @@ public class IntegrationTests : IDisposable
         await SessionTools.Close(_session, handle);
     }
 
+    [SkippableFact]
+    public async Task CorrelatesGpuCaptureWithTimingCaptureByQueueAndReportsUnmatchedNames()
+    {
+        Skip.IfNot(Available && TestArtifacts.AnalysisEnabled && TestArtifacts.TimingCapture is not null, "Set PIX_TEST_ANALYSIS=1 and PIX_TEST_TIMING_CAPTURE to correlate a replay with a recording");
+        string gpuHandle = Parse(await GpuCaptureTools.Open(_session, CapturePath!)).GetProperty("handle").GetString()!;
+        string timingHandle = Parse(await TimingCaptureTools.Open(_session, TestArtifacts.TimingCapture!)).GetProperty("handle").GetString()!;
+        JsonElement result = Parse(await TimingCorrelationTools.Correlate(_session, _jobs, gpuHandle, timingHandle, waitSeconds: 600));
+        Assert.Equal(TimingCorrelation.Identity, result.GetProperty("identity").GetString());
+        JsonElement counts = result.GetProperty("counts");
+        int gpuPaths = counts.GetProperty("gpuPaths").GetInt32();
+        Assert.True(gpuPaths > 0);
+        Assert.Equal(gpuPaths, counts.GetProperty("matched").GetInt32() + counts.GetProperty("unmatchedGpu").GetInt32());
+        Assert.True(counts.GetProperty("recordedPaths").GetInt32() >= 2);
+        // The fixture's GPU capture names its markers Frame/Triangle pass while its timing capture records Fixture Frame/Fixture CPU Work.
+        Assert.Contains(result.GetProperty("unmatchedRecorded").EnumerateArray(), u => u.GetProperty("path").GetString() == "Fixture Frame");
+        Assert.Contains(result.GetProperty("queueMap").EnumerateArray(), q => q.GetProperty("method").GetString() != "none");
+    }
+
     private static JsonElement Parse(string json) => JsonSerializer.Deserialize<JsonElement>(json);
 
     private static void AssertPage(JsonElement page, int limit)

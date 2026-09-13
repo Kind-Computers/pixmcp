@@ -69,4 +69,20 @@ public sealed class ManagedJobTests
         Assert.Equal(JobStatus.Cancelled, job.Status);
         Assert.Null(job.ResultRef);
     }
+
+    [Fact]
+    public async Task ManagedJobResultsBelongToTheirOwnerAndExpireWhenItCloses()
+    {
+        using var worker = new PixWorker();
+        using var session = new PixSession(worker, NullLogger<PixSession>.Instance);
+        using var jobs = new JobManager(worker, session, () => null);
+        Job job = jobs.StartManaged("timing-query", "owned query", _ => Task.FromResult<object?>(new { rows = 3 }), owner: "timing-1");
+        await job.WaitAsync(TimeSpan.FromSeconds(5), default);
+        Assert.Equal(JobStatus.Succeeded, job.Status);
+        Assert.True(session.Results.IsAvailable(job.ResultRef!));
+        session.Results.InvalidateOwner("timing-2");
+        Assert.True(session.Results.IsAvailable(job.ResultRef!));
+        session.Results.InvalidateOwner("timing-1");
+        Assert.False(session.Results.IsAvailable(job.ResultRef!));
+    }
 }

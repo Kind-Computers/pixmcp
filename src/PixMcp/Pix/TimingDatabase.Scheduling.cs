@@ -3,14 +3,14 @@ namespace PixMcp.Pix;
 internal sealed partial class TimingDatabase
 {
     internal TimingSubmissionsDto Submissions(string handle, int generation, string? submissionRef, uint? processId,
-        uint? threadId, string? queueId, long? start, long? end, int offset, int limit) => Guard<TimingSubmissionsDto>(() =>
+        uint? threadId, string? queueId, long? start, long? end, int offset, int limit, string rangeMode = RangeModeFull) => Guard<TimingSubmissionsDto>(() =>
     {
         ValidatePage(offset, limit);
         if (submissionRef is not null && (processId.HasValue || threadId.HasValue || queueId is not null || start.HasValue || end.HasValue))
             throw new PixToolException(PixErrors.Codes.InvalidArguments, "Use submissionRef alone, or omit it to select process/thread/queue/time filters.");
         long? id = submissionRef is null ? null : TimingSubmissionReferences.Parse(submissionRef, handle, generation);
         long? queue = queueId is null ? null : ParseId(queueId, nameof(queueId));
-        var (a, b, provenance) = Range(start, end);
+        var (a, b, provenance) = Range(start, end, rangeMode);
         Require("ApiQueueExecution", "Id", "ApiCommandQueueId", "ThreadId", "SubmitTimestamp", "BeginTimestamp", "EndTimestamp");
         Require("ApiCommandQueue", "Id", "ProcessId", "NameId");
         Require("Threads", "Id", "ProcThreadId", "ProcessRowId", "ThreadNameId");
@@ -40,10 +40,7 @@ internal sealed partial class TimingDatabase
             bool threadMatches = pid.HasValue && packedThread.HasValue &&
                 unchecked((uint)((ulong)packedThread.Value >> 32)) == pid && (!queuePid.HasValue || queuePid == pid);
             long? submit = r.IsDBNull(7) ? null : r.GetInt64(7), begin = r.IsDBNull(8) ? null : r.GetInt64(8), finish = r.IsDBNull(9) ? null : r.GetInt64(9);
-            bool valid = submit is >= 0 && begin.HasValue && finish.HasValue && begin >= submit && finish > begin;
-            string? reason = valid ? null : !submit.HasValue || !begin.HasValue || !finish.HasValue ? "Recorded submission or GPU timestamps are missing."
-                : finish == begin ? "The recorded GPU interval has zero duration; usable execution timing is unavailable."
-                : "Recorded timestamps are inconsistent; derived latency and duration are unavailable.";
+            var (valid, _, reason) = SubmissionValidity(submit, begin, finish);
             string? threadRowId = r.IsDBNull(3) ? null : Id(r, 3);
             long? threadStart = r.IsDBNull(11) ? null : r.GetInt64(11), threadEnd = r.IsDBNull(12) ? null : r.GetInt64(12);
             bool safeCpuRange = threadStart is >= 0 && threadEnd > threadStart && submit >= threadStart && submit < threadEnd;
@@ -75,12 +72,24 @@ internal sealed partial class TimingDatabase
             submissionRef is null ? "submission timestamp in [start,end)" : "exact submission reference; no time filter");
     });
 
+    /// <summary>
+    /// The validity rule every submission view shares: submit >= 0, begin >= submit and end > begin. Invalid rows get a
+    /// stable key (missingTimestamps, zeroDuration, inconsistentTimestamps) and a sentence.
+    /// </summary>
+    internal static (bool Valid, string? Key, string? Reason) SubmissionValidity(long? submit, long? begin, long? finish)
+    {
+        if (submit is >= 0 && begin.HasValue && finish.HasValue && begin >= submit && finish > begin) return (true, null, null);
+        if (!submit.HasValue || !begin.HasValue || !finish.HasValue) return (false, "missingTimestamps", "Recorded submission or GPU timestamps are missing.");
+        if (finish == begin) return (false, "zeroDuration", "The recorded GPU interval has zero duration; usable execution timing is unavailable.");
+        return (false, "inconsistentTimestamps", "Recorded timestamps are inconsistent; derived latency and duration are unavailable.");
+    }
+
     internal TimingThreadSwitchesDto ThreadSwitches(string handle, string threadRowId, long? start, long? end,
-        int offset, int limit) => Guard<TimingThreadSwitchesDto>(() =>
+        int offset, int limit, string rangeMode = RangeModeFull) => Guard<TimingThreadSwitchesDto>(() =>
     {
         ValidatePage(offset, limit);
         long thread = ParseId(threadRowId, nameof(threadRowId));
-        var (a, b, provenance) = Range(start, end);
+        var (a, b, provenance) = Range(start, end, rangeMode);
         Require("Threads", "Id", "ProcThreadId", "ProcessRowId", "ThreadNameId", "SampleCount", "StartTimestamp", "EndTimestamp");
         Require("Processes", "Id", "ProcessId"); Require("Strings", "Id", "Value");
         Require("ContextSwitch", "Core", "Timestamp", "FromProcThreadId", "ToProcThreadId", "FromThreadWaitReason");
