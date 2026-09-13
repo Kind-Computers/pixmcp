@@ -11,7 +11,7 @@ public class InvestigationTests
     private static readonly ReplayProvenance Provenance = new("gpuReplay", "test", null, null, null, "EOP intervals; not frame time");
     private static ComparisonEvent Event(string handle, uint index, string name = "Draw", ulong? ns = 10,
         string? hash = null, IReadOnlyDictionary<string, JsonElement>? sections = null)
-        => new(new(handle, 0, index), ["Frame", "Lighting"], name, "draw", false, ns, false, hash, sections ?? new Dictionary<string, JsonElement>());
+        => new(new(handle, 0, index), ["Frame", "Lighting"], name, "draw", false, ns, TimingSemantics.Measured, hash, sections ?? new Dictionary<string, JsonElement>());
     private static ComparisonSnapshot Snapshot(string handle, params ComparisonEvent[] events)
         => new(handle, [new(0, "Graphics", "DIRECT", events)], Provenance, []);
 
@@ -23,7 +23,9 @@ public class InvestigationTests
         var result = CaptureComparison.Compare(Snapshot("gpu-1", before), Snapshot("gpu-2", after));
         var change = Assert.Single(result.Items);
         Assert.Equal(15m, change.DeltaNs);
+        Assert.Equal(0d, change.DeltaMs);
         Assert.Equal(150d, change.DeltaPercent);
+        Assert.Equal(TimingSemantics.Measured, change.BaselineSemantics);
         Assert.Equal(after.EventRef, change.Candidate);
         Assert.Equal("/hash", Assert.Single(change.Fields).Path);
     }
@@ -122,13 +124,14 @@ public class InvestigationTests
             new EventRecord(3, 3, 1, "C", "", 0, 0),
         };
         var rows = events.Select(e => new EventTimingRow(0, e.Index, e.GpuId, e.Name, "", 0, 1, 0, 10));
-        var nodes = TimingTree.Build(events, rows);
-        var first = CountersTools.BuildTimingTree("gpu-1", 0, nodes, 0, 0, 25, 4, 1, 0, Provenance);
+        var tree = TimingTree.Build(events, rows);
+        var root = new EventRef("gpu-1", 0, 0);
+        var first = CountersTools.BuildTimingTree("gpu-1", 0, tree, root, 0, 25, 4, 1, 0, 0, "inclusive", Provenance);
         Assert.Equal(1, first.ReturnedNodes);
         Assert.Equal(1, first.NextOffset);
         Assert.Equal(1u, Assert.Single(first.Children).Index);
         Assert.Single(first.Children[0].NextCalls);
-        var next = CountersTools.BuildTimingTree("gpu-1", 0, nodes, 0, first.NextOffset!.Value, 25, 4, 1, 0, Provenance);
+        var next = CountersTools.BuildTimingTree("gpu-1", 0, tree, root, first.NextOffset!.Value, 25, 4, 1, 0, 0, "inclusive", Provenance);
         Assert.Equal(2u, Assert.Single(next.Children).Index);
         Assert.Null(next.NextOffset);
     }

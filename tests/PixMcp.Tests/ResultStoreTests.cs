@@ -78,6 +78,121 @@ public sealed class ResultStoreTests
         Assert.Equal("invalid_pointer", Assert.Throws<PixToolException>(() => store.Read(resultRef, pointer)).Detail.Code);
     }
 
+    private sealed class Temp : IDisposable
+    {
+        internal string Path { get; } = Directory.CreateTempSubdirectory("pixmcp-store-tests-").FullName;
+        public void Dispose() { try { Directory.Delete(Path, recursive: true); } catch (IOException) { } }
+    }
+
+    private static CallToolRequestParams Request(string tool, object arguments) => new()
+    {
+        Name = tool,
+        Arguments = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(JsonSerializer.Serialize(arguments))!,
+    };
+
+    [Fact]
+    public void ResultIdsAreOpaqueAndUnique()
+    {
+        var store = new ResultStore();
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        for (int i = 0; i < 300; i++)
+        {
+            string id = store.Store(new { i }, jobId: "job-" + i);
+            Assert.Matches("^r-[0-9a-hjkmnp-tv-z]{10}$", id);
+            Assert.True(ids.Add(id));
+        }
+    }
+
+    [Fact]
+    public void ExpiredReadsOfferTheOriginatingCallUntilTheOriginCapIsReached()
+    {
+        var store = new ResultStore();
+        string reference;
+        using (StructuredToolResults.WithRequest(Request("pix_gpu_events", new { handle = "gpu-1", limit = 1000 })))
+            reference = store.Store(new { items = new[] { 1 } }, "gpu-1");
+        store.InvalidateOwner("gpu-1");
+        PixToolException expired = Assert.Throws<PixToolException>(() => store.Read(reference));
+        Assert.Equal("result_expired", expired.Detail.Code);
+        ToolCallDto origin = Assert.Single(expired.Detail.NextCalls);
+        Assert.Equal("pix_gpu_events", origin.Tool);
+        Assert.Equal(1000, ((JsonElement)origin.Arguments).GetProperty("limit").GetInt32());
+
+        var forgotten = new List<string>();
+        using (StructuredToolResults.WithRequest(Request("pix_gpu_shaders", new { handle = "gpu-2" })))
+            for (int i = 0; i < ResultStore.MaxExpiredOrigins + 10; i++)
+            {
+                string id = store.Store(new { i }, jobId: "job-" + i);
+                store.RemoveJob("job-" + i);
+                forgotten.Add(id);
+            }
+        Assert.Empty(Assert.Throws<PixToolException>(() => store.Read(forgotten[0])).Detail.NextCalls);
+        Assert.Equal("pix_gpu_shaders", Assert.Single(Assert.Throws<PixToolException>(() => store.Read(forgotten[^1])).Detail.NextCalls).Tool);
+    }
+
+    [Fact]
+    public void CapacityErrorsNameTheBudgetVariablesAndOfferInfo()
+    {
+        using var directory = new Temp();
+        using var store = new ResultStore(32, 0, directory.Path);
+        PixToolException error;
+        using (StructuredToolResults.WithRequest(Request("pix_gpu_timing_events", new { handle = "gpu-1" })))
+            error = Assert.Throws<PixToolException>(() => store.Store(new string('x', 100)));
+        Assert.Equal("result_capacity_exceeded", error.Detail.Code);
+        Assert.True(error.Detail.Retryable);
+        Assert.Contains(ServerOptions.MemoryVariable, error.Detail.Message);
+        Assert.Contains("32", error.Detail.Message);
+        Assert.Equal(new[] { "pix_gpu_timing_events", "pix_info" }, error.Detail.NextCalls.Select(c => c.Tool));
+    }
+
+    [Fact]
+    public void OutlineDescribesTheShapeWithoutValues()
+    {
+        var store = new ResultStore();
+        string reference = store.Store(new { items = Enumerable.Range(0, 1000).Select(i => new { i, name = "Event " + i }).ToArray(), provenance = new { source = "gpuReplay" } });
+        ResultOutlineDto outline = Assert.IsType<ResultOutlineDto>(store.Query(reference, "", 0, 25, "outline", null, null));
+        Assert.Equal("object", outline.Kind);
+        Assert.Equal(2, outline.Total);
+        Assert.Null(outline.NextOffset);
+        ResultOutlineEntry items = outline.Entries.Single(e => e.Key == "items");
+        Assert.Equal("array", items.Kind);
+        Assert.Equal(1000, items.Total);
+        Assert.True(items.Deferred);
+        Assert.True(items.Bytes > 10000);
+        Assert.Equal(new[] { "i", "name" }, items.ItemKeys);
+        ResultOutlineEntry provenance = outline.Entries.Single(e => e.Key == "provenance");
+        Assert.Equal("object", provenance.Kind);
+        Assert.False(provenance.Deferred);
+        Assert.Equal(new[] { "source" }, provenance.ItemKeys);
+        Assert.True(Encoding.UTF8.GetByteCount(Json.Serialize(outline)) < 1024);
+
+        ResultOutlineDto page = Assert.IsType<ResultOutlineDto>(store.Query(reference, "/items", 0, 2, "outline", null, null));
+        Assert.Equal(new[] { "0", "1" }, page.Entries.Select(e => e.Key));
+        Assert.Equal(2, page.NextOffset);
+        JsonElement next = JsonSerializer.SerializeToElement(Assert.Single(page.NextCalls).Arguments, Json.Options);
+        Assert.Equal("outline", next.GetProperty("mode").GetString());
+        Assert.Equal(2, next.GetProperty("offset").GetInt32());
+        ResultOutlineDto scalar = Assert.IsType<ResultOutlineDto>(store.Query(reference, "/items/0/name", 0, 25, "outline", null, null));
+        Assert.Equal("string", scalar.Kind);
+        Assert.Empty(scalar.Entries);
+    }
+
+    [Fact]
+    public void InvalidPointersNameTheNearestContainerItsKeysAndAnOutlineCall()
+    {
+        var store = new ResultStore();
+        string reference = store.Store(new { items = Enumerable.Range(0, 30).Select(i => new { i, name = "Event " + i }).ToArray(), provenance = new { } });
+        PixToolException error = Assert.Throws<PixToolException>(() => store.Read(reference, "/items/5/missing"));
+        Assert.Equal("invalid_pointer", error.Detail.Code);
+        Assert.Contains("'/items/5'", error.Detail.Message);
+        Assert.Contains("Keys: i, name", error.Detail.Message);
+        JsonElement next = JsonSerializer.SerializeToElement(Assert.Single(error.Detail.NextCalls).Arguments, Json.Options);
+        Assert.Equal("/items/5", next.GetProperty("pointer").GetString());
+        Assert.Equal("outline", next.GetProperty("mode").GetString());
+        PixToolException tooMany = Assert.Throws<PixToolException>(() => store.Read(reference, "/items/99"));
+        Assert.Contains("(25 of 30)", tooMany.Detail.Message);
+        Assert.Contains("the root", Assert.Throws<PixToolException>(() => store.Read(reference, "/nope")).Detail.Message);
+    }
+
     [Fact]
     public void OversizeResultsPreserveFullSnapshotsBeforeTransportTruncation()
     {

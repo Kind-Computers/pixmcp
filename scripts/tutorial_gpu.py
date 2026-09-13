@@ -212,7 +212,7 @@ def run_gpu(ctx, capture_path, adapter_name, label, *, require_tsr=True):
             large_capture = large_capture or sum(q.get("eventCount", 0) for q in (overview or {}).get("queues", [])) > 2000
 
             def events():
-                args = {"handle": handle, "kind": "drawOrDispatch", "limit": 10}
+                args = {"handle": handle, "kind": "work", "limit": 10}
                 page = ctx.query("pix_gpu_events", **args)
                 _require(bool(_items(page)), "No draw or dispatch events were found")
                 return {"page": page, "nextPage": _continuation(ctx, "pix_gpu_events", args, page)}
@@ -238,12 +238,11 @@ def run_gpu(ctx, capture_path, adapter_name, label, *, require_tsr=True):
             if passes:
                 scope = passes[0]["eventRef"]
                 result["selectedScope"] = scope
-                tree_args = {"handle": handle, "queueIndex": scope["queueIndex"],
-                             "parentIndex": scope["eventIndex"], "depth": 2, "limit": 5, "maxNodes": 20}
+                tree_args = {"handle": handle, "scope": scope, "depth": 2, "limit": 5, "maxNodes": 20}
                 tree = task("scoped timing tree", lambda: ctx.query("pix_gpu_timing_tree", **tree_args))
                 if tree:
                     task("timing-tree continuation", lambda: _continuation(ctx, "pix_gpu_timing_tree", tree_args, tree))
-                timing_args = {"handle": handle, "scope": scope, "kind": "drawOrDispatch", "limit": 5}
+                timing_args = {"handle": handle, "scope": scope, "kind": "work", "limit": 5}
                 page = task("scoped timed events", lambda: ctx.query("pix_gpu_timing_events", **timing_args))
                 if page:
                     task("timing-event continuation", lambda: _continuation(ctx, "pix_gpu_timing_events", timing_args, page))
@@ -317,11 +316,11 @@ def run_gpu(ctx, capture_path, adapter_name, label, *, require_tsr=True):
                 counter_ids = [row["id"] for row in counter_rows[:3]]
                 result["selectedCounters"] = counter_rows[:3]
                 collected = task("collect small hardware counter set", lambda: _snapshot_job(ctx,
-                                 f"{label}-counters", "pix_gpu_counters_start", handle=handle, counterIds=counter_ids), optional=True)
+                                 f"{label}-counters", "pix_gpu_counters_prepare", handle=handle, counterIds=counter_ids), optional=True)
                 if collected:
                     queue_index = draws[0]["eventRef"]["queueIndex"] if draws else opened["queues"][0]["queueIndex"]
-                    task("counter values and numeric ordering", lambda: ctx.query("pix_gpu_counters_collect", handle=handle,
-                         counterIds=counter_ids, queueIndex=queue_index, kind="drawOrDispatch", limit=10,
+                    task("counter values and numeric ordering", lambda: ctx.query("pix_gpu_counters_read", handle=handle,
+                         counterIds=counter_ids, queueIndex=queue_index, kind="work", limit=10,
                          orderByCounterId=counter_ids[0]), optional=True)
             elif counters is not None:
                 task("counter collection availability", lambda: _missing("No hardware counters were advertised for this capture and adapter.", True), optional=True)
@@ -335,7 +334,7 @@ def run_gpu(ctx, capture_path, adapter_name, label, *, require_tsr=True):
             if draws:
                 ref = draws[0]["eventRef"]
                 task("targeted shader profiling", lambda: _snapshot_job(ctx, f"{label}-shader-profile",
-                     "pix_gpu_shader_profile", firstEventRef=ref), optional=True)
+                     "pix_gpu_shader_profile", handle=handle, scope=ref), optional=True)
                 experiments = task("Dr. PIX experiment catalog", lambda: ctx.query("pix_gpu_drpix_experiments", handle=handle), optional=True)
                 if _items(experiments):
                     event = task("Dr. PIX target event", lambda: ctx.query("pix_gpu_event", eventRef=ref, maxChildren=1))
@@ -343,8 +342,7 @@ def run_gpu(ctx, capture_path, adapter_name, label, *, require_tsr=True):
                     if gpu_ids:
                         experiment = _items(experiments)[0]
                         task("targeted Dr. PIX experiment", lambda: _snapshot_job(ctx, f"{label}-drpix",
-                             "pix_gpu_drpix_run", handle=handle, experiments=[experiment["guid"]],
-                             firstEventGpuId=gpu_ids[0], lastEventGpuId=gpu_ids[0]), optional=True)
+                             "pix_gpu_drpix_run", handle=handle, experiments=[experiment["guid"]], scope=ref), optional=True)
                     else:
                         task("Dr. PIX range availability", lambda: _missing("Selected draw has no usable GPU event ID."), optional=True)
             result["finalAnalysis"] = task("final native capabilities", lambda: ctx.query("pix_gpu_info", handle=handle))

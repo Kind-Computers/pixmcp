@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace PixMcp.Pix;
 
 public sealed record WorkerSnapshot(bool Busy, int QueuedCalls, string? Operation,
@@ -9,11 +11,13 @@ public sealed class PixWorker : IDisposable
     private readonly object _gate = new();
     private readonly LinkedList<WorkItem> _queue = new();
     private readonly Thread _thread;
+    private readonly ILogger<PixWorker>? _logger;
     private WorkItem? _active;
     private bool _stopping;
 
-    public PixWorker()
+    public PixWorker(ILogger<PixWorker>? logger = null)
     {
+        _logger = logger;
         _thread = new Thread(Loop) { Name = "PixWorker", IsBackground = true };
         _thread.Start();
     }
@@ -67,7 +71,7 @@ public sealed class PixWorker : IDisposable
         var item = new WorkItem<T>(work, operation ?? "PIX operation");
         lock (_gate)
         {
-            ObjectDisposedException.ThrowIf(_stopping, this);
+            if (_stopping) throw PixErrors.ServerShuttingDown(item.Operation);
             if (onlyIfIdle && (_active is not null || _queue.Count > 0)) throw Busy();
             item.Node = _queue.AddLast(item);
             item.Cancellation = token.Register(() => CancelQueued(item, token, null));
@@ -115,10 +119,30 @@ public sealed class PixWorker : IDisposable
         }
     }
 
+    /// <summary>
+    /// Stops accepting work. Queued items fail with server_shutting_down instead of running; the active native
+    /// operation is awaited for up to five seconds and then abandoned (logged), since native code cannot be aborted.
+    /// </summary>
     public void Dispose()
     {
-        lock (_gate) { _stopping = true; Monitor.PulseAll(_gate); }
-        if (!IsOnWorkerThread) _thread.Join(TimeSpan.FromSeconds(5));
+        WorkItem[] queued;
+        lock (_gate)
+        {
+            if (_stopping) return;
+            _stopping = true;
+            queued = _queue.ToArray();
+            _queue.Clear();
+            foreach (WorkItem item in queued) item.Node = null;
+            Monitor.PulseAll(_gate);
+        }
+        foreach (WorkItem item in queued)
+        {
+            item.Cancel(null, PixErrors.ServerShuttingDown(item.Operation));
+            item.Cancellation.Dispose();
+        }
+        if (IsOnWorkerThread) return;
+        if (!_thread.Join(TimeSpan.FromSeconds(5)))
+            _logger?.LogWarning("The PIX worker thread is still running '{Operation}' five seconds after shutdown; abandoning it.", Snapshot().Operation);
     }
 
     private abstract class WorkItem(string operation)

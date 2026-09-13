@@ -1,3 +1,4 @@
+using PixMcp.Pix;
 using System.Runtime.InteropServices;
 using Microsoft.PIX;
 using ModelContextProtocol;
@@ -36,7 +37,7 @@ public class CaptureOptionsTests
         bool configured = false;
         bool captured = false;
 
-        McpException error = Assert.Throws<McpException>(() => DeviceTools.CaptureWithOptions(
+        McpException error = Assert.Throws<PixToolException>(() => DeviceTools.CaptureWithOptions(
             42, 0,
             _ => configured = true,
             () => captured = true));

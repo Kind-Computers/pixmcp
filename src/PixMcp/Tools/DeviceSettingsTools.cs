@@ -16,7 +16,7 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class DeviceSettingsTools
 {
-    [McpServerTool(Name = "pix_device_d3d_settings", ReadOnly = true), Description("Reads the D3D settings PIX applies to processes it launches through this connection: debug layer options (MODE, GBV_MODE, SYNC_COMMAND_QUEUES, ...), DRED options (AUTO_BREADCRUMBS, BREADCRUMB_CONTEXTS, PAGE_FAULTS, WATSON_DUMPS, ...) and device options (FORCE_WARP, FEATURE_LEVEL_LIMIT, DUMP_FILE_DRIVER_OPTIONS, RETAIN_DUMP_FILE, ...), each with its value type. Change one with pix_device_d3d_settings_set before pix_device_launch.")]
+    [McpServerTool(Name = "pix_device_d3d_settings", Title = "Read D3D settings", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Reads the D3D settings PIX applies to processes it launches through this connection: debug layer options (MODE, GBV_MODE, SYNC_COMMAND_QUEUES, ...), DRED options (AUTO_BREADCRUMBS, BREADCRUMB_CONTEXTS, PAGE_FAULTS, WATSON_DUMPS, ...) and device options (FORCE_WARP, FEATURE_LEVEL_LIMIT, DUMP_FILE_DRIVER_OPTIONS, RETAIN_DUMP_FILE, ...), each with its value type. Change one with pix_device_d3d_settings_set before pix_device_launch.")]
     public static Task<string> Get(PixSession session, [Description("Device handle")] string handle, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_d3d_settings", () =>
         {
@@ -30,7 +30,7 @@ public static class DeviceSettingsTools
             };
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_device_d3d_settings_set", Idempotent = true), Description("Changes one D3D setting for processes launched afterwards through this connection (does not affect running processes). category: debugLayer, dred or device. setting: a name from pix_device_d3d_settings, e.g. AUTO_BREADCRUMBS, PAGE_FAULTS, RETAIN_DUMP_FILE, FORCE_WARP, MODE. value: true/false for enable settings; an option name (APP_CONTROLLED, FORCE_ON, FORCE_OFF; for DRED enablement SYSTEM_CONTROLLED, FORCED_ON, FORCED_OFF) for option settings; a number for percentages; a feature level (D3D_FEATURE_LEVEL_12_0) or comma-separated flag names (MEDIUM_OVERHEAD,EVENT_MARKERS) where applicable. To make a GPU hang produce a dump for pix_dump_open: set dred AUTO_BREADCRUMBS and PAGE_FAULTS to FORCED_ON and device RETAIN_DUMP_FILE to true, then pix_device_launch with flags [GPU_CAPTURE_ENABLE_DRED_LOGGING].")]
+    [McpServerTool(Name = "pix_device_d3d_settings_set", Title = "Set D3D setting", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Changes one D3D setting for processes launched afterwards through this connection (does not affect running processes). category: debugLayer, dred or device. setting: a name from pix_device_d3d_settings, e.g. AUTO_BREADCRUMBS, PAGE_FAULTS, RETAIN_DUMP_FILE, FORCE_WARP, MODE. value: true/false for enable settings; an option name (APP_CONTROLLED, FORCE_ON, FORCE_OFF; for DRED enablement SYSTEM_CONTROLLED, FORCED_ON, FORCED_OFF) for option settings; a number for percentages; a feature level (D3D_FEATURE_LEVEL_12_0) or comma-separated flag names (MEDIUM_OVERHEAD,EVENT_MARKERS) where applicable. To make a GPU hang produce a dump for pix_dump_open: set dred AUTO_BREADCRUMBS and PAGE_FAULTS to FORCED_ON and device RETAIN_DUMP_FILE to true, then pix_device_launch with flags [GPU_CAPTURE_ENABLE_DRED_LOGGING].")]
     public static Task<string> Set(
         PixSession session,
         [Description("Device handle")] string handle,
@@ -57,7 +57,7 @@ public static class DeviceSettingsTools
                         case PIX_D3D_SETTING_DEBUG_LAYER_TYPE.PIX_D3D_SETTING_DEBUG_LAYER_TYPE_APP_OPTION: desc.Anonymous.AppOption = Tools.ParseEnum<PIX_D3D_SETTING_APP_OPTION>(value); break;
                         case PIX_D3D_SETTING_DEBUG_LAYER_TYPE.PIX_D3D_SETTING_DEBUG_LAYER_TYPE_PERCENTAGE_FACTOR: desc.Anonymous.PercentageFactor = ParseUInt(value); break;
                         case PIX_D3D_SETTING_DEBUG_LAYER_TYPE.PIX_D3D_SETTING_DEBUG_LAYER_TYPE_SHADER_PATCH_MODE: desc.Anonymous.ShaderPatchMode = Tools.ParseEnum<D3D12_GPU_BASED_VALIDATION_SHADER_PATCH_MODE>(value); break;
-                        default: throw new McpException($"Setting {Json.EnumName(s)} has an unknown value type {desc.Type}.");
+                        default: throw PixErrors.UnsupportedFeature($"Setting {Json.EnumName(s)} has an unknown value type {desc.Type}.");
                     }
                     _IPixD3DSettings_Extensions.SetDebugLayerSetting(settings, ref desc);
                     result = DebugLayer(settings, s);
@@ -72,7 +72,7 @@ public static class DeviceSettingsTools
                     {
                         case PIX_D3D_SETTING_DRED_TYPE.PIX_D3D_SETTING_DRED_TYPE_DRED_ENABLEMENT: desc.Anonymous.DredEnablement = Tools.ParseEnum<D3D12_DRED_ENABLEMENT>(value); break;
                         case PIX_D3D_SETTING_DRED_TYPE.PIX_D3D_SETTING_DRED_TYPE_APP_OPTION: desc.Anonymous.AppOption = Tools.ParseEnum<PIX_D3D_SETTING_APP_OPTION>(value); break;
-                        default: throw new McpException($"Setting {Json.EnumName(s)} has an unknown value type {desc.Type}.");
+                        default: throw PixErrors.UnsupportedFeature($"Setting {Json.EnumName(s)} has an unknown value type {desc.Type}.");
                     }
                     _IPixD3DSettings_Extensions.SetDredSetting(settings, ref desc);
                     result = Dred(settings, s);
@@ -89,14 +89,14 @@ public static class DeviceSettingsTools
                         case PIX_D3D_SETTING_DEVICE_TYPE.PIX_D3D_SETTING_DEVICE_TYPE_APP_OPTION: desc.Anonymous.AppOption = Tools.ParseEnum<PIX_D3D_SETTING_APP_OPTION>(value); break;
                         case PIX_D3D_SETTING_DEVICE_TYPE.PIX_D3D_SETTING_DEVICE_TYPE_D3D_FEATURE_LEVEL: desc.Anonymous.FeatureLevel = Tools.ParseEnum<D3D_FEATURE_LEVEL>(value); break;
                         case PIX_D3D_SETTING_DEVICE_TYPE.PIX_D3D_SETTING_DEVICE_TYPE_DUMP_FILE_DRIVER_OPTIONS: desc.Anonymous.DumpFileDriverOptions = ParseFlags<D3D12_DUMP_FILE_DRIVER_OPTIONS>(value); break;
-                        default: throw new McpException($"Setting {Json.EnumName(s)} has an unknown value type {desc.Type}.");
+                        default: throw PixErrors.UnsupportedFeature($"Setting {Json.EnumName(s)} has an unknown value type {desc.Type}.");
                     }
                     _IPixD3DSettings_Extensions.SetDeviceSetting(settings, ref desc);
                     result = Device(settings, s);
                     break;
                 }
                 default:
-                    throw new McpException($"Unknown category '{category}'. Use debugLayer, dred or device.");
+                    throw PixErrors.InvalidArguments($"Unknown category '{category}'. Use debugLayer, dred or device.");
             }
             h.Note("d3dSettingChanged", new { category, setting, value });
             return new { changed = true, category, result };
@@ -149,11 +149,11 @@ public static class DeviceSettingsTools
     {
         "true" or "1" or "on" or "yes" or "enable" or "enabled" => true,
         "false" or "0" or "off" or "no" or "disable" or "disabled" => false,
-        _ => throw new McpException($"Expected true or false, got '{value}'."),
+        _ => throw PixErrors.InvalidArguments($"Expected true or false, got '{value}'."),
     };
 
     internal static uint ParseUInt(string value)
-        => uint.TryParse(value.Trim(), out uint parsed) ? parsed : throw new McpException($"Expected a non-negative integer, got '{value}'.");
+        => uint.TryParse(value.Trim(), out uint parsed) ? parsed : throw PixErrors.InvalidArguments($"Expected a non-negative integer, got '{value}'.");
 
     internal static T ParseFlags<T>(string value) where T : struct, Enum
     {

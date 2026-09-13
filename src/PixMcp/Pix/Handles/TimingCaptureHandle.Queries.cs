@@ -52,7 +52,7 @@ public sealed partial class TimingCaptureHandle
     {
         lock (_queryGate)
             if (generation != _queryGeneration)
-                throw new PixToolException("timing_query_invalidated", "The timing capture changed while this query was pending. Repeat the query.", true);
+                throw new PixToolException(PixErrors.Codes.TimingQueryInvalidated, "The timing capture changed while this query was pending. Repeat the query.", true);
     }
 
     internal void RememberProfile(string resultRef, int generation)

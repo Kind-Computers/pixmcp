@@ -67,10 +67,10 @@ internal sealed partial class TimingDatabase
         string? nameContains, long? start, long? end, string orderBy, int offset, int limit) => Guard<TimingEventsDto>(() =>
     {
         ValidatePage(offset, limit);
-        if (domain is not ("cpu" or "gpu" or "all")) throw new PixToolException("invalid_arguments", "domain must be cpu, gpu, or all.");
-        if (orderBy is not ("start" or "duration")) throw new PixToolException("invalid_arguments", "orderBy must be start or duration.");
-        if (threadId.HasValue && domain != "cpu") throw new PixToolException("invalid_arguments", "threadId requires domain=cpu.");
-        if (queueId is not null && domain != "gpu") throw new PixToolException("invalid_arguments", "queueId requires domain=gpu.");
+        if (domain is not ("cpu" or "gpu" or "all")) throw new PixToolException(PixErrors.Codes.InvalidArguments, "domain must be cpu, gpu, or all.");
+        if (orderBy is not ("start" or "duration")) throw new PixToolException(PixErrors.Codes.InvalidArguments, "orderBy must be start or duration.");
+        if (threadId.HasValue && domain != "cpu") throw new PixToolException(PixErrors.Codes.InvalidArguments, "threadId requires domain=cpu.");
+        if (queueId is not null && domain != "gpu") throw new PixToolException(PixErrors.Codes.InvalidArguments, "queueId requires domain=gpu.");
         long? queue = queueId is null ? null : ParseId(queueId, nameof(queueId));
         var (a, b, provenance) = Range(start, end);
         Require("PixEventInfo", "Id", "NameId"); Require("Strings", "Id", "Value"); Require("Processes", "Id", "ProcessId");
@@ -196,7 +196,7 @@ internal sealed partial class TimingDatabase
         var (a, b, provenance) = Range(start, end);
         Require("PixCounters", "CounterId", "Timestamp", "Value");
         TimingCounterDto counter = CounterMetadata().FirstOrDefault(c => c.CounterId == Ns(id))
-            ?? throw new PixToolException("timing_counter_not_found", $"Counter {counterId} was not recorded in this capture.", nextCalls: [new("pix_timing_counters_list", new { handle })]);
+            ?? throw new PixToolException(PixErrors.Codes.TimingCounterNotFound, $"Counter {counterId} was not recorded in this capture.", nextCalls: [new("pix_timing_counters_list", new { handle })]);
         const string where = " WHERE CounterId=$id AND Timestamp >= $start AND Timestamp < $end";
         (string, object?)[] parameters = [("$id", id), ("$start", a), ("$end", b)];
         long total = Count("PixCounters", where, parameters);

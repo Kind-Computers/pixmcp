@@ -26,7 +26,7 @@ public static class PipelineTools
         return options;
     });
 
-    [McpServerTool(Name = "pix_gpu_pipeline_state", ReadOnly = true), Description("Program/pipeline state bound at a Draw, Dispatch, DispatchMesh or DispatchRays event: program type, pipeline type, PSO subobjects (blend, rasterizer, depth-stencil, input layout, ...), global root signature and bound shaders. The event must be a draw/dispatch (other events fail with E_NOT_VALID_STATE). Needs GPU analysis: started automatically as a job (see waitSeconds). For bound resources use pix_gpu_event_resources; for shader code use pix_gpu_shader_code.")]
+    [McpServerTool(Name = "pix_gpu_pipeline_state", Title = "Pipeline state at event", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Program/pipeline state bound at a Draw, Dispatch, DispatchMesh or DispatchRays event: program type, pipeline type, PSO subobjects (blend, rasterizer, depth-stencil, input layout, ...), global root signature and bound shaders. The event must be a draw/dispatch (other events fail with E_NOT_VALID_STATE). Needs GPU analysis: started automatically as a job (see waitSeconds). For bound resources use pix_gpu_event_resources; for shader code use pix_gpu_shader_code.")]
     public static Task<string> PipelineState(
         PixSession session,
         JobManager jobs,
@@ -276,7 +276,7 @@ public static class PipelineTools
     {
         List<object> shaders = Shaders(ReadProgram(h, eventRef), eventRef);
         if (shaders.Any(s => s is not ShaderInfoDto))
-            throw new PixToolException("unavailable_shader_data", "PIX could not read every shader bound at this event; shader matching requires a complete identity list.",
+            throw new PixToolException(PixErrors.Codes.UnavailableShaderData, "PIX could not read every shader bound at this event; shader matching requires a complete identity list.",
                 nextCalls: [new("pix_gpu_pipeline_state", new { eventRef })]);
         return shaders.Cast<ShaderInfoDto>().ToArray();
     }
@@ -285,21 +285,22 @@ public static class PipelineTools
     {
         IPixCollection shaders = PixApiExtensionsGpuCaptureResources.GetShaders(ReadProgram(h, shaderRef.EventRef));
         if (shaderRef.ShaderIndex < 0 || (ulong)shaderRef.ShaderIndex >= shaders.GetCount())
-            throw new McpException($"shaderIndex {shaderRef.ShaderIndex} is out of range; the event has {shaders.GetCount()} shader(s).");
+            throw PixErrors.InvalidReference($"shaderIndex {shaderRef.ShaderIndex} is out of range; the event has {shaders.GetCount()} shader(s).",
+                new ToolCallDto("pix_gpu_pipeline_state", new { eventRef = shaderRef.EventRef }, CostHints.Query));
         return shaders.Get<IPixShader>((ulong)shaderRef.ShaderIndex);
     }
 
-    [McpServerTool(Name = "pix_gpu_shader_code", ReadOnly = true), Description("Retrieve HLSL, IL or ISA using one-based line windows. Every line is retrievable with nextStartLine. Code nodes are paged independently; nodeIndex=-1 lists nodes only.")]
+    [McpServerTool(Name = "pix_gpu_shader_code", Title = "Shader code", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Retrieve HLSL, IL or ISA using one-based line windows. Every line is retrievable with nextStartLine. Code nodes are paged independently; nodeIndex=-1 lists nodes only.")]
     public static Task<string> ShaderCode(PixSession session, JobManager jobs,
         [Description("Shader reference returned by pipeline inspection.")] ShaderRef shaderRef,
-        ShaderCodeKind codeType = ShaderCodeKind.HLSL,
-        int nodeIndex = 0, int startLine = 1, int lineCount = 100,
-        int nodeOffset = 0, int nodeLimit = Paging.DefaultLimit,
+        [Description("Shader code kind: HLSL (default), IL or ISA.")] ShaderCodeKind codeType = ShaderCodeKind.HLSL,
+        [Description("Code node to read (default 0); -1 lists the nodes without code.")] int nodeIndex = 0, [Description("First line to return, 1-based (default 1).")] int startLine = 1, [Description("Lines to return (default 100, max 1000).")] int lineCount = 100,
+        [Description("First node to list (default 0).")] int nodeOffset = 0, [Description("Maximum nodes to list (default 25, max 1000).")] int nodeLimit = Paging.DefaultLimit,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
         CancellationToken cancellationToken = default)
     {
         ValidateShaderRequest(shaderRef, nodeIndex, startLine, lineCount, nodeOffset, nodeLimit);
-        if (!Enum.IsDefined(codeType)) throw new McpException("codeType must be HLSL, IL or ISA.");
+        if (!Enum.IsDefined(codeType)) throw PixErrors.InvalidArguments("codeType must be HLSL, IL or ISA.");
         ReferenceValidation.Shader(session, shaderRef);
         return Tools.RunWhenReady(session, jobs, "pix_gpu_shader_code", shaderRef.EventRef.Handle,
             GpuCaptureHandle.AnalysisPreparation(shaderRef.EventRef.Handle), h =>
@@ -319,7 +320,8 @@ public static class PipelineTools
                 int? next = null;
                 if (nodeIndex >= 0 && count > 0)
                 {
-                    if ((ulong)nodeIndex >= count) throw new McpException($"nodeIndex {nodeIndex} is out of range; there are {count} nodes.");
+                    if ((ulong)nodeIndex >= count) throw PixErrors.InvalidReference($"nodeIndex {nodeIndex} is out of range; there are {count} nodes.",
+                        new ToolCallDto("pix_gpu_shader_diagnostics", new { shaderRef }, CostHints.Query));
                     string fullCode = ReadCode(nodes, (ulong)nodeIndex);
                     (code, returned, total, next) = ShaderText.Window(fullCode, startLine, lineCount);
                 }
@@ -335,20 +337,20 @@ public static class PipelineTools
             }, waitSeconds, cancellationToken);
     }
 
-    [McpServerTool(Name = "pix_gpu_shader_search", ReadOnly = true), Description("Search shader code for literal case-insensitive text. Returns matching line numbers and context, paged across all code nodes or a selected node. Use pix_gpu_shader_code to read larger windows.")]
-    public static Task<string> ShaderSearch(PixSession session, JobManager jobs, ShaderRef shaderRef,
-        string query, ShaderCodeKind codeType = ShaderCodeKind.HLSL, int? nodeIndex = null,
-        int contextLines = 2, int offset = 0, int limit = Paging.DefaultLimit,
+    [McpServerTool(Name = "pix_gpu_shader_search", Title = "Search shader code", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Search shader code for literal case-insensitive text. Returns matching line numbers and context, paged across all code nodes or a selected node. Use pix_gpu_shader_code to read larger windows.")]
+    public static Task<string> ShaderSearch(PixSession session, JobManager jobs, [Description("Shader reference { eventRef, shaderIndex } as returned by pix_gpu_pipeline_state or pix_gpu_shaders.")] ShaderRef shaderRef,
+        [Description("Literal text to find (case-insensitive, single line).")] string query, [Description("Shader code kind: HLSL (default), IL or ISA.")] ShaderCodeKind codeType = ShaderCodeKind.HLSL, [Description("Restrict the search to one code node; default searches every node.")] int? nodeIndex = null,
+        [Description("Lines of context around each match (default 2, max 20).")] int contextLines = 2, [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = Paging.DefaultLimit,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
         CancellationToken cancellationToken = default)
     {
         ValidateShaderRequest(shaderRef, nodeIndex ?? -1, 1, 1, offset, limit);
-        if (!Enum.IsDefined(codeType)) throw new McpException("codeType must be HLSL, IL or ISA.");
+        if (!Enum.IsDefined(codeType)) throw PixErrors.InvalidArguments("codeType must be HLSL, IL or ISA.");
         ReferenceValidation.Shader(session, shaderRef);
-        if (nodeIndex < 0) throw new McpException("nodeIndex must be nonnegative when supplied.");
-        if (string.IsNullOrEmpty(query)) throw new McpException("query must not be empty.");
-        if (query.Contains('\n') || query.Contains('\r')) throw new McpException("query must fit on a single line.");
-        if (contextLines is < 0 or > 20) throw new McpException("contextLines must be between 0 and 20.");
+        if (nodeIndex < 0) throw PixErrors.InvalidArguments("nodeIndex must be nonnegative when supplied.");
+        if (string.IsNullOrEmpty(query)) throw PixErrors.InvalidArguments("query must not be empty.");
+        if (query.Contains('\n') || query.Contains('\r')) throw PixErrors.InvalidArguments("query must fit on a single line.");
+        if (contextLines is < 0 or > 20) throw PixErrors.InvalidArguments("contextLines must be between 0 and 20.");
         return Tools.RunWhenReady(session, jobs, "pix_gpu_shader_search", shaderRef.EventRef.Handle,
             GpuCaptureHandle.AnalysisPreparation(shaderRef.EventRef.Handle), h =>
             {
@@ -356,7 +358,8 @@ public static class PipelineTools
                 PIX_SHADER_CODE_TYPE type = Tools.ParseEnum<PIX_SHADER_CODE_TYPE>(codeType.ToString());
                 IPixCollection nodes = ReadNodes(shader, type);
                 ulong nodeCount = nodes.GetCount();
-                if (nodeIndex is >= 0 && (ulong)nodeIndex.Value >= nodeCount) throw new McpException("nodeIndex is out of range.");
+                if (nodeIndex is >= 0 && (ulong)nodeIndex.Value >= nodeCount) throw PixErrors.InvalidReference($"nodeIndex {nodeIndex} is out of range; there are {nodeCount} nodes.",
+                    new ToolCallDto("pix_gpu_shader_diagnostics", new { shaderRef }, CostHints.Query));
                 var items = new List<ShaderSearchMatchDto>();
                 var coverage = new List<object>();
                 long total = 0;
@@ -385,25 +388,25 @@ public static class PipelineTools
 
     private static void ValidateShaderRequest(ShaderRef shaderRef, int nodeIndex, int startLine, int lineCount, int offset, int limit)
     {
-        if (shaderRef is null || shaderRef.EventRef is null || string.IsNullOrWhiteSpace(shaderRef.EventRef.Handle)) throw new McpException("shaderRef and its eventRef are required.");
-        if (shaderRef.ShaderIndex < 0 || shaderRef.EventRef.QueueIndex < 0) throw new McpException("Shader and queue indices must be nonnegative.");
-        if (nodeIndex < -1) throw new McpException("nodeIndex must be -1 or a nonnegative index.");
+        if (shaderRef is null || shaderRef.EventRef is null || string.IsNullOrWhiteSpace(shaderRef.EventRef.Handle)) throw PixErrors.InvalidArguments("shaderRef and its eventRef are required.");
+        if (shaderRef.ShaderIndex < 0 || shaderRef.EventRef.QueueIndex < 0) throw PixErrors.InvalidArguments("Shader and queue indices must be nonnegative.");
+        if (nodeIndex < -1) throw PixErrors.InvalidArguments("nodeIndex must be -1 or a nonnegative index.");
         ShaderText.ValidateWindow(startLine, lineCount);
-        if (offset < 0 || limit is < 1 or > Paging.MaxLimit) throw new McpException("offset must be nonnegative and limit must be between 1 and 1000.");
+        if (offset < 0 || limit is < 1 or > Paging.MaxLimit) throw PixErrors.InvalidArguments("offset must be nonnegative and limit must be between 1 and 1000.");
     }
 
     private static IPixCollection ReadNodes(IPixShader shader, PIX_SHADER_CODE_TYPE type)
     {
         IPixCollection? nodes = PixApiExtensionsShaders.TryGetNodes(shader, type, out Exception ex);
-        return nodes ?? throw new McpException($"No {Json.EnumName(type)} code is available: {(ex is null ? "PIX returned no nodes" : PixErrors.Describe(ex))}");
+        return nodes ?? throw PixErrors.UnavailableShaderData($"No {Json.EnumName(type)} code is available: {(ex is null ? "PIX returned no nodes" : PixErrors.Describe(ex))}");
     }
 
     private static string ReadCode(IPixCollection nodes, ulong nodeIndex)
     {
         IPixShaderNode? node = PixApiExtensionsShaders.TryGetNode(nodes, nodeIndex, out Exception nodeError);
-        if (node is null) throw new McpException(nodeError is null ? "Shader node is unavailable." : PixErrors.Describe(nodeError));
+        if (node is null) throw PixErrors.UnavailableShaderData(nodeError is null ? "Shader node is unavailable." : PixErrors.Describe(nodeError));
         IPixAnnotatedString? text = PixApiExtensionsShaders.TryGetCode(node, out Exception codeError);
-        if (text is null) throw new McpException(codeError is null ? "Shader code is unavailable." : PixErrors.Describe(codeError));
+        if (text is null) throw PixErrors.UnavailableShaderData(codeError is null ? "Shader code is unavailable." : PixErrors.Describe(codeError));
         return Interop.W(text.GetString());
     }
 }

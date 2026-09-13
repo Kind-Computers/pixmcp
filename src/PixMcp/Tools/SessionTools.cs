@@ -14,7 +14,7 @@ public static class SessionTools
     // factory probe): they are the diagnostics an agent reaches for when calls stall, so they must
     // answer even while a replay occupies the worker. Everything they read is immutable or a
     // thread-safe snapshot.
-    [McpServerTool(Name = "pix_info", ReadOnly = true), Description("Reports the PIX install being used, whether the PIX API loaded, Windows Developer Mode state, open handles, jobs, and whether the single PIX worker thread is busy (queued calls wait behind the running job). Call this first if anything fails or stalls.")]
+    [McpServerTool(Name = "pix_info", Title = "Server info", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Reports the PIX install being used, whether the PIX API loaded, Windows Developer Mode state, open handles, jobs, and whether the single PIX worker thread is busy (queued calls wait behind the running job). Call this first if anything fails or stalls.")]
     public static async Task<string> Info(
         PixSession session,
         JobManager jobs,
@@ -40,6 +40,18 @@ public static class SessionTools
                 discoveryError = PixDiscovery.Error,
                 apiLoaded = session.FactoryCreated,
                 probeError,
+                build = PixDiscovery.AssemblyFileVersion,
+                installVersion = PixDiscovery.InstallVersion,
+                builtAgainst = PixDiscovery.BuiltAgainst,
+                verifiedRange = new { minPreviewDate = PixDiscovery.MinPreviewDate, verifiedVersion = PixDiscovery.VerifiedVersion },
+                compatibility = PixDiscovery.Compatibility,
+                pickNewest = PixDiscovery.PickNewest,
+                apiSurface = PixApiSurface.Probes,
+                apiSurfaceError = PixApiSurface.LoadError,
+                loadedFileVersion = PixApiSurface.LoadedFileVersion,
+                loggerAttached = session.LoggerAttached,
+                loggerError = session.LoggerError,
+                notes = CompatibilityNotes.All.Select(n => new { n.Id, n.Feature, n.Vendor, n.Severity, n.Text }).ToArray(),
             },
             developerModeEnabled = DeveloperModeEnabled(),
             pixdiff = PixDiffDiscovery.Info(),
@@ -61,6 +73,7 @@ public static class SessionTools
                 elapsedSeconds = worker.ElapsedSeconds,
             },
             results = session.Results.Summary(),
+            options = ServerOptions.Current.Describe(),
             handles = session.Handles.Select(h => h.Summary()).ToArray(),
             jobs = jobs.All.Select(j => j.ToDto()).ToArray(),
         });
@@ -79,28 +92,31 @@ public static class SessionTools
         }
     }
 
-    [McpServerTool(Name = "pix_handles", ReadOnly = true), Description("Lists open handles (GPU captures, timing captures, dump files, device connections) with their summaries. Answers even while the PIX thread is busy.")]
-    public static string Handles(PixSession session) => Json.Serialize(session.Handles.Select(h => h.Summary()).ToArray());
+    [McpServerTool(Name = "pix_handles", Title = "List handles", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Lists open handles (GPU captures, timing captures, dump files, device connections) with their summaries. Answers even while the PIX thread is busy.")]
+    public static string Handles(PixSession session) => Json.Serialize(Envelope(session.Handles.Select(h => h.Summary()).ToArray()));
 
-    [McpServerTool(Name = "pix_close", Destructive = true), Description("Closes a handle: stops any running analysis, disconnects, and releases the document. Collected timing/counter data for the handle is discarded.")]
+    /// <summary>A complete list as the standard page envelope (total = count, no continuation).</summary>
+    internal static PageResult<T> Envelope<T>(IReadOnlyList<T> items) => Paging.Page(items, items.Count, 0, Math.Max(1, items.Count));
+
+    [McpServerTool(Name = "pix_close", Title = "Close handle", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false), Description("Closes a handle: stops any running analysis, disconnects, and releases the document. Collected timing/counter data for the handle is discarded.")]
     public static Task<string> Close(PixSession session, [Description("Handle id, e.g. gpu-1")] string handle, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_close", () => session.Close(handle), cancellationToken);
 
-    [McpServerTool(Name = "pix_close_all", Destructive = true), Description("Closes every open handle.")]
+    [McpServerTool(Name = "pix_close_all", Title = "Close all handles", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false), Description("Closes every open handle.")]
     public static Task<string> CloseAll(PixSession session, CancellationToken cancellationToken = default)
-        => Tools.Run(session, "pix_close_all", () => session.CloseAll(), cancellationToken);
+        => Tools.Run(session, "pix_close_all", () => Envelope((IReadOnlyList<object>)session.CloseAll()), cancellationToken);
 
-    [McpServerTool(Name = "pix_jobs", ReadOnly = true), Description("Lists background jobs (analysis start, timing/counter collection, Dr. PIX runs, symbol resolution, captures) and their status. Only the most recent finished jobs are retained.")]
-    public static string Jobs(JobManager jobs) => Json.Serialize(jobs.All.Select(j => j.ToDto()).ToArray());
+    [McpServerTool(Name = "pix_jobs", Title = "List jobs", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Lists background jobs (analysis start, timing/counter collection, Dr. PIX runs, symbol resolution, captures) and their status. Only the most recent finished jobs are retained.")]
+    public static string Jobs(JobManager jobs) => Json.Serialize(Envelope(jobs.All.Select(j => j.ToDto()).ToArray()));
 
-    [McpServerTool(Name = "pix_job_status", ReadOnly = true), Description("Returns compact job status, progress, recent messages and a resultRef once finished. Read the result with the exact pix_result_read nextCall.")]
+    [McpServerTool(Name = "pix_job_status", Title = "Job status", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Returns compact job status, progress, recent messages and a resultRef once finished. Read the result with the exact pix_result_read nextCall.")]
     public static string JobStatus(JobManager jobs, [Description("Job id, e.g. job-1")] string jobId)
     {
         Job job = jobs.Get(jobId);
         return Json.Serialize(job.ToDto());
     }
 
-    [McpServerTool(Name = "pix_job_wait", ReadOnly = true), Description("Blocks until a job finishes or the timeout elapses, then returns compact status and a resultRef. Job payloads are retrieved with pix_result_read.")]
+    [McpServerTool(Name = "pix_job_wait", Title = "Wait for job", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Blocks until a job finishes or the timeout elapses, then returns compact status and a resultRef. Job payloads are retrieved with pix_result_read.")]
     public static async Task<string> JobWait(
         JobManager jobs,
         [Description("Job id, e.g. job-1")] string jobId,
@@ -111,19 +127,16 @@ public static class SessionTools
         return Json.Serialize(await jobs.WaitOrStatus(job, Math.Clamp(timeoutSeconds, 0, 3600), cancellationToken).ConfigureAwait(false));
     }
 
-    [McpServerTool(Name = "pix_job_cancel"), Description("Requests cancellation of a running job (best effort; PIX honours it at its next checkpoint, and work that completes first stays succeeded).")]
+    [McpServerTool(Name = "pix_job_cancel", Title = "Cancel job", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Requests cancellation of a running job (best effort; PIX honours it at its next checkpoint, and work that completes first stays succeeded).")]
     public static string JobCancel(JobManager jobs, [Description("Job id")] string jobId)
     {
         Job job = jobs.Get(jobId);
-        if (job.IsFinished)
-        {
-            throw new McpException($"Job {jobId} already finished with status {job.Status}.");
-        }
+        if (job.IsFinished) throw PixErrors.JobAlreadyFinished(job.Id, job.Status.ToString().ToLowerInvariant(), job.ResultRef);
         jobs.Cancel(job);
         return Json.Serialize(job.ToDto());
     }
 
-    [McpServerTool(Name = "pix_log", ReadOnly = true), Description("Returns recent PIX engine log messages (warnings/errors reported by PIX itself). Useful when a call fails without a clear reason.")]
+    [McpServerTool(Name = "pix_log", Title = "PIX engine log", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Returns recent PIX engine log messages (warnings/errors reported by PIX itself). Useful when a call fails without a clear reason.")]
     public static string Log(PixSession session, [Description("Number of most recent entries (default 50, max 500).")] int count = 50)
-        => Json.Serialize(session.Log.Recent(Math.Clamp(count, 1, 500)));
+        => Json.Serialize(Envelope(session.Log.Recent(Math.Clamp(count, 1, 500)).ToArray()));
 }

@@ -13,7 +13,7 @@ internal static class PixToolProcess
         string[] connected = session.Handles.OfType<GpuCaptureHandle>()
             .Where(h => h.AnalysisConnected || h.AnalysisStarted).Select(h => h.Id).ToArray();
         if (connected.Length > 0)
-            throw new PixToolException("analysis_active", $"Stop connected GPU analyses before CLI replay: {string.Join(", ", connected)}.", true,
+            throw new PixToolException(PixErrors.Codes.AnalysisActive, $"Stop connected GPU analyses before CLI replay: {string.Join(", ", connected)}.", true,
                 connected.Select(id => new ToolCallDto("pix_gpu_analysis_stop", new { handle = id })).ToArray());
     }
 

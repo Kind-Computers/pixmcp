@@ -15,9 +15,9 @@
  ["pix_gpu_shader_code", {"shaderRef": "$pix_gpu_pipeline_state.shaders.0.shaderRef", "lineCount": 50}],
  ["pix_gpu_event_resources", {"eventRef": "$pix_gpu_events.items.0.eventRef"}],
  ["pix_gpu_counters_list", {"handle": "$pix_gpu_info.handle"}],
- ["pix_gpu_counters_start", {"handle": "$pix_gpu_info.handle", "counterIds": ["$pix_gpu_counters_list.items.0.id"], "waitSeconds": 300}, {"status": "succeeded"}],
- ["pix_gpu_counters_collect", {"handle": "$pix_gpu_info.handle", "counterIds": ["$pix_gpu_counters_list.items.0.id"], "limit": 5}],
+ ["pix_gpu_counters_prepare", {"handle": "$pix_gpu_info.handle", "counterIds": ["$pix_gpu_counters_list.items.0.id"], "waitSeconds": 300}, {"status": "succeeded"}],
+ ["pix_gpu_counters_read", {"handle": "$pix_gpu_info.handle", "counterIds": ["$pix_gpu_counters_list.items.0.id"], "limit": 5}],
  ["pix_gpu_drpix_experiments", {"handle": "$pix_gpu_info.handle"}],
- ["pix_gpu_drpix_run", {"handle": "$pix_gpu_info.handle", "experiments": ["1x1 Viewport"], "waitSeconds": 300}, {"status": "succeeded"}],
+ ["pix_gpu_drpix_run", {"handle": "$pix_gpu_info.handle", "experiments": ["1x1 Viewport"], "wholeCapture": true, "waitSeconds": 300}, {"status": "succeeded"}],
  ["pix_close_all", {}]
 ]

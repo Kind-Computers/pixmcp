@@ -38,7 +38,7 @@ public sealed class CaptureTargets
     public CaptureTarget Get(uint pid)
     {
         lock (_gate) return _targets.TryGetValue(pid, out CaptureTarget? target) ? target
-            : throw new PixToolException("capture_target_changed", $"Process {pid} is not a capture target on this connection. Launch or attach it first.");
+            : throw new PixToolException(PixErrors.Codes.CaptureTargetChanged, $"Process {pid} is not a capture target on this connection. Launch or attach it first.");
     }
 
     public void Validate(CaptureTarget expected)
@@ -46,7 +46,7 @@ public sealed class CaptureTargets
         lock (_gate)
         {
             if (!_targets.TryGetValue(expected.ProcessId, out CaptureTarget? current) || !ReferenceEquals(current, expected))
-                throw new PixToolException("capture_target_changed", "The capture target was detached or replaced while waiting.");
+                throw new PixToolException(PixErrors.Codes.CaptureTargetChanged, "The capture target was detached or replaced while waiting.");
             current.RequireReady();
         }
     }
@@ -86,17 +86,17 @@ public sealed class CaptureTarget(uint processId, PIX_PROCESS_UNSUPPORTED_REASON
         lock (_gate)
         {
             CheckPermanentFailure();
-            if (!Ready) throw new PixToolException("capture_target_not_ready", $"Process {ProcessId} has not created a capturable D3D12 device.", true);
+            if (!Ready) throw new PixToolException(PixErrors.Codes.CaptureTargetNotReady, $"Process {ProcessId} has not created a capturable D3D12 device.", true);
         }
     }
 
     private void CheckPermanentFailure()
     {
-        if (_invalid) throw new PixToolException("capture_target_changed", "The capture target was detached, replaced, or closed while waiting.");
+        if (_invalid) throw new PixToolException(PixErrors.Codes.CaptureTargetChanged, "The capture target was detached, replaced, or closed while waiting.");
         if (_reason == PIX_PROCESS_UNSUPPORTED_REASON.PIX_PROCESS_UNSUPPORTED_REASON_TERMINATED)
-            throw new PixToolException("capture_target_terminated", $"Process {ProcessId} terminated before capture.");
+            throw new PixToolException(PixErrors.Codes.CaptureTargetTerminated, $"Process {ProcessId} terminated before capture.");
         if (_reason is not (PIX_PROCESS_UNSUPPORTED_REASON.PIX_PROCESS_UNSUPPORTED_REASON_NONE or PIX_PROCESS_UNSUPPORTED_REASON.PIX_PROCESS_UNSUPPORTED_REASON_NOT_USING_D3D12))
-            throw new PixToolException("capture_target_unsupported", $"Process {ProcessId} is unsupported: {Json.EnumName(_reason)}.");
+            throw new PixToolException(PixErrors.Codes.CaptureTargetUnsupported, $"Process {ProcessId} is unsupported: {Json.EnumName(_reason)}.");
     }
 
     internal async Task WaitReadyAsync(TimeSpan timeout, CancellationToken token)

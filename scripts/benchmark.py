@@ -84,6 +84,9 @@ class Investigator:
         raise SmokeError("Job did not finish within the benchmark deadline")
 
     def query(self, tool, **arguments):
+        """Runs a query to its final answer. answer_bytes records the size of that answer: a deferred
+        result counts its totalBytes (the JSON the tool produced), an inline one its returned JSON."""
+        self.answer_bytes = None
         for _ in range(10):
             try:
                 response = self.call(tool, **arguments)
@@ -94,12 +97,29 @@ class Investigator:
             if isinstance(response, dict) and response.get("pending"):
                 self.wait(response)
                 continue
+            section = self.pending_section(response)
+            if section is not None:
+                self.wait(section)
+                continue
             if isinstance(response, dict) and "jobId" in response:
                 return self.read(self.wait(response)["resultRef"])
             if isinstance(response, dict) and response.get("deferred"):
+                self.answer_bytes = response.get("totalBytes")
                 return self.read(response["resultRef"])
+            self.answer_bytes = self.calls[-1]["returnedJsonBytes"]
             return response
         raise SmokeError(f"{tool}: prerequisites did not become ready")
+
+    @staticmethod
+    def pending_section(response):
+        """A partial answer carries metadata plus one pending section (timing, preparation, pipeline, bindings)."""
+        if not isinstance(response, dict):
+            return None
+        for key in ("preparation", "timing", "pipeline", "bindings"):
+            section = response.get(key)
+            if isinstance(section, dict) and section.get("pending") and section.get("jobId"):
+                return section
+        return None
 
     def recover_worker_busy(self, error, tool, arguments):
         marker = "tool error: "
@@ -188,6 +208,7 @@ class TaskRecorder:
         self.report["tasks"].append({"name": name, "passed": status == "passed", "status": status,
                                      "seconds": time.monotonic() - started, "errors": errors,
                                      "toolCalls": len(calls), "returnedJsonBytes": sum(c["returnedJsonBytes"] for c in calls),
+                                     **({"detail": result["detail"]} if isinstance(result, dict) and "detail" in result else {}),
                                      "returnedWireBytes": sum(c["returnedWireBytes"] or 0 for c in calls),
                                      "replayPreparationJobs": len(self.agent.replay_jobs - jobs_before)})
         return result
@@ -245,10 +266,47 @@ def run(client, capture, candidate=None, report=None):
         events = agent.query("pix_gpu_events", handle=handle, scope=scope, limit=1000)
         event_indices = {row["eventRef"]["eventIndex"] for row in events["items"]}
         require(scope["eventIndex"] in event_indices, "Event scope omitted its root")
-        timings = agent.query("pix_gpu_timing_events", handle=handle, scope=scope, kind="drawOrDispatch", limit=1000)
+        timings = agent.query("pix_gpu_timing_events", handle=handle, scope=scope, kind="work", limit=1000)
         require(timings["total"] > 0 and all(row["eventRef"]["queueIndex"] == scope["queueIndex"] and
                 row["eventRef"]["eventIndex"] in event_indices for row in timings["items"]), "Timing scope escaped its event subtree")
     task("Scope event and timing queries to one pass", scoped_queries, handle is not None)
+    def shaped_rows():
+        sizes = {}
+        events = agent.query("pix_gpu_events", handle=handle, limit=1000)
+        sizes["eventsObjects"] = agent.answer_bytes
+        events_table = agent.query("pix_gpu_events", handle=handle, limit=1000, format="table")
+        sizes["eventsTable"] = agent.answer_bytes
+        agent.query("pix_gpu_events", handle=handle, limit=1000, format="table", brief=True)
+        sizes["eventsBriefTable"] = agent.answer_bytes
+        require(events_table["count"] == events["count"] == events["total"], "Event table rows do not match the object rows")
+        require(sizes["eventsTable"] < sizes["eventsObjects"] and sizes["eventsBriefTable"] < sizes["eventsTable"],
+                f"Table shaping did not shrink the {events['total']}-row event page: {sizes}")
+        objects = agent.query("pix_gpu_timing_events", handle=handle, kind="work", limit=1000)
+        sizes["timingObjects"] = agent.answer_bytes
+        table = agent.query("pix_gpu_timing_events", handle=handle, kind="work", limit=1000, format="table")
+        sizes["timingTable"] = agent.answer_bytes
+        require(table["count"] == objects["count"] and len(table["rows"]) == table["count"], "Table rows do not match the object rows")
+        columns = [column["name"] for column in table["columns"]]
+        require(len(columns) == len(table["rows"][0]), "Table rows are not positional over columns")
+        require("eop.ns" in columns and table["legend"]["refs"]["eventRef"]["kind"] == "EventRef", "Table legend lacks the EventRef recipe")
+        queue_column, event_column = columns.index("queueIndex"), columns.index("eventIndex")
+        rebuilt = {"handle": handle, "queueIndex": table["rows"][0][queue_column], "eventIndex": table["rows"][0][event_column]}
+        inspected_row = agent.query("pix_gpu_inspect_event", eventRef=rebuilt, sections=["timing"])
+        require(inspected_row["eventRef"] == rebuilt, "A table row did not rebuild a usable EventRef")
+        top = agent.query("pix_gpu_timing_events", handle=handle, kind="work", topN=2, sortBy="eopDuration")
+        require(top["count"] <= 2 and top.get("nextOffset") is None, "topN must not offer a continuation")
+        return {"detail": {"answerBytes": sizes}}
+    task("Return positional table rows and rebuild references", shaped_rows, handle is not None)
+    def annotated_calls():
+        overview = agent.query("pix_gpu_overview", handle=handle)
+        require(all(call.get("cost") for call in overview["nextCalls"]), "Overview nextCalls lack cost hints")
+        first = agent.query("pix_gpu_timing_tree", handle=handle, limit=5)
+        second = agent.query("pix_gpu_timing_tree", handle=handle, limit=5)
+        require(isinstance(first.get("provenance"), dict) and ("fingerprint" in first["provenance"] or "provenanceRef" in first["provenance"]), "First provenance block lacks a fingerprint")
+        require(second["provenance"].get("provenanceRef") and second["provenance"].get("unchanged") is True, "Repeated provenance was not replaced by a stub")
+        full = agent.query("pix_gpu_timing_tree", handle=handle, limit=5, includeProvenance=True)
+        require("provenanceRef" not in full["provenance"], "includeProvenance=true must return the full block")
+    task("Cost hints and provenance stubs on repeated calls", annotated_calls, handle is not None)
     def resource_uses():
         resource_ref = inspected["bindings"]["resources"][0]["resource"]["resourceRef"]
         value = agent.query("pix_gpu_resource_uses", resourceRef=resource_ref)

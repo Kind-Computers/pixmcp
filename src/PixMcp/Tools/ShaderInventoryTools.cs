@@ -12,48 +12,62 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class ShaderInventoryTools
 {
-    [McpServerTool(Name = "pix_gpu_shaders", ReadOnly = true), Description("Discover shaders across a capture, grouped by available hash and stage with representative shader references and event-use counts. Missing hashes remain individual occurrences. Builds one shared metadata index as a job; filters and subsequent pages reuse it.")]
-    public static Task<string> Shaders(PixSession session, JobManager jobs, string handle,
-        string? stage = null, string? entryContains = null, string? hash = null,
+    [McpServerTool(Name = "pix_gpu_shaders", Title = "Shader inventory", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Discover shaders across a capture, grouped by available hash and stage with representative shader references and event-use counts. Missing hashes remain individual occurrences. Builds one shared metadata index as a job; filters and subsequent pages reuse it.")]
+    public static Task<string> Shaders(PixSession session, JobManager jobs, [Description("GPU capture handle (from pix_gpu_open).")] string handle,
+        [Description("Only shaders of this stage (VS, PS, CS, ...).")] string? stage = null, [Description("Only shaders whose entry point contains this text.")] string? entryContains = null, [Description("Only the shader with this hash.")] string? hash = null,
         [Description(EventScope.Description)] EventRef? scope = null,
-        int offset = 0, int limit = Paging.DefaultLimit,
+        [Description(EventScope.PrefixDescription)] string? markerPathPrefix = null,
+        [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = Paging.DefaultLimit,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
+        [Description(Shaping.FormatDescription)] string format = "objects",
+        [Description(Shaping.BriefDescription)] bool brief = false,
+        [Description(Shaping.TopNDescription)] int? topN = null,
+        [Description(Shaping.MaxStringLengthDescription)] int? maxStringLength = null,
         CancellationToken cancellationToken = default)
     {
         ReferenceValidation.Page(offset, limit);
         session.Get<GpuCaptureHandle>(handle);
-        EventScope.ResolveQueue(session, handle, null, scope);
+        ScopeSelection selection = EventScope.Resolve(session, handle, null, scope, markerPathPrefix);
+        ShapingOptions shaping = Shaping.Options(format, brief, topN, maxStringLength, offset);
         return Tools.RunWhenReady(session, jobs, "pix_gpu_shaders", handle, GpuCaptureHandle.ShaderIndexPreparation(handle), h =>
         {
             ShaderIndex index = h.ShaderIndex!;
             IReadOnlyList<ShaderInventoryItemDto> rows = index.Inventory(stage, entryContains, hash,
-                candidate => EventScope.Contains(h, candidate, scope), scope);
-            ShaderInventoryItemDto[] items = rows.Skip(offset).Take(limit).ToArray();
-            int? next = offset + (long)items.Length < rows.Count ? offset + items.Length : null;
-            return new ShaderInventoryDto(handle, rows.Count, offset, items.Length, next, items, index.Coverage,
-                next.HasValue ? [new("pix_gpu_shaders", new { handle, stage, entryContains, hash, scope, offset = next.Value, limit })] : []);
+                candidate => selection.Contains(h, candidate), scope);
+            (int o, int l) = Shaping.Window(shaping, offset, limit);
+            ShaderInventoryItemDto[] items = rows.Skip(o).Take(l).ToArray();
+            ToolCallDto Call(int at, int? strings) => new("pix_gpu_shaders", new { handle, stage, entryContains, hash, scope, markerPathPrefix, offset = at, limit = l, format, brief, maxStringLength = strings });
+            if (shaping.Table)
+                return Shaping.Apply(items, rows.Count, o, l, shaping, RowShapes.Shaders, handle, new { coverage = index.Coverage, scope = selection.DescribeOrNull(h) },
+                    next => Call(next, maxStringLength), () => Call(o, Shaping.FullStringLength));
+            if (shaping.Brief) items = items.Select(RowShapes.Shaders.Brief!).ToArray();
+            int? next = !shaping.TopN.HasValue && o + (long)items.Length < rows.Count ? o + items.Length : null;
+            return RowShapes.Finish(new ShaderInventoryDto(handle, rows.Count, o, items.Length, next, items, index.Coverage,
+                next.HasValue ? [Call(next.Value, maxStringLength)] : []) { Scope = selection.DescribeOrNull(h) }, shaping);
         }, waitSeconds, cancellationToken);
     }
 
-    [McpServerTool(Name = "pix_gpu_shader_uses", ReadOnly = true), Description("Find events using the selected shader by hash and stage in the same capture. A missing hash only matches the exact shader occurrence. Includes marker paths and all matching shader slots at each event; uses the shared capture shader index.")]
-    public static Task<string> Uses(PixSession session, JobManager jobs, ShaderRef shaderRef,
+    [McpServerTool(Name = "pix_gpu_shader_uses", Title = "Shader uses", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Find events using the selected shader by hash and stage in the same capture. A missing hash only matches the exact shader occurrence. Includes marker paths and all matching shader slots at each event; uses the shared capture shader index.")]
+    public static Task<string> Uses(PixSession session, JobManager jobs, [Description("Shader reference { eventRef, shaderIndex } as returned by pix_gpu_pipeline_state or pix_gpu_shaders.")] ShaderRef shaderRef,
         [Description(EventScope.Description)] EventRef? scope = null,
-        int offset = 0, int limit = Paging.DefaultLimit,
+        [Description(EventScope.PrefixDescription)] string? markerPathPrefix = null,
+        [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = Paging.DefaultLimit,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
         CancellationToken cancellationToken = default)
     {
         ReferenceValidation.Shader(session, shaderRef);
         ReferenceValidation.Page(offset, limit);
         string handle = shaderRef.EventRef.Handle;
-        EventScope.ResolveQueue(session, handle, null, scope);
+        ScopeSelection selection = EventScope.Resolve(session, handle, null, scope, markerPathPrefix);
         return Tools.RunWhenReady(session, jobs, "pix_gpu_shader_uses", handle, GpuCaptureHandle.ShaderIndexPreparation(handle), h =>
         {
             ShaderIndex index = h.ShaderIndex!;
-            var (method, rows) = index.Uses(shaderRef, candidate => EventScope.Contains(h, candidate, scope));
+            var (method, rows) = index.Uses(shaderRef, candidate => selection.Contains(h, candidate));
             ShaderUseEventDto[] items = rows.Skip(offset).Take(limit).ToArray();
             int? next = offset + (long)items.Length < rows.Count ? offset + items.Length : null;
             return new ShaderUsesDto(shaderRef, method, rows.Count, offset, items.Length, next, items, index.Coverage,
-                next.HasValue ? [new("pix_gpu_shader_uses", new { shaderRef, scope, offset = next.Value, limit })] : []);
+                next.HasValue ? [new("pix_gpu_shader_uses", new { shaderRef, scope, markerPathPrefix, offset = next.Value, limit })] : [])
+            { Scope = selection.DescribeOrNull(h) };
         }, waitSeconds, cancellationToken);
     }
 
@@ -68,7 +82,7 @@ public static class ShaderInventoryTools
             foreach (EventRecord record in events)
             {
                 job.ThrowIfCancellationRequested();
-                if (!Tools.MatchesKind(record, "drawOrDispatch")) continue;
+                if (!Tools.MatchesKind(record, "work")) continue;
                 var eventRef = new EventRef(h.Id, queue.Index, record.Index);
                 try
                 {

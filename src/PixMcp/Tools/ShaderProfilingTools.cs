@@ -14,50 +14,49 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class ShaderProfilingTools
 {
-    [McpServerTool(Name = "pix_gpu_shader_profile"), Description("Experimental shader profiling for an event range on one queue. Returns a job whose stored result includes every instruction, hottest first, plus sample/stall metadata and shader references matched by hash and stage. Read result pages with pix_result_read. Byte offsets refer to ISA, not HLSL lines; no source mapping is inferred. Requires driver support.")]
+    [McpServerTool(Name = "pix_gpu_shader_profile", Title = "Profile shader stalls (live replay)", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Experimental shader profiling over the GPU events of a scope on one queue. Returns a job whose stored result includes every instruction, hottest first, plus sample/stall metadata and shader references matched by hash and stage. Read result pages with pix_result_read. Byte offsets refer to ISA, not HLSL lines; no source mapping is inferred. Requires driver support.")]
     public static Task<string> Profile(
         PixSession session,
         JobManager jobs,
-        [Description("First event of the range (a draw/dispatch or marker).")] EventRef firstEventRef,
-        [Description("Last event; defaults to firstEventRef. Must use the same capture and queue.")] EventRef? lastEventRef = null,
+        [Description("GPU capture handle")] string handle,
+        [Description(EventScope.Description)] EventRef? scope = null,
+        [Description(EventScope.PrefixDescription)] string? markerPathPrefix = null,
+        [Description("Queue to profile; required when neither scope nor a single-queue prefix selects one. Alone it profiles the whole queue.")] int? queueIndex = null,
         [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
         CancellationToken cancellationToken = default)
     {
-        ReferenceValidation.Event(session, firstEventRef);
-        lastEventRef ??= firstEventRef;
-        ReferenceValidation.Event(session, lastEventRef);
-        if (lastEventRef.Handle != firstEventRef.Handle || lastEventRef.QueueIndex != firstEventRef.QueueIndex ||
-            lastEventRef.EventIndex < firstEventRef.EventIndex) throw new McpException("The event range must be ordered within the same capture and queue.");
+        if (scope is null && markerPathPrefix is null && !queueIndex.HasValue)
+            throw new PixToolException(PixErrors.Codes.InvalidArguments, "Pass scope, markerPathPrefix or queueIndex to select the events to profile.",
+                nextCalls: [new("pix_gpu_overview", new { handle })]);
+        ScopeSelection selection = EventScope.Resolve(session, handle, queueIndex, scope, markerPathPrefix);
+        if (queueIndex.HasValue) session.Get<GpuCaptureHandle>(handle).Queue(queueIndex.Value);
         return Tools.RunJob(jobs, "pix_gpu_shader_profile", () => jobs.StartForHandle<GpuCaptureHandle>("shader-profile",
-            $"Profile shaders of {firstEventRef.Handle} queue {firstEventRef.QueueIndex} events {firstEventRef.EventIndex}..{lastEventRef.EventIndex}", firstEventRef.Handle, (j, h) =>
+            $"Profile shaders of {handle}" + (scope is null ? "" : $" under queue {scope.QueueIndex} event {scope.EventIndex}") + (markerPathPrefix is null ? "" : $" matching '{markerPathPrefix}'"), handle, (j, h) =>
         {
             if (h.OptionalUnavailable.TryGetValue("shaderProfiling", out object? cached)) return cached;
             h.EnsureAnalysisStarted(j);
-            PIX_EVENT_INFO first = h.EventInfo(firstEventRef.QueueIndex, firstEventRef.EventIndex);
-            PIX_EVENT_INFO last = h.EventInfo(lastEventRef.QueueIndex, lastEventRef.EventIndex);
-            j.AddMessage("Profiling shaders (replaying the event range)...");
+            EventRange range = EventScope.ToEventRange(h, selection);
+            int queue = range.Range.QueueIndex;
+            j.AddMessage($"Profiling shaders (replaying {range.Range.WorkEvents} GPU event(s) on queue {queue})...");
             j.ThrowIfCancellationRequested();
             try
             {
                 IPixGpuCaptureAnalysisExperimental experimental = h.GetAnalysis() as IPixGpuCaptureAnalysisExperimental
                     ?? ExperimentalCapture.GetAnalysisExperimental(h.Document);
-                IPixShaderProfilingLiveResult result = ExperimentalAnalysis.ProfileShaderPipeline(experimental, first, last);
+                IPixShaderProfilingLiveResult result = ExperimentalAnalysis.ProfileShaderPipeline(experimental, range.First, range.Last);
                 var identities = new List<ShaderInfoDto>();
                 var coverage = new List<object>();
-                EventRecord[] records = h.AllEvents(firstEventRef.QueueIndex);
+                EventRecord[] records = h.AllEvents(queue);
                 foreach (EventRecord record in records)
                 {
-                    bool inRange = record.Index >= firstEventRef.EventIndex && record.Index <= lastEventRef.EventIndex;
-                    if ((!inRange && !EventNavigation.IsWithin(records, record.Index, firstEventRef.EventIndex) &&
-                        !EventNavigation.IsWithin(records, record.Index, lastEventRef.EventIndex)) ||
-                        !Tools.MatchesKind(record, "drawOrDispatch")) continue;
+                    if (!selection.Contains(queue, records, record.Index) || !Tools.MatchesKind(record, "work")) continue;
                     j.ThrowIfCancellationRequested();
-                    var eventRef = new EventRef(h.Id, firstEventRef.QueueIndex, record.Index);
+                    var eventRef = new EventRef(h.Id, queue, record.Index);
                     try { identities.AddRange(PipelineTools.ReadShaders(h, eventRef)); }
                     catch (Exception ex) { coverage.Add(new { eventRef, unavailable = true, reason = PixErrors.Describe(ex) }); }
                 }
                 h.MarkCapability("shaderProfiling", "supported");
-                return Describe(result, identities, coverage, h.Provenance(), firstEventRef, lastEventRef);
+                return Describe(result, identities, coverage, h.Provenance(), range.ToDto(h.Id), selection.DescribeOrNull(h));
             }
             catch (Exception ex) when (PixErrors.ToDto(ex).Code == "unsupported_feature")
             {
@@ -70,7 +69,7 @@ public static class ShaderProfilingTools
     }
 
     private static unsafe object Describe(IPixShaderProfilingLiveResult result, IReadOnlyList<ShaderInfoDto> identities,
-        IReadOnlyList<object> coverage, ReplayProvenance provenance, EventRef firstEventRef, EventRef lastEventRef)
+        IReadOnlyList<object> coverage, ReplayProvenance provenance, object range, object? scope)
     {
         var stallTypes = new Dictionary<uint, (string Name, string? Description)>();
         uint stallTypeCount = result.GetStallTypeCount();
@@ -144,8 +143,8 @@ public static class ShaderProfilingTools
 
         return new
         {
-            firstEventRef,
-            lastEventRef,
+            range,
+            scope,
             provenance,
             coverage,
             shaderCount,

@@ -18,19 +18,19 @@ public static class DumpShaderTools
     private const int MaxComponentDepth = 3;
     private const int MaxComponents = 64;
 
-    [McpServerTool(Name = "pix_dump_shader_wave_data", ReadOnly = true), Description("Pages lanes and offending HLSL locations for one dump shader wave. Follow nextCalls to retrieve every lane and location, including those truncated from pix_dump_shader_waves or triage.")]
-    public static Task<string> WaveData(PixSession session, string handle, int waveIndex,
-        int lanesOffset = 0, int lanesLimit = 256, int locationsOffset = 0, int locationsLimit = 32,
-        bool includeLanes = true, bool includeOffendingLocations = true, CancellationToken cancellationToken = default)
+    [McpServerTool(Name = "pix_dump_shader_wave_data", Title = "Dump shader wave data", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Pages lanes and offending HLSL locations for one dump shader wave. Follow nextCalls to retrieve every lane and location, including those truncated from pix_dump_shader_waves or triage.")]
+    public static Task<string> WaveData(PixSession session, [Description("Dump handle (from pix_dump_open).")] string handle, [Description("Wave index from pix_dump_shader_waves.")] int waveIndex,
+        [Description("First lane to return (default 0).")] int lanesOffset = 0, [Description("Maximum lanes to return (default 256).")] int lanesLimit = 256, [Description("First offending location to return (default 0).")] int locationsOffset = 0, [Description("Maximum offending locations to return (default 32).")] int locationsLimit = 32,
+        [Description("Include per-lane data (default true).")] bool includeLanes = true, [Description("Include the offending source locations (default true).")] bool includeOffendingLocations = true, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_shader_wave_data", () =>
         {
             if (lanesOffset < 0 || locationsOffset < 0 || lanesLimit is < 1 or > 1000 || locationsLimit is < 1 or > 1000)
-                throw new PixToolException("invalid_arguments", "Offsets must be nonnegative and limits must be 1 through 1000.");
+                throw new PixToolException(PixErrors.Codes.InvalidArguments, "Offsets must be nonnegative and limits must be 1 through 1000.");
             return DumpTools.WaveDto(FindWave(session.Get<DumpHandle>(handle), waveIndex), handle, waveIndex, includeLanes, includeOffendingLocations,
                 lanesOffset, lanesLimit, locationsOffset, locationsLimit);
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_dump_shader_wave", ReadOnly = true), Description("Details of one in-flight shader wave from the dump's shader debugging data (pick waveIndex from pix_dump_shader_waves): the HLSL (or IL/ISA) call stack at the instruction pointer and the variables in scope with their values (per-wave view; use pix_dump_shader_eval for per-lane values or arbitrary expressions).")]
+    [McpServerTool(Name = "pix_dump_shader_wave", Title = "Dump shader wave variables", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Details of one in-flight shader wave from the dump's shader debugging data (pick waveIndex from pix_dump_shader_waves): the HLSL (or IL/ISA) call stack at the instruction pointer and the variables in scope with their values (per-wave view; use pix_dump_shader_eval for per-lane values or arbitrary expressions).")]
     public static Task<string> Wave(
         PixSession session,
         [Description("Dump handle")] string handle,
@@ -47,7 +47,7 @@ public static class DumpShaderTools
             PIX_SHADER_CODE_TYPE type = Tools.ParseEnum<PIX_SHADER_CODE_TYPE>(codeType);
             IPixShaderWave wave = FindWave(h, waveIndex);
             int max = Math.Clamp(maxVariables, 1, Paging.MaxLimit);
-            if (variablesOffset < 0) throw new PixToolException("invalid_arguments", "variablesOffset must be nonnegative.");
+            if (variablesOffset < 0) throw new PixToolException(PixErrors.Codes.InvalidArguments, "variablesOffset must be nonnegative.");
 
             object? callStack = !includeCallStack ? null : Tools.Try(() =>
                 PixApiExtensionsShaderDebugging.GetCallStackEntries(wave, type).Select(CodeLocation).ToArray(), "callStack");
@@ -87,7 +87,7 @@ public static class DumpShaderTools
             };
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_dump_shader_eval", ReadOnly = true), Description("Evaluates an HLSL expression (a variable name, member or array access, e.g. 'index', 'input.uv.x', 'buffer[3]') in the context of one hung shader wave from the dump and returns its value for every lane in laneMask, plus components for vectors/structs. Use pix_dump_shader_wave to see the variables in scope first.")]
+    [McpServerTool(Name = "pix_dump_shader_eval", Title = "Evaluate dump shader expression", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Evaluates an HLSL expression (a variable name, member or array access, e.g. 'index', 'input.uv.x', 'buffer[3]') in the context of one hung shader wave from the dump and returns its value for every lane in laneMask, plus components for vectors/structs. Use pix_dump_shader_wave to see the variables in scope first.")]
     public static Task<string> Evaluate(
         PixSession session,
         [Description("Dump handle")] string handle,
@@ -97,16 +97,16 @@ public static class DumpShaderTools
         [Description("Decimal or hexadecimal bit mask of lanes to evaluate (default all 64); a string preserves all bits in JavaScript clients.")] string laneMask = "0xffffffffffffffff",
         [Description("Component-index path returned by a previous evaluation; omit for the expression itself.")] int[]? componentPath = null,
         [Description("First component index at the selected value.")] int componentsOffset = 0,
-        [Description("Maximum components at the selected value, 1 through 1000.")] int componentsLimit = 25,
+        [Description("Maximum components at the selected value, 1 through 1000. Default: 25.")] int componentsLimit = 25,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_shader_eval", () =>
         {
             if (string.IsNullOrWhiteSpace(expression))
             {
-                throw new McpException("An expression is required.");
+                throw PixErrors.InvalidArguments("An expression is required.");
             }
             if (componentPath?.Any(i => i < 0) == true || componentsOffset < 0 || componentsLimit is < 1 or > 1000)
-                throw new PixToolException("invalid_arguments", "Component path and offset must be nonnegative, and componentsLimit 1 through 1000.");
+                throw new PixToolException(PixErrors.Codes.InvalidArguments, "Component path and offset must be nonnegative, and componentsLimit 1 through 1000.");
             DumpHandle h = session.Get<DumpHandle>(handle);
             PIX_SHADER_CODE_TYPE type = Tools.ParseEnum<PIX_SHADER_CODE_TYPE>(codeType);
             IPixShaderWave wave = FindWave(h, waveIndex);
@@ -114,12 +114,12 @@ public static class DumpShaderTools
             IPixPostmortemShaderVariableWithLaneValues? value = PixApiExtensionsShaderDebugging.TryEvaluateExpression(wave, expression, type, mask, out Exception ex);
             if (value is null)
             {
-                throw new McpException($"PIX could not evaluate '{expression}': {(ex is null ? "no result" : PixErrors.Describe(ex))}");
+                throw PixErrors.PixFailure($"PIX could not evaluate '{expression}'", ex);
             }
             foreach (int index in componentPath ?? [])
             {
                 IPixCollection? components = LaneComponents(value);
-                if (components is null || (ulong)index >= components.GetCount()) throw new PixToolException("invalid_reference", "componentPath is out of range.");
+                if (components is null || (ulong)index >= components.GetCount()) throw new PixToolException(PixErrors.Codes.InvalidReference, "componentPath is out of range.");
                 value = components.Get<IPixPostmortemShaderVariableWithLaneValues>((ulong)index);
             }
             return new { waveIndex, expression, codeType = type, laneMask = Interop.Hex(mask),
@@ -129,13 +129,14 @@ public static class DumpShaderTools
     private static IPixShaderWave FindWave(DumpHandle h, int waveIndex)
     {
         IPixShaderDebuggingData data = PixApiExtensionsPostmortemDump.TryGetShaderData(h.Document, out Exception ex)
-            ?? throw new McpException(ex is null ? "This dump has no shader debugging data." : $"Shader debugging data is unavailable: {PixErrors.Describe(ex)}");
+            ?? throw PixErrors.UnavailableShaderData(ex is null ? "This dump has no shader debugging data." : $"Shader debugging data is unavailable: {PixErrors.Describe(ex)}");
         IPixCollection waves = PixApiExtensionsShaderDebugging.TryGetWaves(data, out Exception wex)
-            ?? throw new McpException(wex is null ? "The shader debugging data lists no waves." : $"Waves are unavailable: {PixErrors.Describe(wex)}");
+            ?? throw PixErrors.UnavailableShaderData(wex is null ? "The shader debugging data lists no waves." : $"Waves are unavailable: {PixErrors.Describe(wex)}");
         ulong count = waves.GetCount();
         if (waveIndex < 0 || (ulong)waveIndex >= count)
         {
-            throw new McpException($"waveIndex {waveIndex} is out of range; the dump has {count} wave(s) (see pix_dump_shader_waves).");
+            throw PixErrors.InvalidReference($"waveIndex {waveIndex} is out of range; the dump has {count} wave(s) (see pix_dump_shader_waves).",
+                new ToolCallDto("pix_dump_shader_waves", new { handle = h.Id }, CostHints.Query));
         }
         return waves.Get<IPixShaderWave>((ulong)waveIndex);
     }
@@ -187,19 +188,19 @@ public static class DumpShaderTools
         return value as IPixCollection;
     }
 
-    [McpServerTool(Name = "pix_dump_shader_variable", ReadOnly = true), Description("Retrieves a dump shader variable and pages its components using the variablePath from pix_dump_shader_wave. Each child retains its full variablePath; follow nextCalls to retrieve omitted components.")]
-    public static Task<string> VariableDetails(PixSession session, string handle, int waveIndex, int[] variablePath,
-        string codeType = "HLSL", int offset = 0, int limit = 25, CancellationToken cancellationToken = default)
+    [McpServerTool(Name = "pix_dump_shader_variable", Title = "Dump shader variable", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Retrieves a dump shader variable and pages its components using the variablePath from pix_dump_shader_wave. Each child retains its full variablePath; follow nextCalls to retrieve omitted components.")]
+    public static Task<string> VariableDetails(PixSession session, [Description("Dump handle (from pix_dump_open).")] string handle, [Description("Wave index from pix_dump_shader_waves.")] int waveIndex, [Description("Indices selecting the variable and its nested components, as listed by pix_dump_shader_wave.")] int[] variablePath,
+        [Description("Shader code kind: HLSL (default), IL or ISA.")] string codeType = "HLSL", [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = 25, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_shader_variable", () =>
         {
             if (variablePath is not { Length: > 0 } || variablePath.Any(i => i < 0) || offset < 0 || limit is < 1 or > 1000)
-                throw new PixToolException("invalid_arguments", "variablePath must be nonempty and nonnegative; offset must be nonnegative and limit 1 through 1000.");
+                throw new PixToolException(PixErrors.Codes.InvalidArguments, "variablePath must be nonempty and nonnegative; offset must be nonnegative and limit 1 through 1000.");
             IPixShaderWave wave = FindWave(session.Get<DumpHandle>(handle), waveIndex);
             IPixCollection? values = PixApiExtensionsShaderDebugging.TryGetVariables(wave, Tools.ParseEnum<PIX_SHADER_CODE_TYPE>(codeType), out _);
             IPixPostmortemShaderVariable? variable = null;
             for (int depth = 0; depth < variablePath.Length; depth++)
             {
-                if (values is null || (ulong)variablePath[depth] >= values.GetCount()) throw new PixToolException("invalid_reference", "variablePath is out of range.");
+                if (values is null || (ulong)variablePath[depth] >= values.GetCount()) throw new PixToolException(PixErrors.Codes.InvalidReference, "variablePath is out of range.");
                 variable = values.Get<IPixPostmortemShaderVariable>((ulong)variablePath[depth]);
                 if (depth + 1 < variablePath.Length) values = VariableComponents(variable);
             }

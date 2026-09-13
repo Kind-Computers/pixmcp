@@ -22,6 +22,8 @@ jobs:
           python-version: "3.12"
       - name: Unit-test the stdio MCP client used by the smoke scenarios
         run: python -m unittest discover -s scripts -p "test_*.py" -v
+      - name: Check PIX version strings against Directory.Build.props
+        run: python scripts/check_versions.py
       - name: Validate scenario files
         run: python -c "import glob, json; [json.load(open(p, encoding='utf-8')) for p in glob.glob('scripts/scenarios/*.json')]; print('scenarios ok')"
 

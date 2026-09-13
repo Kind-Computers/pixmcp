@@ -40,6 +40,7 @@ public sealed class QueueEntry
         type = Type,
         adapterId = AdapterId,
         adapterName = AdapterName,
+        vendor = GpuVendors.Name(GpuVendors.FromAdapterName(AdapterName)),
         eventCount = EventCount,
     };
 }
@@ -49,19 +50,23 @@ public sealed record EventTimingRow(int QueueIndex, uint Index, uint GpuId, stri
 public sealed record CounterInfo(uint Id, string Name, string Description, string DataType, string[] Groups)
 {
     public PIX_FORMAT_SPECIFIER_TYPE FormatSpecifier { get; init; }
+    /// <summary>Inferred unit (PIX exposes none); see <see cref="CounterUnits"/>.</summary>
+    public UnitGuess Unit => _unit ??= CounterUnits.Infer(Name, Description, DataType);
+    private UnitGuess? _unit;
 }
 
 public sealed record ExperimentInfo(Guid Guid, string Name, string Category, string HelpText, PIX_EXPERIMENT_SOURCE Source);
 
 internal readonly record struct AnalysisOptions(ulong? Adapter = null, uint? PowerState = null, PIX_ANALYSIS_FLAGS? Flags = null)
 {
-    internal void ValidateRunningRequest(AnalysisOptions requested)
+    /// <summary>A request may leave settings unspecified or repeat the running ones; anything else is analysis_settings_conflict.</summary>
+    internal void ValidateRunningRequest(AnalysisOptions requested, string? handle = null)
     {
         if (requested.Adapter.HasValue && requested.Adapter != Adapter ||
             requested.PowerState.HasValue && requested.PowerState != PowerState ||
             requested.Flags.HasValue && requested.Flags != Flags)
         {
-            throw new McpException("Analysis is already running with different or SDK-selected settings. Call pix_gpu_analysis_stop before requesting different settings.");
+            throw PixErrors.AnalysisSettingsConflict(handle);
         }
     }
 }
@@ -89,11 +94,19 @@ public sealed partial class GpuCaptureHandle : PixHandle
     public uint? SelectedPowerState { get; set; }
     public PIX_ANALYSIS_FLAGS? SelectedFlags { get; set; }
     public DateTimeOffset? AnalysisStartedAt { get; private set; }
+    /// <summary>
+    /// Settings of the analysis-start job that is queued or running (set under <see cref="PixHandle.PreparationGate"/>).
+    /// A later start request with different settings is rejected at join time instead of failing minutes later on the worker.
+    /// </summary>
+    internal AnalysisOptions? PendingAnalysisOptions { get; set; }
 
     // Caches of expensive results
     public IPixGpuCaptureTiming? Timing { get; set; }
     public Dictionary<int, EventTimingRow[]> TimingRowsByQueue { get; internal set; } = new();
-    public Dictionary<int, TimingTreeNode[]> TimingTreeByQueue { get; } = new();
+    /// <summary>How each queue's timing rows were read (bulk or per event), published with the rows and cleared with them.</summary>
+    public Dictionary<int, ReadbackCoverage> TimingReadbackByQueue { get; } = new();
+    public Dictionary<int, TimingTreeResult> TimingTreeByQueue { get; } = new();
+    private readonly Dictionary<int, int[]> _childCounts = new();
     public IPixGpuCaptureCounters? Counters { get; set; }
     public List<CounterInfo>? CounterList { get; set; }
     public Dictionary<string, IPixGpuCaptureCounterData> CollectedCounters { get; } = new();
@@ -129,7 +142,8 @@ public sealed partial class GpuCaptureHandle : PixHandle
     {
         if (queueIndex < 0 || queueIndex >= Queues.Count)
         {
-            throw new McpException($"queueIndex {queueIndex} is out of range; the capture has {Queues.Count} queue(s) (0..{Queues.Count - 1}).");
+            throw PixErrors.InvalidReference($"queueIndex {queueIndex} is out of range; the capture has {Queues.Count} queue(s) (0..{Queues.Count - 1}).",
+                new ToolCallDto("pix_gpu_queues", new { handle = Id }, CostHints.Cached));
         }
         return Queues[queueIndex];
     }
@@ -140,7 +154,8 @@ public sealed partial class GpuCaptureHandle : PixHandle
         QueueEntry queue = Queue(queueIndex);
         if (eventIndex >= queue.EventCount)
         {
-            throw new McpException($"eventIndex {eventIndex} is out of range; queue {queueIndex} has {queue.EventCount} event(s).");
+            throw PixErrors.InvalidReference($"eventIndex {eventIndex} is out of range; queue {queueIndex} has {queue.EventCount} event(s).",
+                new ToolCallDto("pix_gpu_events", new { handle = Id, queueIndex }, CostHints.Query));
         }
         return PixApiExtensionsGpuCapture.GetEvent(queue.Info, eventIndex);
     }
@@ -154,6 +169,9 @@ public sealed partial class GpuCaptureHandle : PixHandle
         }
         return EventRecord.From(eventIndex, EventInfo(queueIndex, eventIndex));
     }
+
+    /// <summary>The cached events of a queue, or null when they have not been materialised yet. Safe off the worker.</summary>
+    public EventRecord[]? CachedEvents(int queueIndex) => Queue(queueIndex).Cache;
 
     /// <summary>Materializes every event of a queue once (needed for filtering/sorting); cached afterwards.</summary>
     public EventRecord[] AllEvents(int queueIndex)
@@ -187,18 +205,34 @@ public sealed partial class GpuCaptureHandle : PixHandle
         return null;
     }
 
-    /// <summary>Per-event inclusive GPU time for a queue (needs timing rows); cached until analysis stops.</summary>
-    public TimingTreeNode[] TimingTreeNodes(int queueIndex)
+    /// <summary>Direct child counts per event of a queue; event metadata is immutable so this lives until close.</summary>
+    public int[] ChildCounts(int queueIndex)
     {
         QueueEntry queue = Queue(queueIndex);
-        if (!TimingTreeByQueue.TryGetValue(queue.Index, out TimingTreeNode[]? nodes))
+        if (!_childCounts.TryGetValue(queue.Index, out int[]? counts))
+        {
+            counts = EventNavigation.ChildCounts(AllEvents(queue.Index));
+            _childCounts[queue.Index] = counts;
+        }
+        return counts;
+    }
+
+    /// <summary>Per-event inclusive GPU time and queue totals (needs timing rows); cached until analysis stops.</summary>
+    public TimingTreeResult TimingTreeFor(int queueIndex)
+    {
+        QueueEntry queue = Queue(queueIndex);
+        if (!TimingTreeByQueue.TryGetValue(queue.Index, out TimingTreeResult? tree))
         {
             EventTimingRow[] rows = TimingRowsByQueue.TryGetValue(queue.Index, out EventTimingRow[]? collected) ? collected : Array.Empty<EventTimingRow>();
-            nodes = TimingTree.Build(AllEvents(queue.Index), rows);
-            TimingTreeByQueue[queue.Index] = nodes;
+            tree = TimingTree.Build(AllEvents(queue.Index), rows, queue.Index);
+            TimingTreeByQueue[queue.Index] = tree;
         }
-        return nodes;
+        return tree;
     }
+
+    public TimingTreeNode[] TimingTreeNodes(int queueIndex) => TimingTreeFor(queueIndex).Nodes;
+
+    public QueueTotals QueueTotals(int queueIndex) => TimingTreeFor(queueIndex).Totals;
 
     public IPixGpuCaptureAnalysis GetAnalysis() => Analysis ??= Document.GetAnalysis();
 
@@ -206,7 +240,7 @@ public sealed partial class GpuCaptureHandle : PixHandle
     {
         if (AnalysisStarted)
         {
-            new AnalysisOptions(SelectedAdapter, SelectedPowerState, SelectedFlags).ValidateRunningRequest(requested);
+            new AnalysisOptions(SelectedAdapter, SelectedPowerState, SelectedFlags).ValidateRunningRequest(requested, Id);
             return true;
         }
         SelectedAdapter = requested.Adapter ?? SelectedAdapter;
@@ -329,6 +363,7 @@ public sealed partial class GpuCaptureHandle : PixHandle
         Adapters = null;
         Timing = null;
         TimingRowsByQueue.Clear();
+        TimingReadbackByQueue.Clear();
         TimingTreeByQueue.Clear();
         Counters = null;
         CounterList = null;
@@ -346,15 +381,20 @@ public sealed partial class GpuCaptureHandle : PixHandle
         Analysis = null;
         // Finished preparation jobs describe state that no longer exists; a running one is on this
         // same thread's queue and will re-check readiness itself.
-        foreach (KeyValuePair<string, Job> entry in PreparationJobs)
+        lock (PreparationGate)
         {
-            if (entry.Value.IsFinished) PreparationJobs.TryRemove(entry.Key, out _);
+            foreach (KeyValuePair<string, Job> entry in PreparationJobs)
+            {
+                if (entry.Value.IsFinished) PreparationJobs.TryRemove(entry.Key, out _);
+            }
+            PendingAnalysisOptions = null;
         }
     }
 
     /// <summary>Preparation shared by every tool that needs GPU analysis (replay) to have started.</summary>
     internal static Preparation<GpuCaptureHandle> AnalysisPreparation(string handle)
-        => new("analysis", "analysis", $"Start GPU analysis for {handle}", h => h.AnalysisStarted, (h, job) => h.EnsureAnalysisStarted(job));
+        => new("analysis", "analysis", $"Start GPU analysis for {handle}", h => h.AnalysisStarted, (h, job) => h.EnsureAnalysisStarted(job))
+        { JoinKeys = PreparationKeys.StartingAnalysis, Result = h => h.AnalysisStatus() };
 
     public object AnalysisStatus() => new
     {
@@ -368,6 +408,8 @@ public sealed partial class GpuCaptureHandle : PixHandle
         flags = SelectedFlags,
         timingCollected = Timing is not null,
         countersCollected = CollectedCounters.Keys.ToArray(),
+        replayVendor = ReplayVendor(),
+        captureVendor = CachedCaptureVendor,
     };
 
     public override object Summary() => new
@@ -388,6 +430,7 @@ public sealed partial class GpuCaptureHandle : PixHandle
         {
             queue.Cache = null;
         }
+        _childCounts.Clear();
         Document = null!;
     }
 }

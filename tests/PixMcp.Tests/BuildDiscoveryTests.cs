@@ -10,10 +10,10 @@ public class BuildDiscoveryTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task SelectsNewestUsableVersionRegardlessOfDirectoryOrder(bool reverseOrder)
+    public async Task SelectsTheOnlyEligibleInstallRegardlessOfDirectoryOrder(bool reverseOrder)
     {
         using var fixture = new DiscoveryFixture();
-        string[] versions = ["2607.9-preview", "2607.18-preview", "2607.18.2-main", "2607.18.10-preview"];
+        string[] versions = ["2606.14-preview", "2606.15.999-main", "2606.17-preview"];
         foreach (string version in reverseOrder ? versions.Reverse() : versions)
         {
             fixture.AddPreview(version);
@@ -24,7 +24,59 @@ public class BuildDiscoveryTests
 
         BuildResult result = await fixture.Run();
 
-        AssertSelection(result, Path.Combine(fixture.PreviewRoot, "2607.18.10-preview"));
+        AssertSelection(result, Path.Combine(fixture.PreviewRoot, "2606.17-preview"));
+        Assert.Equal("2606.17-preview", result.Property("PixInstallVersion"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SeveralEligibleInstallsFailUnlessTheNewestIsRequested(bool pickNewest)
+    {
+        using var fixture = new DiscoveryFixture();
+        string older = fixture.AddPreview("2606.16-preview");
+        string newer = fixture.AddPreview("2606.17-preview");
+
+        BuildResult result = await fixture.Run(extraArguments: pickNewest ? ["-p:PixMcpPickNewestPix=true"] : []);
+
+        if (pickNewest)
+        {
+            AssertSelection(result, newer);
+        }
+        else
+        {
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Contains("Multiple PIX Preview installations are eligible", result.Output);
+            Assert.Contains(older, result.Output);
+            Assert.Contains(newer, result.Output);
+            Assert.Contains("PixMcpPickNewestPix", result.Output);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InstallNewerThanTheVerifiedVersionFailsUnlessAllowed(bool allowed)
+    {
+        using var fixture = new DiscoveryFixture();
+        // version.xml wins over the directory name, so a modestly named directory with a future build still trips the gate.
+        string install = fixture.AddPreview("2606.17-preview", xmlVersion: "2699.01-preview", build: "WinPIX_release_2699.01001");
+
+        BuildResult result = await fixture.Run(extraArguments: allowed ? ["-p:PixMcpAllowUnverifiedPix=true"] : []);
+
+        if (allowed)
+        {
+            AssertSelection(result, install);
+            Assert.Equal("2699.01-preview", result.Property("PixInstallVersion"));
+            Assert.Equal("WinPIX_release_2699.01001", result.Property("PixInstallBuild"));
+        }
+        else
+        {
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Contains("PIX 2699.01-preview", result.Output);
+            Assert.Contains("newer than the verified", result.Output);
+            Assert.Contains("PixMcpAllowUnverifiedPix", result.Output);
+        }
     }
 
     [Theory]
@@ -55,7 +107,8 @@ public class BuildDiscoveryTests
     public async Task ExplicitOverridesTakePrecedenceOverDiscovery(bool usePropertyOverride)
     {
         using var fixture = new DiscoveryFixture();
-        fixture.AddPreview("9999.99-preview");
+        fixture.AddPreview("2606.16-preview");
+        fixture.AddPreview("2606.17-preview");
         string environmentInstall = fixture.AddOverride("environment-install");
         string? propertyInstall = usePropertyOverride ? fixture.AddOverride("property-install") : null;
 
@@ -70,7 +123,7 @@ public class BuildDiscoveryTests
     public async Task InvalidExplicitOverridesDoNotFallBackToAnotherInstallation(bool usePropertyOverride)
     {
         using var fixture = new DiscoveryFixture();
-        fixture.AddPreview("2607.18-preview");
+        fixture.AddPreview("2606.17-preview");
         string invalidInstall = fixture.AddOverride("missing-marker", hasMarker: false);
         string environmentInstall = usePropertyOverride ? fixture.AddOverride("environment-install") : invalidInstall;
 
@@ -93,11 +146,20 @@ public class BuildDiscoveryTests
         JsonElement reference = Assert.Single(document.RootElement.GetProperty("Items").GetProperty("Reference").EnumerateArray());
         Assert.Equal(expectedDll, reference.GetProperty("HintPath").GetString());
         Assert.Equal("false", reference.GetProperty("Private").GetString());
+        string[] metadata = document.RootElement.GetProperty("Items").GetProperty("AssemblyMetadata").EnumerateArray()
+            .Select(item => item.GetProperty("Identity").GetString()!).OrderBy(name => name, StringComparer.Ordinal).ToArray();
+        Assert.Equal(new[] { "PixBuiltAgainstBuild", "PixBuiltAgainstCommit", "PixBuiltAgainstFileVersion", "PixBuiltAgainstXmlVersion", "PixPreviewMinDate", "PixVerifiedVersion" }, metadata);
     }
 
     private sealed record BuildResult(int ExitCode, string Stdout, string Stderr)
     {
         public string Output => Stdout + Stderr;
+
+        public string? Property(string name)
+        {
+            using JsonDocument document = JsonDocument.Parse(Stdout);
+            return document.RootElement.GetProperty("Properties").GetProperty(name).GetString();
+        }
     }
 
     private sealed class DiscoveryFixture : IDisposable
@@ -137,8 +199,16 @@ public class BuildDiscoveryTests
 
         public string PreviewRoot { get; }
 
-        public string AddPreview(string version, bool hasMarker = true)
-            => AddInstallation(Path.Combine(PreviewRoot, version), hasMarker);
+        public string AddPreview(string version, bool hasMarker = true, string? xmlVersion = null, string? build = null)
+        {
+            string directory = AddInstallation(Path.Combine(PreviewRoot, version), hasMarker);
+            if (xmlVersion is not null)
+            {
+                File.WriteAllText(Path.Combine(directory, "version.xml"),
+                    $"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<PixVersion>\n  <Version>{xmlVersion}</Version>\n  <FriendlyVersion>{xmlVersion}</FriendlyVersion>\n  <Build>{build}</Build>\n  <Commit>0123456789abcdef</Commit>\n</PixVersion>\n");
+            }
+            return directory;
+        }
 
         public string AddOverride(string name, bool hasMarker = true)
             => AddInstallation(Path.Combine(_directory.FullName, name), hasMarker);
@@ -150,7 +220,7 @@ public class BuildDiscoveryTests
             return directory;
         }
 
-        public async Task<BuildResult> Run(string? environmentInstall = null, string? propertyInstall = null)
+        public async Task<BuildResult> Run(string? environmentInstall = null, string? propertyInstall = null, string[]? extraArguments = null)
         {
             var start = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
             {
@@ -160,7 +230,7 @@ public class BuildDiscoveryTests
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
-            foreach (string name in new[] { "PIX_DIR", "PixInstallDir", "PixApiBinDir", "_PixDiscoveredInstallDir" })
+            foreach (string name in new[] { "PIX_DIR", "PixInstallDir", "PixApiBinDir", "_PixDiscoveredInstallDir", "PixMcpPickNewestPix", "PixMcpAllowUnverifiedPix" })
             {
                 start.Environment.Remove(name);
             }
@@ -169,12 +239,13 @@ public class BuildDiscoveryTests
             {
                 "msbuild", _projectPath, "-nologo", "-t:PrepareForBuild", "-nodeReuse:false",
                 "-p:_PixProgramFiles=" + _programFiles,
-                "-getProperty:PixInstallDir,PixApiBinDir,PreparedHintPath", "-getItem:Reference",
+                "-getProperty:PixInstallDir,PixApiBinDir,PreparedHintPath,PixInstallVersion,PixInstallBuild,PixInstallXmlVersion", "-getItem:Reference,AssemblyMetadata",
             })
             {
                 start.ArgumentList.Add(argument);
             }
             if (propertyInstall is not null) start.ArgumentList.Add("-p:PixInstallDir=" + propertyInstall);
+            foreach (string argument in extraArguments ?? []) start.ArgumentList.Add(argument);
 
             using Process process = Process.Start(start)!;
             Task<string> stdout = process.StandardOutput.ReadToEndAsync();

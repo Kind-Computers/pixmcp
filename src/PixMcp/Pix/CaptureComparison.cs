@@ -94,8 +94,9 @@ public static class CaptureComparison
                 Diff(section, "", a.Sections[section], b.Sections[section], fields);
             if ((delta.HasValue && delta.Value != 0) || a.EopNs != b.EopNs || fields.Count > 0)
                 changes.Add(new(a.EventRef, b.EventRef, a.Name, a.MarkerPath, method, a.EopNs, b.EopNs,
-                    delta, a.EopNs is > 0 && delta.HasValue ? (double)(100 * delta.Value / a.EopNs.Value) : null,
-                    a.Derived, b.Derived, fields));
+                    delta, delta.HasValue ? Math.Round((double)delta.Value / 1e6, 3) : null,
+                    a.EopNs is > 0 && delta.HasValue ? (double)(100 * delta.Value / a.EopNs.Value) : null,
+                    a.Semantics, b.Semantics, fields));
         }
         return new(baseline.Handle, candidate.Handle, paired.Count,
             changes.OrderByDescending(c => Math.Abs(c.DeltaNs ?? 0)).ThenBy(c => c.Baseline.QueueIndex).ThenBy(c => c.Baseline.EventIndex).ToArray(),

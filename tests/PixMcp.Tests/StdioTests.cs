@@ -66,6 +66,30 @@ public class StdioTests
     }
 
     [SkippableFact]
+    public async Task MalformedResultBudgetFailsBeforeWritingProtocolOutput()
+    {
+        Skip.If(PixDiscovery.InstallDir is null, "PIX Preview install required for server startup.");
+        ProcessStartInfo start = ServerStart();
+        start.Environment["PIXMCP_RESULT_MEMORY_BYTES"] = "lots";
+        using var server = Process.Start(start)!;
+        Task<string> stdout = server.StandardOutput.ReadToEndAsync();
+        Task<string> stderr = server.StandardError.ReadToEndAsync();
+        try
+        {
+            await server.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+            Assert.Equal(1, server.ExitCode);
+            Assert.Empty(await stdout);
+            string error = await stderr;
+            Assert.Contains("pixmcp: PIXMCP_RESULT_MEMORY_BYTES", error);
+            Assert.Contains("lots", error);
+        }
+        finally
+        {
+            if (!server.HasExited) { server.Kill(entireProcessTree: true); await server.WaitForExitAsync(); }
+        }
+    }
+
+    [SkippableFact]
     public async Task ListsToolsAndResourcesHandlesErrorsAndShutsDownCleanly()
     {
         Skip.If(PixDiscovery.InstallDir is null, "The server only starts with a PIX Preview install; discovery found none.");
@@ -78,43 +102,76 @@ public class StdioTests
         Assert.Equal("pixmcp", initialized.GetProperty("result").GetProperty("serverInfo").GetProperty("name").GetString());
         await server.Notify("notifications/initialized");
 
-        JsonElement tools = (await server.Send("tools/list")).GetProperty("result").GetProperty("tools");
+        JsonElement listed = (await server.Send("tools/list")).GetProperty("result");
+        JsonElement tools = listed.GetProperty("tools");
         string?[] names = tools.EnumerateArray().Select(tool => tool.GetProperty("name").GetString()).ToArray();
+        Assert.Equal(3600000, listed.GetProperty("ttlMs").GetInt64());
+        Assert.Equal("private", listed.GetProperty("cacheScope").GetString());
+        Assert.Equal(names.OrderBy(n => n, StringComparer.Ordinal), names);
+        Assert.Equal(listed.GetRawText(), (await server.Send("tools/list")).GetProperty("result").GetRawText());
         Assert.Contains("pix_info", names);
         Assert.Contains("pix_gpu_open", names);
         Assert.Contains("pix_job_status", names);
         JsonElement resultReadInputs = tools.EnumerateArray().Single(tool => tool.GetProperty("name").GetString() == "pix_result_read")
             .GetProperty("inputSchema").GetProperty("properties");
-        Assert.Equal(new[] { "limit", "offset", "pointer", "resultRef" }, resultReadInputs.EnumerateObject().Select(p => p.Name).OrderBy(name => name));
+        Assert.Equal(new[] { "fields", "limit", "mode", "offset", "pointer", "resultRef", "where" }, resultReadInputs.EnumerateObject().Select(p => p.Name).OrderBy(name => name));
+        Assert.Equal(new[] { "values", "outline" }, resultReadInputs.GetProperty("mode").GetProperty("enum").EnumerateArray().Select(v => v.GetString()));
         foreach (JsonElement tool in tools.EnumerateArray())
             Assert.Equal("object", tool.GetProperty("outputSchema").GetProperty("type").GetString());
+        JsonElement inspectInputs = tools.EnumerateArray().Single(tool => tool.GetProperty("name").GetString() == "pix_gpu_inspect_event")
+            .GetProperty("inputSchema").GetProperty("properties");
+        Assert.Equal(42, inspectInputs.GetProperty("eventRef").GetProperty("examples")[0].GetProperty("eventIndex").GetInt32());
+        JsonElement timingInputs = tools.EnumerateArray().Single(tool => tool.GetProperty("name").GetString() == "pix_gpu_timing_events")
+            .GetProperty("inputSchema").GetProperty("properties");
+        Assert.Equal(new[] { "objects", "table" }, timingInputs.GetProperty("format").GetProperty("enum").EnumerateArray().Select(v => v.GetString()));
+        Assert.Equal("Frame/Shadow", timingInputs.GetProperty("markerPathPrefix").GetProperty("examples")[0].GetString());
+        Assert.Equal(4096, timingInputs.GetProperty("maxStringLength").GetProperty("maximum").GetDouble());
         JsonElement eventSchema = tools.EnumerateArray().Single(tool => tool.GetProperty("name").GetString() == "pix_gpu_events")
             .GetProperty("outputSchema").GetProperty("anyOf")[0].GetProperty("properties");
         Assert.True(eventSchema.TryGetProperty("nextOffset", out _));
         Assert.True(eventSchema.GetProperty("items").GetProperty("items").GetProperty("properties").TryGetProperty("queueIndex", out _));
 
-        JsonElement resources = (await server.Send("resources/list")).GetProperty("result").GetProperty("resources");
+        JsonElement resourceList = (await server.Send("resources/list")).GetProperty("result");
+        Assert.Equal("private", resourceList.GetProperty("cacheScope").GetString());
+        JsonElement resources = resourceList.GetProperty("resources");
         Assert.Contains(resources.EnumerateArray(), resource => resource.GetProperty("uri").GetString() == "pix://handles");
         JsonElement templates = (await server.Send("resources/templates/list")).GetProperty("result").GetProperty("resourceTemplates");
         Assert.Contains(templates.EnumerateArray(), template => template.GetProperty("uriTemplate").GetString() == "pix://handles/{handle}");
         JsonElement handles = (await server.Send("resources/read", new { uri = "pix://handles" })).GetProperty("result").GetProperty("contents");
-        Assert.Equal("[]", Assert.Single(handles.EnumerateArray()).GetProperty("text").GetString());
+        Assert.Equal("{\"total\":0,\"offset\":0,\"count\":0,\"items\":[]}", Assert.Single(handles.EnumerateArray()).GetProperty("text").GetString());
+        JsonElement missingHandle = (await server.Send("resources/read", new { uri = "pix://handles/nope" })).GetProperty("result").GetProperty("contents");
+        using (var body = JsonDocument.Parse(Assert.Single(missingHandle.EnumerateArray()).GetProperty("text").GetString()!))
+            Assert.Equal("unknown_handle", body.RootElement.GetProperty("code").GetString());
+        foreach (JsonElement tool in tools.EnumerateArray())
+        {
+            string name = tool.GetProperty("name").GetString()!;
+            JsonElement annotations = tool.GetProperty("annotations");
+            Assert.False(string.IsNullOrWhiteSpace(annotations.GetProperty("title").GetString()), name + " has no title");
+            Assert.Equal(name == "pix_device_connect", annotations.GetProperty("openWorldHint").GetBoolean());
+            if (name is "pix_gpu_compare" or "pix_gpu_preview" or "pix_gpu_screenshot") Assert.False(annotations.GetProperty("readOnlyHint").GetBoolean(), name);
+            foreach (JsonProperty property in tool.GetProperty("inputSchema").GetProperty("properties").EnumerateObject())
+                Assert.True(property.Value.TryGetProperty("description", out _), $"{name}.{property.Name} has no description");
+        }
 
         JsonElement info = await server.Send("tools/call", new { name = "pix_info", arguments = new { } });
         Assert.False(info.GetProperty("result").TryGetProperty("isError", out JsonElement isError) && isError.GetBoolean());
         using var infoText = JsonDocument.Parse(info.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!);
         Assert.Equal(PixDiscovery.InstallDir, infoText.RootElement.GetProperty("pix").GetProperty("installDir").GetString());
+        Assert.Equal("default", infoText.RootElement.GetProperty("options").GetProperty("inlineResultBytes").GetProperty("source").GetString());
         Assert.True(JsonElement.DeepEquals(infoText.RootElement, info.GetProperty("result").GetProperty("structuredContent")), info.GetRawText());
         OutputSchemaTests.AssertMatches(infoText.RootElement, tools.EnumerateArray().Single(t => t.GetProperty("name").GetString() == "pix_info").GetProperty("outputSchema"));
 
         JsonElement jobs = (await server.Send("tools/call", new { name = "pix_jobs", arguments = new { } })).GetProperty("result");
-        Assert.Equal("{\"items\":[]}", jobs.GetProperty("content")[0].GetProperty("text").GetString());
+        Assert.Equal("{\"total\":0,\"offset\":0,\"count\":0,\"items\":[]}", jobs.GetProperty("content")[0].GetProperty("text").GetString());
         Assert.Empty(jobs.GetProperty("structuredContent").GetProperty("items").EnumerateArray());
+        JsonElement closeAll = (await server.Send("tools/call", new { name = "pix_close_all", arguments = new { } })).GetProperty("result");
+        Assert.Equal(0, closeAll.GetProperty("structuredContent").GetProperty("total").GetInt32());
 
         JsonElement unknown = await server.Send("tools/call", new { name = "pix_job_status", arguments = new { jobId = "missing-job" } });
         Assert.True(unknown.GetProperty("result").GetProperty("isError").GetBoolean());
         Assert.Contains("Unknown job", unknown.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString());
-        Assert.Equal("pix_error", unknown.GetProperty("result").GetProperty("structuredContent").GetProperty("code").GetString());
+        Assert.Equal("unknown_job", unknown.GetProperty("result").GetProperty("structuredContent").GetProperty("code").GetString());
+        Assert.Equal("pix_jobs", unknown.GetProperty("result").GetProperty("structuredContent").GetProperty("nextCalls")[0].GetProperty("tool").GetString());
         JsonElement invalidBounds = (await server.Send("tools/call", new { name = "pix_gpu_events", arguments = new { handle = "missing", limit = -1 } })).GetProperty("result");
         Assert.True(invalidBounds.GetProperty("isError").GetBoolean());
         Assert.Equal("invalid_arguments", invalidBounds.GetProperty("structuredContent").GetProperty("code").GetString());
@@ -123,6 +180,61 @@ public class StdioTests
                     (invalid.GetProperty("result").TryGetProperty("isError", out isError) && isError.GetBoolean()));
 
         Assert.Equal(0, await server.Close());
+    }
+
+    [SkippableTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OlderPixThanTheBuildExitsWithCodeTwoUnlessStrictModeIsOff(bool strictOff)
+    {
+        Skip.If(PixDiscovery.InstallDir is null, "PIX Preview install required for server startup.");
+        using DirectoryCleanup directory = new();
+        // A stand-in install: the real managed assemblies (they load without native PIX) plus a version.xml older than the build.
+        foreach (string dll in Directory.GetFiles(PixDiscovery.InstallDir!, "PixApiCsExt*.dll"))
+            File.Copy(dll, Path.Combine(directory.Path, Path.GetFileName(dll)));
+        File.WriteAllText(Path.Combine(directory.Path, "version.xml"),
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?><PixVersion><Version>2606.17-preview</Version><Build>WinPIX_release_2606.17001</Build><Commit>abc</Commit></PixVersion>");
+        ProcessStartInfo start = ServerStart();
+        start.Environment["PIX_DIR"] = directory.Path;
+        if (strictOff)
+        {
+            start.Environment["PIXMCP_PIX_STRICT"] = "0";
+            await using var server = new StdioClient(start);
+            await server.Send("initialize", new { protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "strict-test", version = "1" } });
+            await server.Notify("notifications/initialized");
+            JsonElement info = (await server.Send("tools/call", new { name = "pix_info", arguments = new { } })).GetProperty("result").GetProperty("structuredContent").GetProperty("pix");
+            Assert.Equal("olderThanBuild", info.GetProperty("compatibility").GetProperty("state").GetString());
+            Assert.Equal("off", info.GetProperty("compatibility").GetProperty("strictMode").GetString());
+            Assert.False(info.GetProperty("compatibility").GetProperty("exit").GetBoolean());
+            Assert.Equal("2606.17-preview", info.GetProperty("installVersion").GetProperty("xmlVersion").GetString());
+            Assert.Equal("WinPIX_release_2606.17001", info.GetProperty("installVersion").GetProperty("build").GetString());
+            Assert.Equal(directory.Path, info.GetProperty("installDir").GetString());
+            Assert.Equal(0, await server.Close());
+            return;
+        }
+        using var process = Process.Start(start)!;
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+            Assert.Equal(2, process.ExitCode);
+            Assert.Empty(await stdout);
+            string error = await stderr;
+            Assert.Contains("pixmcp:", error);
+            Assert.Contains("2606.17-preview", error);
+            Assert.Contains("older than the PIX build", error);
+            Assert.Contains("PIXMCP_PIX_STRICT=0", error);
+            Assert.DoesNotContain("Unhandled exception", error);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
     }
 
     private static ProcessStartInfo ServerStart()

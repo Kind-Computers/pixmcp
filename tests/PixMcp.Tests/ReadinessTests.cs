@@ -88,7 +88,7 @@ public sealed class ReadinessTests
     public async Task UnknownHandleFailsBeforeAnyJobStarts()
     {
         using var fixture = new Fixture();
-        McpException error = await Assert.ThrowsAsync<McpException>(() => ToolHelpers.RunWhenReady(fixture.Session, fixture.Jobs, "pix_test", "fake-9", Preparation("fake-9"),
+        McpException error = await Assert.ThrowsAsync<PixToolException>(() => ToolHelpers.RunWhenReady(fixture.Session, fixture.Jobs, "pix_test", "fake-9", Preparation("fake-9"),
             h => new { }, 5, CancellationToken.None));
         Assert.Contains("Unknown handle", error.Message);
         Assert.Empty(fixture.Jobs.All);
@@ -124,7 +124,7 @@ public sealed class ReadinessTests
         Job trigger = fixture.Jobs.Start("test", "trigger prune", _ => 0);
         Assert.Contains(running, fixture.Jobs.All);
         Assert.Equal(JobManager.MaxFinishedJobs + 2, fixture.Jobs.All.Count);
-        Assert.Throws<McpException>(() => fixture.Jobs.Get("job-1"));
+        Assert.Equal(PixErrors.Codes.UnknownJob, Assert.Throws<PixToolException>(() => fixture.Jobs.Get("job-1")).Detail.Code);
         Assert.Same(running, fixture.Jobs.Running);
         gate.Release.Set();
         await trigger.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
@@ -180,6 +180,53 @@ public sealed class ReadinessTests
         Assert.True(ToolHelpers.MatchesKind(marker, "marker"));
         Assert.False(ToolHelpers.MatchesKind(marker with { Name = "DrawIndexedInstanced", ApiCallData = "DrawIndexedInstanced(3, 1, 0, 0, 0)" }, "marker"));
         Assert.True(ToolHelpers.MatchesKind(marker with { Name = "PIXBeginEvent", ApiCallData = "some legacy marker text" }, "marker"));
+    }
+
+    [Theory]
+    [InlineData("ExecuteIndirect", "", true)]
+    [InlineData("ExecuteIndirect", "ExecuteIndirect(sig, 4, args, 0, null, 0)", true)]
+    [InlineData("DrawInstanced", "DrawInstanced(3, 1, 0, 0)", true)]
+    [InlineData("DispatchMesh", "DispatchMesh(1, 1, 1)", true)]
+    [InlineData("CopyResource", "CopyResource(a, b)", false)]
+    [InlineData("Frame", "", false)]
+    public void WorkCoversDrawsDispatchesAndExecuteIndirect(string name, string api, bool expected)
+    {
+        var record = new EventRecord(0, 1, uint.MaxValue, name, api, 0, 0);
+        Assert.Equal(expected, ToolHelpers.MatchesKind(record, "work"));
+    }
+
+    [Fact]
+    public void ApiShapedNamesAreNeverMarkersAndLeafLabelsBecomeLabels()
+    {
+        var indirect = new EventRecord(0, 1, uint.MaxValue, "ExecuteIndirect", string.Empty, 0, 0);
+        Assert.False(ToolHelpers.MatchesKind(indirect, "marker"));
+        Assert.Equal("executeIndirect", ToolHelpers.Classify(indirect));
+        var shaped = new EventRecord(0, 1, uint.MaxValue, "Foo(1,2)", string.Empty, 0, 0);
+        Assert.False(ToolHelpers.MatchesKind(shaped, "marker"));
+        Assert.Equal("other", ToolHelpers.Classify(shaped));
+        var label = new EventRecord(0, 7, uint.MaxValue, "Hello PixMcp!!!", string.Empty, 0, 0);
+        Assert.Equal("marker", ToolHelpers.Classify(label)); // no child information: stays a marker
+        Assert.Equal("marker", ToolHelpers.Classify(label, hasChildren: true));
+        Assert.Equal("label", ToolHelpers.Classify(label, hasChildren: false));
+        Assert.True(ToolHelpers.MatchesKind(label, "label", hasChildren: false));
+        Assert.False(ToolHelpers.MatchesKind(label, "marker", hasChildren: false));
+        Assert.False(ToolHelpers.MatchesKind(label, "label"));
+        var begin = new EventRecord(0, uint.MaxValue, uint.MaxValue, "Frame", string.Empty, 0, 0);
+        Assert.Equal("marker", ToolHelpers.Classify(begin, hasChildren: false)); // no GPU id: a marker even without children
+        Assert.Equal("clear", ToolHelpers.Classify(new EventRecord(0, 2, uint.MaxValue, "ClearRenderTargetView", "ClearRenderTargetView(rtv)", 0, 0)));
+        Assert.Equal("resolve", ToolHelpers.Classify(new EventRecord(0, 2, uint.MaxValue, "ResolveSubresource", "", 0, 0)));
+    }
+
+    [Fact]
+    public void UnknownKindsAreInvalidArgumentsThatNameTheReplacementVocabulary()
+    {
+        var record = new EventRecord(0, 1, uint.MaxValue, "Draw", "Draw", 0, 0);
+        var error = Assert.Throws<PixToolException>(() => ToolHelpers.MatchesKind(record, "drawOrDispatch"));
+        Assert.Equal("invalid_arguments", error.Detail.Code);
+        Assert.Contains("work", error.Detail.Message);
+        Assert.Throws<PixToolException>(() => ToolHelpers.ValidateKind("bogus"));
+        ToolHelpers.ValidateKind(null);
+        ToolHelpers.ValidateKind(" Work ");
     }
 
     [Fact]

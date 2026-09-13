@@ -49,7 +49,7 @@ public sealed class ManagedJobTests
         await Task.Run(jobs.Dispose).WaitAsync(TimeSpan.FromSeconds(5));
         Assert.True(cleaned);
         Assert.Equal(JobStatus.Cancelled, job.Status);
-        Assert.Throws<ObjectDisposedException>(() => jobs.StartManaged("csv", "after disposal", _ => Task.FromResult<object?>(null)));
+        Assert.Equal(PixErrors.Codes.ServerShuttingDown, Assert.Throws<PixToolException>(() => jobs.StartManaged("csv", "after disposal", _ => Task.FromResult<object?>(null))).Detail.Code);
         jobs.Dispose();
     }
 

@@ -9,8 +9,9 @@ namespace PixMcp.Pix;
 /// Seekable JSON navigation over trusted serializer output. Container scans and string decoding
 /// consume a fixed byte buffer; even one enormous string never becomes a JsonDocument token.
 /// </summary>
-internal sealed class StoredJson(Stream stream, CancellationToken cancellationToken = default)
+internal sealed class StoredJson(Stream stream, CancellationToken cancellationToken = default, string? reference = null)
 {
+    private const int MaxOutlineKeys = 25;
     internal readonly record struct Node(long Start, long End, JsonValueKind Kind, int Total)
     { internal long Bytes => End - Start; }
     private readonly byte[] _buffer = new byte[65536];
@@ -37,12 +38,12 @@ internal sealed class StoredJson(Stream stream, CancellationToken cancellationTo
     internal static IEnumerable<string> PointerTokens(string pointer)
     {
         if (pointer.Length == 0) yield break;
-        if (!pointer.StartsWith('/')) throw new PixToolException("invalid_pointer", "A JSON pointer must be empty or begin with '/'.");
+        if (!pointer.StartsWith('/')) throw new PixToolException(PixErrors.Codes.InvalidPointer, "A JSON pointer must be empty or begin with '/'.");
         foreach (string encoded in pointer.Split('/').Skip(1))
         {
             for (int i = 0; i < encoded.Length; i++)
                 if (encoded[i] == '~' && (i + 1 >= encoded.Length || encoded[++i] is not ('0' or '1')))
-                    throw new PixToolException("invalid_pointer", "JSON pointer escapes must be ~0 or ~1.");
+                    throw new PixToolException(PixErrors.Codes.InvalidPointer, "JSON pointer escapes must be ~0 or ~1.");
             yield return encoded.Replace("~1", "/").Replace("~0", "~");
         }
     }
@@ -55,21 +56,100 @@ internal sealed class StoredJson(Stream stream, CancellationToken cancellationTo
     }
     internal Node Locate(string pointer)
     {
+        (Node value, string resolved, string? failed) = LocateNearest(pointer);
+        if (failed is null) return value;
+        var keys = new List<string>();
+        if (value.Kind is JsonValueKind.Array or JsonValueKind.Object)
+            foreach (var child in Children(value)) { if (keys.Count >= MaxOutlineKeys) break; keys.Add(child.Key); }
+        throw PixErrors.InvalidPointer(pointer, resolved, KindName(value.Kind), keys, value.Total, reference);
+    }
+
+    /// <summary>Walks a pointer as far as it resolves: the deepest located node, the pointer prefix that resolved, and the first token that did not.</summary>
+    internal (Node Node, string Resolved, string? Failed) LocateNearest(string pointer)
+    {
         cancellationToken.ThrowIfCancellationRequested();
         string[] tokens = PointerTokens(pointer).ToArray();
-        Seek(0); Node value = Scan();
+        Seek(0); Node value = Scan(); var resolved = new StringBuilder();
         foreach (string token in tokens)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (value.Kind == JsonValueKind.Array && !ArrayIndex(token, out _)) throw InvalidPointer(pointer);
             Node? found = null;
-            if (value.Kind is JsonValueKind.Array or JsonValueKind.Object)
+            if (value.Kind is JsonValueKind.Array or JsonValueKind.Object && !(value.Kind == JsonValueKind.Array && !ArrayIndex(token, out _)))
                 foreach (var child in Children(value))
                     if (child.Key == token) { found = child.Value; if (value.Kind == JsonValueKind.Array) break; }
-            value = found ?? throw InvalidPointer(pointer);
+            if (found is null) return (value, resolved.ToString(), token);
+            value = found.Value; resolved.Append('/').Append(Escape(token));
         }
         cancellationToken.ThrowIfCancellationRequested();
-        return value;
+        return (value, resolved.ToString(), null);
+    }
+
+    internal static string KindName(JsonValueKind kind) => kind.ToString().ToLowerInvariant();
+
+    /// <summary>The shape of a value without its contents: one entry per child with kind, count, bytes and a key sample.</summary>
+    internal ResultOutlineDto Outline(Node node, string resultRef, string pointer, int offset, int limit)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var entries = new List<ResultOutlineEntry>();
+        if (node.Kind is JsonValueKind.Array or JsonValueKind.Object)
+            foreach (var child in Children(node).Skip(offset).Take(limit))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                entries.Add(new(child.Key, KindName(child.Value.Kind), child.Value.Total, child.Value.Bytes,
+                    child.Value.Bytes > ResultStore.TargetBytes / 2, ItemKeys(child.Value)));
+            }
+        int? next = node.Kind is JsonValueKind.Array or JsonValueKind.Object && (long)offset + entries.Count < node.Total ? offset + entries.Count : null;
+        return new(resultRef, pointer, KindName(node.Kind), node.Total, node.Bytes, offset, entries.Count, next, entries,
+            next.HasValue ? [ResultStore.ReadCall(resultRef, pointer, next.Value, limit, "outline")] : []);
+    }
+
+    /// <summary>Property names of an object child, or of the first element of an array of objects (row shape), up to 25.</summary>
+    private IReadOnlyList<string>? ItemKeys(Node child)
+    {
+        Node sample = child;
+        if (child.Kind == JsonValueKind.Array)
+        {
+            if (child.Total == 0) return null;
+            sample = Children(child).First().Value;
+        }
+        if (sample.Kind != JsonValueKind.Object) return null;
+        var keys = new List<string>();
+        foreach (var property in Children(sample)) { if (keys.Count >= MaxOutlineKeys) break; keys.Add(property.Key); }
+        return keys;
+    }
+
+    /// <summary>
+    /// Reads an array with server-side field selection and filtering. Every element is evaluated (elements above the
+    /// hard budget are counted as unevaluated); projected items fill the page under the inline budget.
+    /// </summary>
+    internal ResultReadDto Project(Node node, string resultRef, string pointer, int offset, int limit,
+        IReadOnlyList<string>? fields, IReadOnlyList<WhereClause>? where)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (node.Kind != JsonValueKind.Array)
+            throw PixErrors.InvalidArguments($"fields and where apply to array values; '{pointer}' is {KindName(node.Kind)}.",
+                [ResultStore.ReadCall(resultRef, pointer, mode: "outline")]);
+        var items = new JsonArray(); int scanned = 0, matched = 0, unevaluated = 0, used = 0; bool full = false;
+        foreach (var child in Children(node))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            scanned++;
+            if (child.Value.Bytes > ServerOptions.Current.MaxResultBytes) { unevaluated++; continue; }
+            string childPointer = pointer + "/" + child.Key;
+            JsonElement element = Element(child.Value, ServerOptions.Current.MaxResultBytes, resultRef, childPointer);
+            if (where is not null && !ResultProjection.Matches(element, where)) continue;
+            matched++;
+            if (matched <= offset || full) continue;
+            JsonNode projected = fields is null ? JsonNode.Parse(element.GetRawText())! : ResultProjection.Select(element, fields);
+            int bytes = Encoding.UTF8.GetByteCount(projected.ToJsonString());
+            if (items.Count >= limit || (items.Count > 0 && used + bytes > ResultStore.TargetBytes - 4096)) { full = true; continue; }
+            items.Add(projected); used += bytes;
+        }
+        int total = where is null ? node.Total : matched;
+        int? next = (long)offset + items.Count < total ? offset + items.Count : null;
+        return new(resultRef, pointer, "array", total, offset, items.Count, next, items,
+            next.HasValue ? [ResultStore.ReadCall(resultRef, pointer, next.Value, limit, null, fields, where)] : [])
+        { Projection = new(fields, where, scanned, matched, unevaluated) };
     }
     private Node Scan()
     {
@@ -120,7 +200,7 @@ internal sealed class StoredJson(Stream stream, CancellationToken cancellationTo
             if (parent.Kind == JsonValueKind.Object)
             {
                 var name = new StringBuilder();
-                DecodeString(c => { if (name.Length >= 1024 * 1024) throw new PixToolException("result_too_large", "A result property name exceeds the supported pointer size. Export its parent as JSON."); name.Append(c); });
+                DecodeString(c => { if (name.Length >= 1024 * 1024) throw new PixToolException(PixErrors.Codes.ResultTooLarge, "A result property name exceeds the supported pointer size. Export its parent as JSON."); name.Append(c); });
                 key = name.ToString(); White(); Require(':');
             }
             Node child = Scan(); position = child.End;
@@ -132,8 +212,8 @@ internal sealed class StoredJson(Stream stream, CancellationToken cancellationTo
     internal JsonElement Element(Node node, int maxBytes, string reference, string pointer)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (node.Bytes > maxBytes) throw new PixToolException("result_too_large", "The selected result value exceeds the requested materialization budget. Read bounded windows instead.",
-            nextCalls: [ResultStore.ReadCall(reference, pointer)]);
+        if (node.Bytes > maxBytes) throw new PixToolException(PixErrors.Codes.ResultTooLarge, "The selected result value exceeds the requested materialization budget. Read bounded windows instead.",
+            nextCalls: [ResultStore.ReadCall(reference, pointer, mode: "outline"), ResultStore.ReadCall(reference, pointer)]);
         byte[] data = new byte[(int)node.Bytes];
         stream.Position = node.Start;
         int position = 0;
@@ -165,7 +245,7 @@ internal sealed class StoredJson(Stream stream, CancellationToken cancellationTo
             DecodeString(c => { if (index >= first && (long)index <= (long)offset + limit) window.Append(c); index++; });
             int relative = offset - first;
             if (offset > 0 && offset < node.Total && char.IsLowSurrogate(window[relative]) && char.IsHighSurrogate(window[relative - 1]))
-                throw new PixToolException("invalid_arguments", "The string offset splits a UTF-16 surrogate pair. Use the nextOffset returned by the preceding window.");
+                throw new PixToolException(PixErrors.Codes.InvalidArguments, "The string offset splits a UTF-16 surrogate pair. Use the nextOffset returned by the preceding window.");
             if (count > 0 && offset + count < node.Total && char.IsHighSurrogate(window[relative + count - 1]) && char.IsLowSurrogate(window[relative + count]))
                 count = count == 1 ? 2 : count - 1;
             content = count == 0 ? "" : window.ToString(relative, count);

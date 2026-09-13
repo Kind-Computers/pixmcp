@@ -16,15 +16,58 @@ internal static class StructuredToolResults
     private static readonly JsonElement JobSchema = Export<JobDto>("startedAt", "finishedAt", "elapsedSeconds", "error", "result");
     private static readonly JsonElement ErrorSchema = Export<ErrorDto>();
     private static readonly JsonElement DeferredSchema = Export<DeferredResultDto>();
-    private static readonly JsonElement ResultReadSchema = Export<ResultReadDto>();
+    private static readonly JsonElement ResultReadSchema = AnyOf(Export<ResultReadDto>("value", "projection"), Export<ResultOutlineDto>("nextOffset"));
+    /// <summary>tools/list schemas are rewritten once per tool and reused; keyed on the SDK's own schema text so a changed tool is not served stale.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Source, JsonElement Input, JsonElement Output)> ToolSchemaCache = new(StringComparer.Ordinal);
+    /// <summary>How long clients may cache list results; the tool set is fixed for the life of the process.</summary>
+    private static readonly TimeSpan ListTimeToLive = TimeSpan.FromHours(1);
     private static readonly JsonElement PageSchema = Export<PageResult<object>>("nextOffset", "extra");
     private static readonly JsonElement EventPageSchema = CreateEventPageSchema();
-    private static readonly JsonElement JobsSchema = ArrayEnvelope(JsonNode.Parse(JobSchema.GetRawText())!);
+    private static readonly JsonElement JobsSchema = Export<PageResult<JobDto>>("nextOffset", "extra");
     private static readonly JsonElement PendingSchema = CreatePendingSchema();
+    private static readonly JsonElement TableSchema = Export<TableDto>("handle", "extra", "nextOffset");
+    /// <summary>Tools whose rows can be returned as a positional table (format=table).</summary>
+    internal static readonly string[] TableTools =
+    {
+        "pix_gpu_events", "pix_gpu_timing_events", "pix_gpu_counters_read", "pix_gpu_timing_tree", "pix_gpu_shaders",
+        "pix_gpu_resources", "pix_timing_events", "pix_timing_hotspots",
+    };
     private static readonly AsyncLocal<CallToolRequestParams?> CurrentRequest = new();
 
     internal static object? CurrentArguments() => CurrentRequest.Value?.Arguments;
     internal static string[] CurrentOwners() => Owners(CurrentRequest.Value?.Arguments).ToArray();
+    /// <summary>Arguments larger than this are reduced to handles and short scalars in a job's origin.</summary>
+    internal const int MaxOriginArgumentBytes = 2048;
+
+    /// <summary>The tool call being served, as an executable call (its arguments capped), or null outside a tool call.</summary>
+    internal static ToolCallDto? CurrentCall()
+    {
+        CallToolRequestParams? request = CurrentRequest.Value;
+        if (request?.Name is not string name) return null;
+        IDictionary<string, JsonElement> arguments = request.Arguments ?? new Dictionary<string, JsonElement>();
+        JsonElement element = JsonSerializer.SerializeToElement(arguments);
+        if (element.GetRawText().Length > MaxOriginArgumentBytes)
+        {
+            var kept = new Dictionary<string, JsonElement>();
+            foreach ((string key, JsonElement value) in arguments)
+                if (key == "handle" || key.EndsWith("Handle", StringComparison.Ordinal) || value.GetRawText().Length <= 64) kept[key] = value;
+            kept["argumentsTruncated"] = JsonSerializer.SerializeToElement(true);
+            element = JsonSerializer.SerializeToElement(kept);
+        }
+        return new ToolCallDto(name, element);
+    }
+
+    /// <summary>Makes <paramref name="request"/> the current call for the scope (the transport filter and tests).</summary>
+    internal static IDisposable WithRequest(CallToolRequestParams? request)
+    {
+        CallToolRequestParams? previous = CurrentRequest.Value;
+        CurrentRequest.Value = request;
+        return new RequestScope(previous);
+    }
+    private sealed class RequestScope(CallToolRequestParams? previous) : IDisposable
+    {
+        public void Dispose() => CurrentRequest.Value = previous;
+    }
     private static IEnumerable<string> Owners(IDictionary<string, JsonElement>? arguments)
     {
         if (arguments is null) yield break;
@@ -41,38 +84,76 @@ internal static class StructuredToolResults
     {
         filters.AddCallToolFilter(next => async (request, ct) =>
         {
-            CallToolRequestParams? previous = CurrentRequest.Value;
-            CurrentRequest.Value = request.Params;
+            using IDisposable scope = WithRequest(request.Params);
             try
             {
-                try
-                {
-                    ValidateArguments(request.Params?.Name ?? "", request.Params?.Arguments);
-                    CallToolResult result = await next(request, ct).ConfigureAwait(false);
-                    AddStructuredContent(result);
-                    BoundResult(result, request.Services?.GetService<PixSession>(), CurrentOwners(), request.Params?.Name == "pix_result_read", request.Params?.Name);
-                    return result;
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex)
-                {
-                    return ErrorResult(ex);
-                }
+                ValidateArguments(request.Params?.Name ?? "", request.Params?.Arguments);
+                CallToolResult result = await next(request, ct).ConfigureAwait(false);
+                AddStructuredContent(result);
+                PixSession? session = request.Services?.GetService<PixSession>();
+                Annotate(result, session, request.Params?.Arguments);
+                BoundResult(result, session, CurrentOwners(), request.Params?.Name == "pix_result_read", request.Params?.Name);
+                return result;
             }
-            finally { CurrentRequest.Value = previous; }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                return ErrorResult(ex);
+            }
         });
         filters.AddListToolsFilter(next => async (request, ct) =>
         {
             ListToolsResult result = await next(request, ct).ConfigureAwait(false);
-            foreach (Tool tool in result.Tools)
+            Tool[] ordered = result.Tools.OrderBy(t => t.Name, StringComparer.Ordinal).ToArray();
+            foreach (Tool tool in ordered)
             {
-                // The SDK can share tool metadata across requests. Replace it atomically with immutable JSON.
+                // The SDK can share tool metadata across requests. Replace it atomically with immutable, memoised JSON.
                 lock (tool)
                 {
-                    tool.OutputSchema = SchemaFor(tool.Name);
-                    tool.InputSchema = InputSchemaFor(tool.Name, tool.InputSchema);
+                    string source = tool.InputSchema.GetRawText();
+                    if (!ToolSchemaCache.TryGetValue(tool.Name, out var cached) || (cached.Source != source && cached.Input.GetRawText() != source))
+                    {
+                        cached = (source, InputSchemaFor(tool.Name, tool.InputSchema), SchemaFor(tool.Name));
+                        ToolSchemaCache[tool.Name] = cached;
+                    }
+                    tool.OutputSchema = cached.Output;
+                    tool.InputSchema = cached.Input;
                 }
             }
+            result.Tools = ordered;
+            result.TimeToLive = ListTimeToLive;
+            result.CacheScope = CacheScope.Private;
+            return result;
+        });
+        filters.AddListResourcesFilter(next => async (request, ct) =>
+        {
+            ListResourcesResult result = await next(request, ct).ConfigureAwait(false);
+            result.Resources = result.Resources.OrderBy(r => r.Uri, StringComparer.Ordinal).ToArray();
+            result.TimeToLive = ListTimeToLive;
+            result.CacheScope = CacheScope.Private;
+            return result;
+        });
+        filters.AddListResourceTemplatesFilter(next => async (request, ct) =>
+        {
+            ListResourceTemplatesResult result = await next(request, ct).ConfigureAwait(false);
+            result.ResourceTemplates = result.ResourceTemplates.OrderBy(r => r.UriTemplate, StringComparer.Ordinal).ToArray();
+            result.TimeToLive = ListTimeToLive;
+            result.CacheScope = CacheScope.Private;
+            return result;
+        });
+        filters.AddListPromptsFilter(next => async (request, ct) =>
+        {
+            ListPromptsResult result = await next(request, ct).ConfigureAwait(false);
+            result.Prompts = result.Prompts.OrderBy(p => p.Name, StringComparer.Ordinal).ToArray();
+            result.TimeToLive = ListTimeToLive;
+            result.CacheScope = CacheScope.Private;
+            return result;
+        });
+        filters.AddReadResourceFilter(next => async (request, ct) =>
+        {
+            // Resource bodies are live session state: never cacheable.
+            ReadResourceResult result = await next(request, ct).ConfigureAwait(false);
+            result.TimeToLive = TimeSpan.Zero;
             return result;
         });
     }
@@ -112,11 +193,45 @@ internal static class StructuredToolResults
         }
     }
 
+    /// <summary>
+    /// One JSON pass at the transport boundary: cost hints on every nextCalls entry and provenance dedup per handle.
+    /// Skipped when the text cannot contain either, so ordinary results are not re-serialized.
+    /// </summary>
+    internal static void Annotate(CallToolResult result, PixSession? session, IDictionary<string, JsonElement>? arguments)
+    {
+        if (result.IsError == true || result.StructuredContent is not JsonElement value || value.ValueKind != JsonValueKind.Object) return;
+        string raw = value.GetRawText();
+        bool hasCalls = raw.Contains("\"nextCalls\"", StringComparison.Ordinal);
+        bool hasProvenance = raw.Contains("rovenance\"", StringComparison.Ordinal);
+        if (!hasCalls && !hasProvenance) return;
+        JsonNode? node = JsonNode.Parse(raw);
+        bool changed = hasCalls && CostHints.Annotate(node, session);
+        if (hasProvenance && session is not null)
+        {
+            string[] owners = Owners(arguments).ToArray();
+            bool include = arguments is not null && arguments.TryGetValue("includeProvenance", out JsonElement flag) && flag.ValueKind == JsonValueKind.True;
+            string? Argument(string name) => arguments is not null && arguments.TryGetValue(name, out JsonElement v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+            string? OwnerFor(string key) => key switch
+            {
+                "baselineProvenance" => Argument("baselineHandle"),
+                "candidateProvenance" => Argument("candidateHandle"),
+                _ => Argument("handle") ?? owners.FirstOrDefault(),
+            };
+            changed |= ProvenanceDedup.Apply(node, include,
+                OwnerFor,
+                (owner, key) => session.TryGet<PixMcp.Pix.Handles.PixHandle>(owner)?.ProvenanceFingerprints.GetValueOrDefault(key),
+                (owner, key, fingerprint) => { if (session.TryGet<PixMcp.Pix.Handles.PixHandle>(owner) is { } h) h.ProvenanceFingerprints[key] = fingerprint; });
+        }
+        if (changed) SetPayload(result, JsonSerializer.SerializeToElement(node, Json.Options));
+    }
+
     internal static CallToolResult ErrorResult(Exception exception)
     {
         ErrorDto error = PixErrors.ToDto(exception);
+        if (error.NextCalls.Any(c => c.Cost is null))
+            error = error with { NextCalls = error.NextCalls.Select(c => c.Cost is null ? c with { Cost = CostHints.Default(c.Tool) } : c).ToArray() };
         string json = Json.Serialize(error);
-        if (Encoding.UTF8.GetByteCount(json) > Math.Min(ResultStore.TargetBytes, Tools.Tools.MaxResultBytes))
+        if (Encoding.UTF8.GetByteCount(json) > ResultStore.TargetBytes)
         {
             // A broken/very small output budget must still produce a protocol-level tool error.
             // Do not re-enter snapshotting or the size guard while reporting their own failure.
@@ -133,28 +248,37 @@ internal static class StructuredToolResults
         result.Content = result.Content.Select(c => c is TextContentBlock ? new TextContentBlock { Text = value.GetRawText() } : c).ToList();
     }
 
-    internal static void BoundResult(CallToolResult result, PixSession? session, string[] owners, bool reading = false, string? operation = null)
+    internal static void BoundResult(CallToolResult result, PixSession? session, string[] owners, bool reading = false, string? operation = null, int? maxBytes = null)
     {
         if (result.StructuredContent is not JsonElement value) return;
         string json = value.GetRawText();
         int bytes = Encoding.UTF8.GetByteCount(json);
-        if (session is not null && !reading && bytes > Math.Min(ResultStore.TargetBytes, Tools.Tools.MaxResultBytes))
+        if (session is not null && !reading && bytes > ResultStore.TargetBytes)
         {
             string resultRef = session.Results.StoreElement(value, owners, operation: operation);
-            SetPayload(result, JsonSerializer.SerializeToElement(new DeferredResultDto(true, resultRef, bytes, [ResultStore.ReadCall(resultRef)]), Json.Options));
+            SetPayload(result, JsonSerializer.SerializeToElement(new DeferredResultDto(true, resultRef, bytes, ResultStore.DeferredCalls(resultRef)), Json.Options));
         }
-        Tools.Tools.EnsureByteBudget(result.StructuredContent!.Value.GetRawText(), "tool result");
+        // The hard budget covers everything on the wire: structured JSON, every text block and every base64 image.
+        long total = Encoding.UTF8.GetByteCount(result.StructuredContent!.Value.GetRawText());
+        foreach (ContentBlock block in result.Content)
+        {
+            if (block is TextContentBlock text) total += Encoding.UTF8.GetByteCount(text.Text);
+            else if (block is ImageContentBlock image) total += image.Data.Length;
+        }
+        int limit = maxBytes ?? Tools.Tools.MaxResultBytes;
+        if (total > limit)
+            throw new PixToolException(PixErrors.Codes.ResultTooLarge, $"tool result: response is {total:N0} UTF-8 bytes including text and image content, above {ServerOptions.MaxVariable}={limit:N0}. Request a smaller window or image.");
     }
 
     internal static JsonElement SchemaFor(string toolName)
     {
         JsonElement core = CoreSchemaFor(toolName);
-        return AnyOf(core, DeferredSchema, ErrorSchema);
+        return TableTools.Contains(toolName) ? AnyOf(core, TableSchema, DeferredSchema, ErrorSchema) : AnyOf(core, DeferredSchema, ErrorSchema);
     }
 
     internal static JsonElement CoreSchemaFor(string toolName) => LegacyResultSchemas.For(toolName) ?? (toolName switch
     {
-        "pix_gpu_analysis_start" or "pix_gpu_timing_collect" or "pix_gpu_counters_start"
+        "pix_gpu_analysis_start" or "pix_gpu_timing_prepare" or "pix_gpu_counters_prepare"
             or "pix_gpu_drpix_run" or "pix_timing_resolve_symbols" or "pix_device_take_gpu_capture"
             or "pix_device_timing_capture_stop" or "pix_capture_upgrade" or "pix_gpu_shader_profile" or "pix_gpu_compare" or "pix_gpu_preview"
             or "pix_gpu_export_cpp" or "pix_csv_compare" or "pix_job_status" or "pix_job_wait" or "pix_job_cancel" => JobSchema,
@@ -174,7 +298,7 @@ internal static class StructuredToolResults
         "pix_gpu_events" => EventPageSchema,
         "pix_gpu_resources" => Export<PageResult<ResourceSummaryDto>>(),
         "pix_gpu_resource" => Export<ResourceDetailsDto>(),
-        "pix_gpu_counters_collect" => AnyOf(Export<PageResult<CounterValueRowDto>>(), PendingSchema),
+        "pix_gpu_counters_read" => AnyOf(Export<PageResult<CounterValueRowDto>>(), PendingSchema),
         "pix_gpu_timing_tree" => AnyOf(Export<TimingTreeDto>(), PendingSchema),
         "pix_gpu_pipeline_state" => AnyOf(Export<PipelineStateDto>(), PendingSchema),
         "pix_gpu_inspect_event" => AnyOf(Export<EventInspectionDto>(), PendingSchema),
@@ -194,7 +318,7 @@ internal static class StructuredToolResults
         "pix_gpu_preview_bytes" => Export<PreviewBytesSchemaDto>(),
         "pix_gpu_occupancy" => AnyOf(Export<LegacyResultSchemas.Occupancy>(), Export<LegacyResultSchemas.UnavailableResult>(), PendingSchema),
         "pix_gpu_hf_counters" => AnyOf(Export<LegacyResultSchemas.HighFrequency>(), Export<LegacyResultSchemas.UnavailableResult>(), PendingSchema),
-        "pix_gpu_drpix_experiments" => AnyOf(ArrayEnvelope(JsonNode.Parse(Export<Handles.ExperimentInfo>().GetRawText())!), PendingSchema),
+        "pix_gpu_drpix_experiments" => AnyOf(Export<PageResult<Handles.ExperimentInfo>>("nextOffset", "extra"), PendingSchema),
         _ => ObjectSchema,
     });
 
@@ -244,6 +368,7 @@ internal static class StructuredToolResults
         });
         schema["type"] = "object";
         RemoveNullableRequirements(schema);
+        AllowProvenanceStubs(schema);
         // Null properties are omitted by our serializer, including nullable constructor parameters.
         if (schema["required"] is JsonArray required)
         {
@@ -254,6 +379,25 @@ internal static class StructuredToolResults
             }
         }
         return JsonSerializer.SerializeToElement(schema);
+    }
+
+    private static readonly Lazy<JsonNode> StubSchema = new(() => JsonNode.Parse(Export<ProvenanceStubDto>().GetRawText())!);
+
+    /// <summary>Provenance properties may come back as a stub once the handle has already returned the full block.</summary>
+    private static void AllowProvenanceStubs(JsonNode? node)
+    {
+        if (node is JsonObject obj)
+        {
+            if (obj["properties"] is JsonObject properties)
+                foreach (string key in ProvenanceDedup.Keys)
+                    if (properties[key] is JsonObject original && original["anyOf"] is null)
+                    {
+                        properties.Remove(key);
+                        properties[key] = new JsonObject { ["anyOf"] = new JsonArray(original, StubSchema.Value.DeepClone()) };
+                    }
+            foreach (JsonNode? child in obj.Select(p => p.Value).ToArray()) AllowProvenanceStubs(child);
+        }
+        else if (node is JsonArray array) foreach (JsonNode? child in array) AllowProvenanceStubs(child);
     }
 
     private static void RemoveNullableRequirements(JsonNode? node)
@@ -275,19 +419,23 @@ internal static class StructuredToolResults
     private static string[]? Choices(string tool, string name) => (tool, name) switch
     {
         (_, "codeType") => ["HLSL", "IL", "ISA"],
+        ("pix_result_read", "mode") => ["values", "outline"],
+        (_, "preset") => CounterPresets.Names.ToArray(),
         ("pix_gpu_resources", "type") => ["COMMITTED", "PLACED", "RESERVED"],
         ("pix_gpu_resources", "dimension") => ["BUFFER", "TEXTURE1D", "TEXTURE2D", "TEXTURE3D"],
         ("pix_gpu_api_objects", "type") => ["HEAP", "RESOURCE", "COMMAND_QUEUE", "COMMAND_ALLOCATOR"],
         ("pix_device_d3d_settings_set", "category") => ["debugLayer", "dred", "device"],
         ("pix_csv_compare", "stat") => ["mean", "median", "p95"],
         ("pix_gpu_timing_events", "sortBy") => ["eopDuration", "topDuration", "eopStart", "index"],
-        (_, "kind") when tool.StartsWith("pix_gpu_") => ["draw", "dispatch", "drawOrDispatch", "executeIndirect", "copy", "clear", "barrier", "present", "marker"],
+        ("pix_gpu_timing_tree", "sortBy") => TimingTree.SortKeys,
+        (_, "format") when TableTools.Contains(tool) => Shaping.Formats,
+        (_, "kind") when tool.StartsWith("pix_gpu_") => PixMcp.Tools.Tools.Kinds,
         _ => null,
     };
 
     private static (double? min, double? max) Bounds(string tool, string name) => (tool, name) switch
     {
-        ("pix_gpu_preview_bytes", "limit") => (1, 16384),
+        ("pix_gpu_preview_bytes", "limit") => (1, Tools.PreviewTools.MaxBytesPerPage),
         ("pix_gpu_preview" or "pix_gpu_export_cpp" or "pix_csv_compare", "timeoutSeconds") => (1, 3600),
         ("pix_gpu_shader_search", "nodeIndex") => (0, null),
         ("pix_gpu_shader_search", "contextLines") => (0, 20),
@@ -296,6 +444,8 @@ internal static class StructuredToolResults
             or "pointOffset" or "sampleOffset" or "viewOffset" or "bindingOffset" or "nodeOffset") => (0, null),
         (_, "limit" or "lineCount" or "maxNodes" or "viewLimit" or "bindingLimit" or "nodeLimit") => (1, 1000),
         (_, "nodeIndex") => (-1, null),
+        (_, "topN") => (1, Paging.MaxLimit),
+        (_, "maxStringLength") => (Shaping.MinStringLength, Shaping.MaxStringLengthLimit),
         (_, "waitSeconds" or "timeoutSeconds") => (0, 3600),
         _ => (null, null),
     };
@@ -303,9 +453,9 @@ internal static class StructuredToolResults
     internal static JsonElement InputSchemaFor(string tool, JsonElement original)
     {
         JsonNode schema = JsonNode.Parse(original.GetRawText())!;
-        Apply(schema);
+        Apply(schema, true);
         return JsonSerializer.SerializeToElement(schema);
-        void Apply(JsonNode? node)
+        void Apply(JsonNode? node, bool topLevel)
         {
             if (node is JsonObject obj && obj["properties"] is JsonObject properties)
                 foreach ((string name, JsonNode? property) in properties)
@@ -315,9 +465,33 @@ internal static class StructuredToolResults
                     (double? min, double? max) = Bounds(tool, name);
                     if (min.HasValue) p["minimum"] = min.Value;
                     if (max.HasValue) p["maximum"] = max.Value;
-                    Apply(p);
+                    if (topLevel && Examples(tool, name, p) is JsonNode[] examples) p["examples"] = new JsonArray(examples);
+                    Apply(p, false);
                 }
         }
+    }
+
+    /// <summary>Concrete example values for reference-shaped parameters, so the wire shape is learned from the schema, not from errors.</summary>
+    internal static JsonNode[]? Examples(string tool, string name, JsonObject property)
+    {
+        string handle = tool.StartsWith("pix_timing_", StringComparison.Ordinal) ? "timing-1"
+            : tool.StartsWith("pix_dump_", StringComparison.Ordinal) ? "dump-1"
+            : tool.StartsWith("pix_device_", StringComparison.Ordinal) ? "device-1" : "gpu-1";
+        JsonNode EventRef() => new JsonObject { ["handle"] = "gpu-1", ["queueIndex"] = 0, ["eventIndex"] = 42 };
+        bool eventRefShaped = property["properties"] is JsonObject props && props["eventIndex"] is not null && props["queueIndex"] is not null;
+        return name switch
+        {
+            "handle" or "baselineHandle" or "candidateHandle" or "gpuHandle" => [JsonValue.Create(handle)!],
+            "timingHandle" => [JsonValue.Create("timing-1")!],
+            "shaderRef" => [new JsonObject { ["eventRef"] = EventRef(), ["shaderIndex"] = 0 }],
+            "shaderKey" => [JsonValue.Create("hash:PS:3f9a1c2e")!],
+            "resourceRef" => [new JsonObject { ["handle"] = "gpu-1", ["apiObjectId"] = "0x1a2b" }],
+            "markerPathPrefix" => [JsonValue.Create("Frame/Shadow")!],
+            "format" => [JsonValue.Create("table")!],
+            "kind" => [JsonValue.Create("work")!],
+            _ when eventRefShaped => [EventRef()],
+            _ => null,
+        };
     }
 
     internal static void ValidateArguments(string tool, IDictionary<string, JsonElement>? arguments)
@@ -328,13 +502,13 @@ internal static class StructuredToolResults
             if (value.ValueKind == JsonValueKind.Null) continue;
             if (Choices(tool, name) is string[] choices && value.ValueKind == JsonValueKind.String &&
                 !choices.Contains(value.GetString(), StringComparer.OrdinalIgnoreCase))
-                throw new PixToolException("invalid_arguments", $"{name} must be one of: {string.Join(", ", choices)}.");
+                throw new PixToolException(PixErrors.Codes.InvalidArguments, $"{name} must be one of: {string.Join(", ", choices)}.");
             (double? min, double? max) = Bounds(tool, name);
             if ((min.HasValue || max.HasValue) && value.ValueKind == JsonValueKind.Number)
             {
                 double number = value.GetDouble();
                 if (!double.IsFinite(number) || (min.HasValue && number < min.Value) || (max.HasValue && number > max.Value))
-                    throw new PixToolException("invalid_arguments", $"{name} is outside its advertised bounds.");
+                    throw new PixToolException(PixErrors.Codes.InvalidArguments, $"{name} is outside its advertised bounds.");
             }
             if (value.ValueKind == JsonValueKind.Object)
                 ValidateArguments(tool, value.EnumerateObject().ToDictionary(p => p.Name, p => p.Value));

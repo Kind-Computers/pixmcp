@@ -56,13 +56,15 @@ internal static class ServerHost
                     "state, resources, Dr. PIX) replay the capture on the local GPU. They start analysis " +
                     "automatically as a background job and wait up to waitSeconds for it; if it is still running " +
                     "they return { pending: true, jobId }: call pix_job_wait with that jobId, then repeat the call. " +
+                    "pix_gpu_overview and pix_gpu_inspect_event answer partially instead: metadata now, and { pending, jobId } inside the sections that wait for replay. " +
+                    "Paged tools accept format=table (positional rows with a legend), brief, topN and maxStringLength; nextCalls carry a cost hint; a repeated provenance block is a { provenanceRef, unchanged } stub. " +
                     "Long operations return a jobId: poll pix_job_status or block with pix_job_wait, then read resultRef with pix_result_read. " +
                     "Large results also return resultRef; use JSON pointers and offsets to retrieve every nested value, or pix_result_export to save JSON. " +
                     "Result snapshots use bounded memory and temporary disk; close, pruning, or storage pressure can expire them. " +
                     "Use nextCalls for exact recovery and continuation arguments. All PIX work runs " +
                     "on one thread. Query waitSeconds includes queue admission; worker_busy returns recovery calls if admission times out. " +
                     "pix_info shows the active operation and storage usage. Queued cancellation is immediate; running native cancellation is best effort. " +
-                    "Use pix_gpu_counters_start to collect counters in the background before paging pix_gpu_counters_collect. " +
+                    "Use pix_gpu_counters_prepare to collect counters in the background before paging pix_gpu_counters_read. " +
                     "Timing describes GPU replay; nested marker sums and replay queue spans are not application frame latency. " +
                     "Recorded timing captures use pix_timing_overview, pix_timing_events, pix_timing_counters_list/read, " +
                     "pix_timing_hotspots and pix_timing_calltree without GPU replay. Times are nanoseconds with exclusive interval ends. " +

@@ -63,7 +63,7 @@ public sealed class InspectionWorkflowTests
     [InlineData(1, 0)]
     [InlineData(1, 1001)]
     public void InvalidShaderWindowsAreRejected(int startLine, int lineCount)
-        => Assert.Throws<McpException>(() => ShaderText.Window("code", startLine, lineCount));
+        => Assert.Throws<PixToolException>(() => ShaderText.Window("code", startLine, lineCount));
 
     [Fact]
     public void ShaderSearchIsLiteralCaseInsensitiveAndKeepsNodeAndContext()
@@ -103,7 +103,7 @@ public sealed class InspectionWorkflowTests
         await Assert.ThrowsAsync<PixToolException>(() => ResourceTools.EventResources(session, jobs, missing));
         await Assert.ThrowsAsync<PixToolException>(() => PipelineTools.PipelineState(session, jobs, missing));
         await Assert.ThrowsAsync<PixToolException>(() => PipelineTools.ShaderCode(session, jobs, new(missing, 0)));
-        await Assert.ThrowsAsync<PixToolException>(() => ShaderProfilingTools.Profile(session, jobs, missing));
+        await Assert.ThrowsAsync<PixToolException>(() => ShaderProfilingTools.Profile(session, jobs, missing.Handle, scope: missing));
         Assert.Empty(jobs.All);
         Assert.Equal(0, worker.PendingCount);
     }

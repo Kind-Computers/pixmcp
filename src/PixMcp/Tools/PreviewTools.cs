@@ -18,15 +18,24 @@ public static class PreviewTools
 {
     internal const int MaxInlineBytes = 4 * 1024 * 1024;
     internal const int MaxArtifactBytes = 32 * 1024 * 1024;
+
+    /// <summary>Base64 bytes an inline image may take: the hard response budget minus the JSON envelope and a margin.</summary>
+    internal static int InlineImageBudget(int jsonBytes) => Math.Max(1024, Tools.MaxResultBytes - jsonBytes - 1024);
+
+    /// <summary>
+    /// Largest pix_gpu_preview_bytes page: three quarters of the inline budget minus the envelope, so a page never
+    /// crosses the deferral threshold (1024..16384).
+    /// </summary>
+    internal static int MaxBytesPerPage => Math.Clamp((Math.Min(ResultStore.TargetBytes, Tools.MaxResultBytes) - 2048) * 3 / 4, 1024, 16384);
     private static readonly ConditionalWeakTable<PixSession, PreviewArtifacts> Artifacts = new();
 
-    [McpServerTool(Name = "pix_gpu_preview", ReadOnly = true), Description("Starts a rendering-preview job using installed pixtool. Stop all connected GPU analyses first. Saves the selected RTV (default 0) or depth visualization. With markerName, uses the last child of that globally unique exact marker with the resource bound; otherwise uses the last event with it bound. Job result contains an artifactRef and image retrieval call.")]
+    [McpServerTool(Name = "pix_gpu_preview", Title = "Render preview (pixtool)", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Starts a rendering-preview job using installed pixtool. Stop all connected GPU analyses first. Saves the selected RTV (default 0) or depth visualization. With markerName, uses the last child of that globally unique exact marker with the resource bound; otherwise uses the last event with it bound. Job result contains an artifactRef and image retrieval call.")]
     public static Task<string> Preview(PixSession session, JobManager jobs,
         [Description("Open GPU capture handle.")] string handle,
         [Description("Globally unique, case-sensitive exact PIX marker name; omit for the last bound instance in the capture.")] string? markerName = null,
-        [Description("RenderTarget or Depth visualization.")] PreviewTarget target = PreviewTarget.RenderTarget,
+        [Description("RenderTarget or Depth visualization. Default: RenderTarget.")] PreviewTarget target = PreviewTarget.RenderTarget,
         [Description("RTV index, 0 through 7. Ignored only when zero for Depth.")] int rtvIndex = 0,
-        [Description("Process timeout in seconds, 1 through 3600.")] int timeoutSeconds = 120,
+        [Description("Process timeout in seconds, 1 through 3600. Default: 120.")] int timeoutSeconds = 120,
         [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
         CancellationToken cancellationToken = default)
     {
@@ -55,9 +64,9 @@ public static class PreviewTools
                 job.AddMessage("Replaying with pixtool defaults; native analysis adapter and power settings do not apply.");
                 RunProcess(start, TimeSpan.FromSeconds(timeoutSeconds), job.Cancellation.Token, job.AddMessage);
                 job.ThrowIfCancellationRequested();
-                if (!File.Exists(output)) throw new PixToolException("preview_missing_output", "pixtool completed without producing a PNG.");
+                if (!File.Exists(output)) throw new PixToolException(PixErrors.Codes.PreviewMissingOutput, "pixtool completed without producing a PNG.");
                 long size = new FileInfo(output).Length;
-                if (size > MaxArtifactBytes) throw new PixToolException("preview_too_large", $"PNG exceeds the {MaxArtifactBytes} byte artifact limit.");
+                if (size > MaxArtifactBytes) throw new PixToolException(PixErrors.Codes.PreviewTooLarge, $"PNG exceeds the {MaxArtifactBytes} byte artifact limit.");
                 byte[] png = File.ReadAllBytes(output);
                 (uint width, uint height) = PngDimensions(png);
                 string artifactRef = Artifacts.GetOrCreateValue(session).Add(capture.Id, png);
@@ -80,19 +89,24 @@ public static class PreviewTools
         }), waitSeconds, cancellationToken);
     }
 
-    [McpServerTool(Name = "pix_gpu_preview_image", ReadOnly = true), Description("Returns a preview or embedded screenshot as inline PNG. Optional crop uses original pixel coordinates, then maxDimension bounds the longest edge without upscaling. Set ignoreAlpha=true to view render-target RGB as opaque when stored alpha hides useful colors. Originals above 4 MiB automatically get a thumbnail. Original bytes remain available through pix_gpu_preview_bytes. Artifacts expire on capture close or cache eviction.")]
-    public static async Task<CallToolResult> Image(PixSession session, string artifactRef, ImageCrop? crop = null,
-        int? maxDimension = null,
+    [McpServerTool(Name = "pix_gpu_preview_image", Title = "Preview image", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Returns a preview or embedded screenshot as inline PNG. Optional crop uses original pixel coordinates, then maxDimension bounds the longest edge without upscaling. Set ignoreAlpha=true to view render-target RGB as opaque when stored alpha hides useful colors. Originals above 4 MiB automatically get a thumbnail. Original bytes remain available through pix_gpu_preview_bytes. Artifacts expire on capture close or cache eviction.")]
+    public static async Task<CallToolResult> Image(PixSession session, [Description("Artifact reference returned by pix_gpu_preview or pix_gpu_screenshot.")] string artifactRef, [Description("Crop rectangle in original pixel coordinates { x, y, width, height }.")] ImageCrop? crop = null,
+        [Description("Bound on the longest edge in pixels (1..4096); never upscales.")] int? maxDimension = null,
         [Description("Display stored RGB as opaque before crop/resize; default false preserves alpha. Original artifact bytes are unchanged.")] bool ignoreAlpha = false,
         CancellationToken cancellationToken = default)
-        => ImageResult(artifactRef, await ImageRenderer.Render(GetArtifact(session, artifactRef), crop, maxDimension, ignoreAlpha, cancellationToken).ConfigureAwait(false));
+    {
+        byte[] original = GetArtifact(session, artifactRef);
+        RenderedImage rendered = await ImageRenderer.Render(original, crop, maxDimension, ignoreAlpha, cancellationToken).ConfigureAwait(false);
+        (rendered, bool budgetLimited) = await ImageRenderer.FitToBudget(rendered, original, InlineImageBudget(1024), cancellationToken).ConfigureAwait(false);
+        return ImageResult(artifactRef, rendered, budgetLimited);
+    }
 
-    internal static CallToolResult ImageResult(string artifactRef, RenderedImage rendered)
+    internal static CallToolResult ImageResult(string artifactRef, RenderedImage rendered, bool budgetLimited = false)
     {
         string json = Json.Serialize(new { artifactRef, mimeType = "image/png", pngBytes = rendered.Png.Length,
             originalWidth = rendered.OriginalWidth, originalHeight = rendered.OriginalHeight,
             width = rendered.Width, height = rendered.Height, crop = rendered.Crop, resized = rendered.Resized,
-            alphaIgnored = rendered.AlphaIgnored });
+            budgetLimited, alphaIgnored = rendered.AlphaIgnored });
         return new CallToolResult
         {
             Content = [new TextContentBlock { Text = json }, ImageContentBlock.FromBytes(rendered.Png, "image/png")],
@@ -100,11 +114,12 @@ public static class PreviewTools
         };
     }
 
-    [McpServerTool(Name = "pix_gpu_preview_bytes", ReadOnly = true), Description("Retrieves PNG artifact bytes as paged base64. Decode each page separately and concatenate the decoded bytes. Available while the capture remains open and the artifact has not been evicted.")]
-    public static string Bytes(PixSession session, string artifactRef, int offset = 0, int limit = 16384)
+    [McpServerTool(Name = "pix_gpu_preview_bytes", Title = "Preview PNG bytes", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Retrieves PNG artifact bytes as paged base64. Decode each page separately and concatenate the decoded bytes. Available while the capture remains open and the artifact has not been evicted.")]
+    public static string Bytes(PixSession session, [Description("Artifact reference returned by pix_gpu_preview or pix_gpu_screenshot.")] string artifactRef, [Description("First byte to return (default 0).")] int offset = 0, [Description("Maximum bytes per page (default 16384).")] int limit = 16384)
     {
-        if (offset < 0 || limit < 1 || limit > 16384) throw new PixToolException("invalid_arguments", "offset must be nonnegative; limit must be 1 through 16384.");
+        if (offset < 0 || limit < 1 || limit > 16384) throw new PixToolException(PixErrors.Codes.InvalidArguments, "offset must be nonnegative; limit must be 1 through 16384.");
         byte[] png = GetArtifact(session, artifactRef);
+        limit = Math.Min(limit, MaxBytesPerPage);
         int count = Math.Min(limit, Math.Max(0, png.Length - offset));
         int? nextOffset = (long)offset + count < png.Length ? offset + count : null;
         return Json.Serialize(new { artifactRef, mimeType = "image/png", offset, totalBytes = png.Length, returnedBytes = count,
@@ -126,15 +141,15 @@ public static class PreviewTools
     internal static void ValidateSelection(string? markerName, PreviewTarget target, int rtvIndex, int timeoutSeconds)
     {
         if (markerName?.Any(c => c == '"' || char.IsControl(c)) == true)
-            throw new PixToolException("unsupported_selection", "The pixtool parser cannot reliably represent marker names containing literal quotes or control characters. Omit markerName to inspect the last bound resource.");
+            throw new PixToolException(PixErrors.Codes.UnsupportedSelection, "The pixtool parser cannot reliably represent marker names containing literal quotes or control characters. Omit markerName to inspect the last bound resource.");
         if (!Enum.IsDefined(target) || rtvIndex is < 0 or > 7 || target == PreviewTarget.Depth && rtvIndex != 0 || timeoutSeconds is < 1 or > 3600 || markerName is not null && string.IsNullOrWhiteSpace(markerName))
-            throw new PixToolException("invalid_arguments", "Use a valid target, RTV 0 through 7 (0 for depth), nonempty marker, and timeoutSeconds 1 through 3600.");
+            throw new PixToolException(PixErrors.Codes.InvalidArguments, "Use a valid target, RTV 0 through 7 (0 for depth), nonempty marker, and timeoutSeconds 1 through 3600.");
     }
 
     internal static void ValidateMarker(IEnumerable<string> markers, string markerName)
     {
         int matches = markers.Count(name => name.Equals(markerName, StringComparison.Ordinal));
-        if (matches != 1) throw new PixToolException("ambiguous_marker", $"markerName must identify exactly one PIX marker across all queues; found {matches} exact matches.");
+        if (matches != 1) throw new PixToolException(PixErrors.Codes.AmbiguousMarker, $"markerName must identify exactly one PIX marker across all queues; found {matches} exact matches.");
     }
 
     internal static ProcessStartInfo BuildStartInfo(string executable, string capture, string output, string? markerName, PreviewTarget target, int rtvIndex)
@@ -154,7 +169,7 @@ public static class PreviewTools
     internal static (uint Width, uint Height) PngDimensions(byte[] png)
     {
         if (png.Length < 24 || !png.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }) || !png.AsSpan(12, 4).SequenceEqual("IHDR"u8))
-            throw new PixToolException("preview_invalid_output", "pixtool output does not contain a valid PNG header.");
+            throw new PixToolException(PixErrors.Codes.PreviewInvalidOutput, "pixtool output does not contain a valid PNG header.");
         return (BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(16, 4)), BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(20, 4)));
     }
 }
@@ -167,7 +182,7 @@ internal sealed class PreviewArtifacts
     internal string Add(string handle, byte[] bytes)
     {
         if (bytes.Length > PreviewTools.MaxArtifactBytes)
-            throw new PixToolException("image_too_large", "The image exceeds the 32 MiB artifact limit.");
+            throw new PixToolException(PixErrors.Codes.ImageTooLarge, "The image exceeds the 32 MiB artifact limit.");
         lock (_entries)
         {
             string id = "preview-" + Guid.NewGuid().ToString("N");
@@ -185,7 +200,7 @@ internal sealed class PreviewArtifacts
                 if (_entries.Remove(expired, out var removed)) _bytes -= removed.Bytes.Length;
             CompactOrder();
             if (_entries.TryGetValue(id, out var entry)) return entry.Bytes;
-            throw new PixToolException("artifact_expired", "The preview artifact is unknown, was evicted, or its capture has closed. Run pix_gpu_preview again.");
+            throw new PixToolException(PixErrors.Codes.ArtifactExpired, "The preview artifact is unknown, was evicted, or its capture has closed. Run pix_gpu_preview again.");
         }
     }
     internal void Forget(string handle)

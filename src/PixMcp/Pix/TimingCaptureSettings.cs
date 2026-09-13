@@ -13,7 +13,7 @@ internal static class TimingCaptureOptions
         Create(TimingCaptureSettingsDto settings)
     {
         if (settings.ContextSwitchStacks && !settings.ContextSwitches)
-            throw new PixToolException("invalid_arguments", "contextSwitchStacks requires contextSwitches=true.");
+            throw new PixToolException(PixErrors.Codes.InvalidArguments, "contextSwitchStacks requires contextSwitches=true.");
 
         static PIX_EVENT_COLLECTION_LEVEL Level(bool enabled, bool stacks) => !enabled
             ? PIX_EVENT_COLLECTION_LEVEL.PIX_EVENT_COLLECTION_LEVEL_NONE

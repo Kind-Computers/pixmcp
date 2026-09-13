@@ -1,20 +1,31 @@
 <Project>
   <!--
-    PIX API discovery (adapted from microsoft/pix-samples api/Directory.Build.props).
+    PIX API discovery and version gating (adapted from microsoft/pix-samples api/Directory.Build.props).
+
+    PixPreviewMinDate and PixVerifiedVersion are the single source of the supported PIX range; README.md,
+    CLAUDE.md and PixDiscovery.cs read or repeat them (scripts/check_versions.py keeps them in sync).
 
     PixInstallDir resolves from, in order:
       1. /p:PixInstallDir=<path>
       2. the PIX_DIR environment variable
-      3. the newest %ProgramFiles%\Microsoft PIX Preview\<version> whose YYMM.DD date is after 2606.15
+      3. the only %ProgramFiles%\Microsoft PIX Preview\<version> whose YYMM.DD date is after PixPreviewMinDate;
+         several eligible installs are an error unless /p:PixMcpPickNewestPix=true picks the newest.
+
+    An install newer than PixVerifiedVersion fails the build unless /p:PixMcpAllowUnverifiedPix=true.
+    The install's version.xml and PixApiCsExt.experimental.dll file version are recorded as AssemblyMetadata
+    so the runtime can compare the PIX it loads against the PIX it was compiled against.
 
     Expected layout under PixInstallDir: include\PixApi.h, lib\PixApi.lib, pixapi.dll, PixApiCsExt.experimental.dll
   -->
   <PropertyGroup>
+    <PixPreviewMinDate>2606.15</PixPreviewMinDate>
+    <PixVerifiedVersion>2606.18-preview</PixVerifiedVersion>
     <PixInstallDir Condition="'$(PixInstallDir)' == ''">$(PIX_DIR)</PixInstallDir>
     <_PixProgramFiles Condition="'$(_PixProgramFiles)' == ''">$(ProgramW6432)</_PixProgramFiles>
     <_PixProgramFiles Condition="'$(_PixProgramFiles)' == ''">$(ProgramFiles)</_PixProgramFiles>
     <_PixProgramFiles Condition="'$(_PixProgramFiles)' == ''">C:\Program Files</_PixProgramFiles>
-    <_PixPreviewMinDate>2606.15</_PixPreviewMinDate>
+    <PixMcpPickNewestPix Condition="'$(PixMcpPickNewestPix)' == ''">false</PixMcpPickNewestPix>
+    <PixMcpAllowUnverifiedPix Condition="'$(PixMcpAllowUnverifiedPix)' == ''">false</PixMcpAllowUnverifiedPix>
     <PixApiBinDir>$(PixInstallDir)</PixApiBinDir>
   </PropertyGroup>
 
@@ -23,11 +34,16 @@
     <ParameterGroup>
       <PreviewRoot ParameterType="System.String" Required="true" />
       <MinimumDate ParameterType="System.String" Required="true" />
+      <PickNewest ParameterType="System.Boolean" Required="true" />
       <InstallDir ParameterType="System.String" Output="true" />
+      <Candidates ParameterType="System.String" Output="true" />
+      <Ambiguous ParameterType="System.Boolean" Output="true" />
     </ParameterGroup>
     <Task>
+      <Using Namespace="System.Collections.Generic" />
       <Using Namespace="System.Globalization" />
       <Using Namespace="System.IO" />
+      <Using Namespace="System.Linq" />
       <Code Type="Fragment" Language="cs"><![CDATA[
         int[] ParseVersion(string leaf)
         {
@@ -54,8 +70,10 @@
         }
 
         InstallDir = string.Empty;
-        int[] newest = null;
+        Candidates = string.Empty;
+        Ambiguous = false;
         int[] minimum = ParseVersion(MinimumDate);
+        var eligible = new List<KeyValuePair<int[], string>>();
         if (Directory.Exists(PreviewRoot))
         {
             foreach (string directory in Directory.EnumerateDirectories(PreviewRoot))
@@ -63,31 +81,120 @@
                 if (!File.Exists(Path.Combine(directory, "PixApiCsExt.experimental.dll"))) continue;
                 int[] version = ParseVersion(Path.GetFileName(directory));
                 if (version == null || CompareVersions(new[] { version[0], version[1] }, minimum) <= 0) continue;
-                int comparison = newest == null ? 1 : CompareVersions(version, newest);
-                if (comparison > 0 || (comparison == 0 && StringComparer.OrdinalIgnoreCase.Compare(directory, InstallDir) > 0))
-                {
-                    newest = version;
-                    InstallDir = Path.GetFullPath(directory);
-                }
+                eligible.Add(new KeyValuePair<int[], string>(version, Path.GetFullPath(directory)));
             }
         }
+        eligible.Sort((x, y) =>
+        {
+            int comparison = CompareVersions(x.Key, y.Key);
+            return comparison != 0 ? comparison : StringComparer.OrdinalIgnoreCase.Compare(x.Value, y.Value);
+        });
+        Candidates = string.Join(";", eligible.Select(e => e.Value));
+        if (eligible.Count == 1 || (eligible.Count > 1 && PickNewest)) InstallDir = eligible[eligible.Count - 1].Value;
+        Ambiguous = eligible.Count > 1 && !PickNewest;
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <UsingTask TaskName="ReadPixInstallVersion" TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <InstallDir ParameterType="System.String" Required="true" />
+      <VerifiedVersion ParameterType="System.String" Required="true" />
+      <XmlVersion ParameterType="System.String" Output="true" />
+      <Build ParameterType="System.String" Output="true" />
+      <Commit ParameterType="System.String" Output="true" />
+      <FileVersion ParameterType="System.String" Output="true" />
+      <InstallVersion ParameterType="System.String" Output="true" />
+      <NewerThanVerified ParameterType="System.Boolean" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.Diagnostics" />
+      <Using Namespace="System.Globalization" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Text.RegularExpressions" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        int[] ParseVersion(string leaf)
+        {
+            string[] parts = leaf.Split(new[] { '-' }, 2)[0].Split('.');
+            if (parts.Length < 2) return null;
+            var version = new int[parts.Length];
+            for (int i = 0; i < parts.Length; i++)
+            {
+                if (!int.TryParse(parts[i], NumberStyles.None, CultureInfo.InvariantCulture, out version[i]))
+                    return null;
+            }
+            return version;
+        }
+
+        int CompareVersions(int[] left, int[] right)
+        {
+            for (int i = 0; i < Math.Max(left.Length, right.Length); i++)
+            {
+                int a = i < left.Length ? left[i] : 0;
+                int b = i < right.Length ? right[i] : 0;
+                if (a != b) return a.CompareTo(b);
+            }
+            return 0;
+        }
+
+        string Element(string xml, string name)
+        {
+            Match match = Regex.Match(xml, "<" + name + ">\\s*([^<]*?)\\s*</" + name + ">");
+            return match.Success ? match.Groups[1].Value : string.Empty;
+        }
+
+        XmlVersion = string.Empty; Build = string.Empty; Commit = string.Empty; FileVersion = string.Empty;
+        string xmlPath = Path.Combine(InstallDir, "version.xml");
+        if (File.Exists(xmlPath))
+        {
+            string xml = File.ReadAllText(xmlPath);
+            XmlVersion = Element(xml, "Version");
+            Build = Element(xml, "Build");
+            Commit = Element(xml, "Commit");
+        }
+        string marker = Path.Combine(InstallDir, "PixApiCsExt.experimental.dll");
+        if (File.Exists(marker))
+        {
+            try { FileVersion = FileVersionInfo.GetVersionInfo(marker).FileVersion ?? string.Empty; }
+            catch (Exception) { FileVersion = string.Empty; }
+        }
+        InstallVersion = XmlVersion.Length > 0 ? XmlVersion : Path.GetFileName(InstallDir.TrimEnd('\\', '/'));
+        int[] installed = ParseVersion(InstallVersion);
+        int[] verified = ParseVersion(VerifiedVersion);
+        NewerThanVerified = installed != null && verified != null && CompareVersions(installed, verified) > 0;
       ]]></Code>
     </Task>
   </UsingTask>
 
   <Target Name="ValidatePixInstallDir" BeforeTargets="PrepareForBuild" Condition="'$(PixMcpRequiresPix)' == 'true'">
     <FindPixPreviewInstall Condition="'$(PixInstallDir)' == ''"
-                           PreviewRoot="$(_PixProgramFiles)\Microsoft PIX Preview" MinimumDate="$(_PixPreviewMinDate)">
+                           PreviewRoot="$(_PixProgramFiles)\Microsoft PIX Preview" MinimumDate="$(PixPreviewMinDate)" PickNewest="$(PixMcpPickNewestPix)">
       <Output TaskParameter="InstallDir" PropertyName="_PixDiscoveredInstallDir" />
+      <Output TaskParameter="Candidates" PropertyName="_PixDiscoveredCandidates" />
+      <Output TaskParameter="Ambiguous" PropertyName="_PixDiscoveryAmbiguous" />
     </FindPixPreviewInstall>
+    <Error Condition="'$(PixInstallDir)' == '' And '$(_PixDiscoveryAmbiguous)' == 'true'"
+           Text="Multiple PIX Preview installations are eligible: $(_PixDiscoveredCandidates.Replace(';', ', ')). Set PIX_DIR or pass /p:PixInstallDir=&lt;path&gt; to choose one, or pass /p:PixMcpPickNewestPix=true to build against the newest." />
     <PropertyGroup>
       <PixInstallDir Condition="'$(PixInstallDir)' == ''">$(_PixDiscoveredInstallDir)</PixInstallDir>
       <PixApiBinDir>$(PixInstallDir)</PixApiBinDir>
     </PropertyGroup>
     <Error Condition="'$(PixInstallDir)' == ''"
-           Text="No usable PIX installation found. Install a PIX Preview build newer than $(_PixPreviewMinDate) (under %ProgramFiles%\Microsoft PIX Preview\&lt;version&gt;\), or set PIX_DIR / pass /p:PixInstallDir=&lt;path&gt;." />
+           Text="No usable PIX installation found. Install a PIX Preview build newer than $(PixPreviewMinDate) (under %ProgramFiles%\Microsoft PIX Preview\&lt;version&gt;\), or set PIX_DIR / pass /p:PixInstallDir=&lt;path&gt;." />
     <Error Condition="!Exists('$(PixInstallDir)\PixApiCsExt.experimental.dll')"
            Text="PIX installation at '$(PixInstallDir)' does not contain PixApiCsExt.experimental.dll." />
+
+    <ReadPixInstallVersion InstallDir="$(PixInstallDir)" VerifiedVersion="$(PixVerifiedVersion)">
+      <Output TaskParameter="XmlVersion" PropertyName="PixInstallXmlVersion" />
+      <Output TaskParameter="Build" PropertyName="PixInstallBuild" />
+      <Output TaskParameter="Commit" PropertyName="PixInstallCommit" />
+      <Output TaskParameter="FileVersion" PropertyName="PixInstallFileVersion" />
+      <Output TaskParameter="InstallVersion" PropertyName="PixInstallVersion" />
+      <Output TaskParameter="NewerThanVerified" PropertyName="_PixInstallNewerThanVerified" />
+    </ReadPixInstallVersion>
+    <Error Condition="'$(_PixInstallNewerThanVerified)' == 'true' And '$(PixMcpAllowUnverifiedPix)' != 'true'"
+           Text="PIX $(PixInstallVersion) at '$(PixInstallDir)' is newer than the verified $(PixVerifiedVersion). Pass /p:PixMcpAllowUnverifiedPix=true to build against it anyway, then update PixVerifiedVersion in Directory.Build.props once the tests pass." />
 
     <!-- References were evaluated before automatic discovery. Refresh their metadata before
          PrepareForBuild, which ResolveAssemblyReferences also depends on. -->
@@ -96,6 +203,12 @@
         <HintPath>$(PixApiBinDir)\PixApiCsExt.experimental.dll</HintPath>
         <Private>false</Private>
       </Reference>
+      <AssemblyMetadata Include="PixPreviewMinDate" Value="$(PixPreviewMinDate)" />
+      <AssemblyMetadata Include="PixVerifiedVersion" Value="$(PixVerifiedVersion)" />
+      <AssemblyMetadata Include="PixBuiltAgainstXmlVersion" Value="$(PixInstallXmlVersion)" />
+      <AssemblyMetadata Include="PixBuiltAgainstBuild" Value="$(PixInstallBuild)" />
+      <AssemblyMetadata Include="PixBuiltAgainstCommit" Value="$(PixInstallCommit)" />
+      <AssemblyMetadata Include="PixBuiltAgainstFileVersion" Value="$(PixInstallFileVersion)" />
     </ItemGroup>
   </Target>
 </Project>

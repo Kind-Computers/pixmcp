@@ -13,7 +13,7 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class DrPixTools
 {
-    [McpServerTool(Name = "pix_gpu_drpix_experiments", ReadOnly = true), Description("Lists the Dr. PIX experiments available for this capture (guid, name, category, help text, source); pass names or guids to pix_gpu_drpix_run. Needs GPU analysis: started automatically as a job (see waitSeconds).")]
+    [McpServerTool(Name = "pix_gpu_drpix_experiments", Title = "List Dr. PIX experiments", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Lists the Dr. PIX experiments available for this capture (guid, name, category, help text, source); pass names or guids to pix_gpu_drpix_run. Needs GPU analysis: started automatically as a job (see waitSeconds).")]
     public static Task<string> Experiments(
         PixSession session,
         JobManager jobs,
@@ -23,7 +23,7 @@ public static class DrPixTools
         => Tools.RunWhenReady(session, jobs, "pix_gpu_drpix_experiments", handle, GpuCaptureHandle.AnalysisPreparation(handle), h =>
         {
             List<ExperimentInfo> experiments = LoadExperiments(h, null);
-            return experiments.Select(e => new { guid = e.Guid, name = e.Name, category = e.Category, helpText = e.HelpText, source = e.Source }).ToArray();
+            return SessionTools.Envelope(experiments.Select(e => new { guid = e.Guid, name = e.Name, category = e.Category, helpText = e.HelpText, source = e.Source }).ToArray());
         }, waitSeconds, cancellationToken);
 
     private static unsafe List<ExperimentInfo> LoadExperiments(GpuCaptureHandle h, Job? job)
@@ -46,22 +46,29 @@ public static class DrPixTools
         return list;
     }
 
-    [McpServerTool(Name = "pix_gpu_drpix_run"), Description("Runs Dr. PIX experiments (all by default) over a GPU event range and returns their metrics and messages. This replays the capture repeatedly and can take minutes; returns a job. Result gpuIds can be mapped back to events with pix_gpu_events(gpuIdMin, gpuIdMax).")]
+    [McpServerTool(Name = "pix_gpu_drpix_run", Title = "Run Dr. PIX experiments", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Runs Dr. PIX experiments (all by default) over the GPU events of a scope and returns their metrics and messages. This replays the capture once per experiment and can take minutes; returns a job. Pass scope (an event and its descendants), markerPathPrefix, or wholeCapture=true; there is no whole-capture default. The result carries the resolved range as event references.")]
     public static async Task<string> Run(
         PixSession session,
         JobManager jobs,
         [Description("GPU capture handle")] string handle,
         [Description("Experiment guids or (case-insensitive) names to run; omit for all.")] string[]? experiments = null,
-        [Description("First GPU event id of the range (default: first GPU event in the capture).")] uint? firstEventGpuId = null,
-        [Description("Last GPU event id of the range (default: last GPU event in the capture).")] uint? lastEventGpuId = null,
+        [Description(EventScope.Description)] EventRef? scope = null,
+        [Description(EventScope.PrefixDescription)] string? markerPathPrefix = null,
+        [Description("Queue the prefix refers to when it matches markers on several queues.")] int? queueIndex = null,
+        [Description("Run over every GPU event of the capture (default false); replays everything for each experiment.")] bool wholeCapture = false,
         [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
         CancellationToken cancellationToken = default)
     {
         try
         {
+            if (wholeCapture == (scope is not null || markerPathPrefix is not null))
+                throw new PixToolException(PixErrors.Codes.InvalidArguments,
+                    "Dr. PIX replays the capture once per experiment per range: pass scope or markerPathPrefix, or wholeCapture=true.",
+                    nextCalls: [new("pix_gpu_overview", new { handle })]);
+            ScopeSelection selection = EventScope.Resolve(session, handle, queueIndex, scope, markerPathPrefix);
             string[]? requestedExperiments = experiments?.ToArray();
             Job job = jobs.StartForHandle<GpuCaptureHandle>("drpix", $"Run Dr. PIX experiments on {handle}", handle,
-                (j, h) => RunCore(h, j, requestedExperiments, firstEventGpuId, lastEventGpuId));
+                (j, h) => RunCore(h, j, requestedExperiments, wholeCapture ? null : selection));
             return Json.Serialize(await jobs.WaitOrStatus(job, waitSeconds, cancellationToken).ConfigureAwait(false));
         }
         catch (Exception ex)
@@ -70,12 +77,12 @@ public static class DrPixTools
         }
     }
 
-    private static object RunCore(GpuCaptureHandle h, Job job, string[]? requested, uint? firstGpuId, uint? lastGpuId)
+    private static object RunCore(GpuCaptureHandle h, Job job, string[]? requested, ScopeSelection? selection)
     {
         List<ExperimentInfo> all = LoadExperiments(h, job);
         if (all.Count == 0)
         {
-            throw new McpException("No Dr. PIX experiments are available for this capture.");
+            throw PixErrors.UnsupportedFeature("No Dr. PIX experiments are available for this capture.");
         }
 
         List<ExperimentInfo> selected;
@@ -88,7 +95,8 @@ public static class DrPixTools
                                                              || e.Name.Equals(r, StringComparison.OrdinalIgnoreCase));
                 if (match is null)
                 {
-                    throw new McpException($"Unknown experiment '{r}'. Available: {string.Join(", ", all.Select(e => e.Name))}.");
+                    throw PixErrors.InvalidReference($"Unknown experiment '{r}'. Available: {string.Join(", ", all.Select(e => e.Name))}.",
+                        new ToolCallDto("pix_gpu_drpix_experiments", new { handle = h.Id }, CostHints.Cached));
                 }
                 selected.Add(match);
             }
@@ -98,8 +106,9 @@ public static class DrPixTools
             selected = all;
         }
 
-        (PIX_EVENT_INFO first, PIX_EVENT_INFO last) = EventRange(h, firstGpuId, lastGpuId);
-        job.AddMessage($"Running {selected.Count} experiment(s) over GPU events {first.GpuId}..{last.GpuId}.");
+        EventRange range = selection is null ? EventScope.WholeCapture(h) : EventScope.ToEventRange(h, selection);
+        PIX_EVENT_INFO first = range.First, last = range.Last;
+        job.AddMessage($"Running {selected.Count} experiment(s) over GPU events {first.GpuId}..{last.GpuId} ({range.Range.WorkEvents} GPU event(s)).");
 
         var runParams = new PIX_EXPERIMENT_RUN_PARAMS[selected.Count];
         for (int i = 0; i < selected.Count; i++)
@@ -161,55 +170,17 @@ public static class DrPixTools
                 guid = p.ExperimentGuid,
                 status = PixErrors.Hex(status),
                 succeeded = status >= 0,
-                firstEventGpuId = p.FirstEvent.GpuId,
-                lastEventGpuId = p.LastEvent.GpuId,
+                firstGpuId = p.FirstEvent.GpuId,
+                lastGpuId = p.LastEvent.GpuId,
                 metrics,
                 messages,
             });
         }
 
-        return new { handle = h.Id, experimentsRun = selected.Count, results = dtos };
-    }
-
-    private static (PIX_EVENT_INFO first, PIX_EVENT_INFO last) EventRange(GpuCaptureHandle h, uint? firstGpuId, uint? lastGpuId)
-    {
-        PIX_EVENT_INFO? first = null;
-        PIX_EVENT_INFO? last = null;
-        foreach (QueueEntry queue in h.Queues)
+        return new
         {
-            for (uint i = 0; i < queue.EventCount; i++)
-            {
-                PIX_EVENT_INFO e = Microsoft.PIX.Extension.GpuCapture.PixApiExtensionsGpuCapture.GetEvent(queue.Info, i);
-                if (e.GpuId == uint.MaxValue)
-                {
-                    continue;
-                }
-                if (firstGpuId.HasValue)
-                {
-                    if (e.GpuId == firstGpuId.Value) first = e;
-                }
-                else if (first is null || e.GpuId < first.Value.GpuId)
-                {
-                    first = e;
-                }
-                if (lastGpuId.HasValue)
-                {
-                    if (e.GpuId == lastGpuId.Value) last = e;
-                }
-                else if (last is null || e.GpuId > last.Value.GpuId)
-                {
-                    last = e;
-                }
-            }
-        }
-        if (first is null)
-        {
-            throw new McpException(firstGpuId.HasValue ? $"No event with gpuId {firstGpuId} found." : "The capture contains no GPU events.");
-        }
-        if (last is null)
-        {
-            throw new McpException(lastGpuId.HasValue ? $"No event with gpuId {lastGpuId} found." : "The capture contains no GPU events.");
-        }
-        return (first.Value, last.Value);
+            handle = h.Id, experimentsRun = selected.Count, range = range.ToDto(h.Id),
+            scope = selection?.DescribeOrNull(h), wholeCapture = selection is null, results = dtos,
+        };
     }
 }

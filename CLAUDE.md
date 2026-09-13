@@ -1,6 +1,8 @@
 # pixmcp
 
-C# / .NET 10 MCP server over the PIX on Windows API (PIX Preview >= 2606.18). See README.md.
+C# / .NET 10 MCP server over the PIX on Windows API (PIX Preview newer than 2606.15, verified on
+2606.18-preview; both strings live only in `Directory.Build.props`, `scripts/check_versions.py`
+enforces it). See README.md.
 
 - Build: `dotnet build pixmcp.sln -c Release`; tests: `dotnet test pixmcp.sln -c Release`.
 - The PIX managed assembly `PixApiCsExt.experimental.dll` is referenced with `Private=false` and
@@ -17,13 +19,16 @@ C# / .NET 10 MCP server over the PIX on Windows API (PIX Preview >= 2606.18). Se
   `Preparation<T>` (`GpuCaptureHandle.AnalysisPreparation`, `CountersTools.TimingPreparation`,
   `CountersTools.CounterSetPreparation`); it runs the preparation as a job and returns a
   `PendingDto` when the wait elapses. Job-starting tools register their job with
-  `Tools.RegisterPreparation` so queries join it. Add new tool names to
+  `Tools.StartPreparation` (find-or-start under the handle's preparation gate) so queries join it. Add new tool names to
   `StructuredToolResults.SchemaFor`.
 - Navigation uses `EventRef`, `ResourceRef`, and `ShaderRef`; reuse returned references in
   follow-up calls. Keep IDs that can exceed JavaScript precision as strings. Pages default to
   25 rows. Preserve full managed data before response caps: `ResultStore` makes nested
   objects, arrays, and strings retrievable through `pix_result_read`. Job status carries
   `resultRef`, never an embedded result. Every truncation needs an exact continuation.
+- Environment variables are read only through `ServerOptions` (`src/PixMcp/Pix/ServerOptions.cs`),
+  parsed once before protocol output; consumers read `ServerOptions.Current` (tests scope
+  `ServerOptions.Override`). `PIX_DIR` and the PIX discovery variables stay in `PixDiscovery`.
 - Result retention uses bounded serialized memory and temporary disk. Preserve owner
   identity, acquire leases for streaming reads/exports, and never retain a second raw
   job result. `pix_result_export` writes JSON atomically to an existing directory.

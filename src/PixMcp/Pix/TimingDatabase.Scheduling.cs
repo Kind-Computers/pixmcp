@@ -7,7 +7,7 @@ internal sealed partial class TimingDatabase
     {
         ValidatePage(offset, limit);
         if (submissionRef is not null && (processId.HasValue || threadId.HasValue || queueId is not null || start.HasValue || end.HasValue))
-            throw new PixToolException("invalid_arguments", "Use submissionRef alone, or omit it to select process/thread/queue/time filters.");
+            throw new PixToolException(PixErrors.Codes.InvalidArguments, "Use submissionRef alone, or omit it to select process/thread/queue/time filters.");
         long? id = submissionRef is null ? null : TimingSubmissionReferences.Parse(submissionRef, handle, generation);
         long? queue = queueId is null ? null : ParseId(queueId, nameof(queueId));
         var (a, b, provenance) = Range(start, end);
@@ -26,7 +26,7 @@ internal sealed partial class TimingDatabase
         (string, object?)[] parameters = [("$id", id), ("$start", a), ("$end", b), ("$pid", processId), ("$tid", threadId), ("$queue", queue)];
         long total = Count(from, where, parameters);
         if (id.HasValue && total == 0)
-            throw new PixToolException("invalid_reference", "The referenced queue submission is absent from this timing capture.");
+            throw new PixToolException(PixErrors.Codes.InvalidReference, "The referenced queue submission is absent from this timing capture.");
         var rows = Rows("SELECT e.Id,e.ApiCommandQueueId,qn.Value,e.ThreadId,p.ProcessId,t.ProcThreadId,tn.Value," +
             "e.SubmitTimestamp,e.BeginTimestamp,e.EndTimestamp,qp.ProcessId," +
             (threadLifetimes ? "t.StartTimestamp,t.EndTimestamp" : "NULL,NULL") + " FROM " + from + where +
@@ -88,11 +88,11 @@ internal sealed partial class TimingDatabase
             "FROM Threads t JOIN Processes p ON p.Id=t.ProcessRowId LEFT JOIN Strings s ON s.Id=t.ThreadNameId WHERE t.Id=$thread", r =>
             (packed: r.GetInt64(0), pid: checked((uint)r.GetInt64(1)), name: Text(r, 2), samples: Number(r, 3),
                 begin: r.IsDBNull(4) ? (long?)null : r.GetInt64(4), end: r.IsDBNull(5) ? (long?)null : r.GetInt64(5)), ("$thread", thread));
-        if (selected.Count == 0) throw new PixToolException("invalid_reference", "threadRowId is absent from this timing capture.");
+        if (selected.Count == 0) throw new PixToolException(PixErrors.Codes.InvalidReference, "threadRowId is absent from this timing capture.");
         var lane = selected[0];
         if (!lane.begin.HasValue || lane.begin < 0 || lane.end.HasValue && lane.end <= lane.begin ||
             unchecked((uint)((ulong)lane.packed >> 32)) != lane.pid)
-            throw new PixToolException("timing_thread_lifetime_unavailable", "The recorded thread identity/lifetime is inconsistent; scheduling events cannot be attributed safely.");
+            throw new PixToolException(PixErrors.Codes.TimingThreadLifetimeUnavailable, "The recorded thread identity/lifetime is inconsistent; scheduling events cannot be attributed safely.");
         long effectiveStart = Math.Max(a, lane.begin.Value), effectiveEnd = lane.end.HasValue ? Math.Min(b, lane.end.Value) : b;
         var info = new TimingThreadDto(threadRowId, lane.pid, unchecked((uint)lane.packed), lane.name, lane.samples);
         bool stacks = Has("Stacks", "Id", "NumFrames", "Addresses") &&

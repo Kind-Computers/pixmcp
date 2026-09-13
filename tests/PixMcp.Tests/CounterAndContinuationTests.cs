@@ -37,8 +37,8 @@ public class CounterAndContinuationTests
     public void CanonicalCounterIdsIgnoreOrderAndDuplicates()
     {
         Assert.Equal(new uint[] { 2, 4, 9 }, CountersTools.NormalizeCounterIds([9, 2, 4, 2]));
-        Assert.Throws<McpException>(() => CountersTools.NormalizeCounterIds(null));
-        Assert.Throws<McpException>(() => CountersTools.NormalizeCounterIds([]));
+        Assert.Throws<PixToolException>(() => CountersTools.NormalizeCounterIds(null));
+        Assert.Throws<PixToolException>(() => CountersTools.NormalizeCounterIds([]));
     }
 
     [Fact]
@@ -149,7 +149,7 @@ public class CounterAndContinuationTests
         Assert.Null(last.NextOffset);
         Assert.Empty(ResourceTools.BindingPage(70, 80, 32, Read).Items);
         Assert.Equal(1000, ResourceTools.BindingPage(10000, 0, 10000, Read).Items.Count);
-        Assert.Throws<McpException>(() => ResourceTools.ValidateViewIndex(3, 3));
+        Assert.Throws<PixToolException>(() => ResourceTools.ValidateViewIndex(3, 3));
         ResourceTools.ValidateViewIndex(null, 0);
     }
 }

@@ -25,7 +25,8 @@ public sealed class ResultStorageTests
     public void PressureEvictsTransientBeforeAnOlderFinishedJobAndThenWholeJobGroups()
     {
         using var directory = new Temp();
-        using var store = new ResultStore(0, 200, directory.Path);
+        var time = new FakeTime();
+        using var store = new ResultStore(0, 200, directory.Path, time);
         string first = store.Store(new string('j', 40), jobId: "job-1");
         string second = store.Store(new string('k', 40), jobId: "job-1");
         store.MarkJobFinished("job-1");
@@ -35,6 +36,10 @@ public sealed class ResultStorageTests
         string replacement = store.Store(new string('r', 90));
         Assert.False(store.IsAvailable(transient));
         Assert.True(store.IsAvailable(first)); Assert.True(store.IsAvailable(second)); Assert.Empty(evicted);
+        // Inside the eviction grace the finished job is protected and the newcomer fails instead.
+        Assert.Equal("result_capacity_exceeded", Assert.Throws<PixToolException>(() => store.Store(new string('z', 130))).Detail.Code);
+        Assert.True(store.IsAvailable(first)); Assert.Empty(evicted);
+        time.Advance(TimeSpan.FromSeconds(ResultStore.EvictionGraceSeconds));
         store.Store(new string('z', 130));
         Assert.False(store.IsAvailable(replacement));
         Assert.False(store.IsAvailable(first)); Assert.False(store.IsAvailable(second));
@@ -46,10 +51,11 @@ public sealed class ResultStorageTests
     [Fact]
     public void FinishedJobPressureUsesCompletionOrder()
     {
-        using var directory = new Temp(); using var store = new ResultStore(0, 130, directory.Path);
+        using var directory = new Temp(); var time = new FakeTime(); using var store = new ResultStore(0, 130, directory.Path, time);
         string older = store.Store(new string('a', 60), jobId: "older");
         string newer = store.Store(new string('b', 60), jobId: "newer");
         store.MarkJobFinished("newer"); store.MarkJobFinished("older");
+        time.Advance(TimeSpan.FromSeconds(ResultStore.EvictionGraceSeconds + 1));
         store.Store(new string('c', 20));
         Assert.True(store.IsAvailable(older)); Assert.False(store.IsAvailable(newer));
     }
@@ -145,7 +151,8 @@ public sealed class ResultStorageTests
         string reference = store.Store(new[] { new string('x', 10000) });
         PixToolException error = Assert.Throws<PixToolException>(() => store.EnumerateArray(reference, "", 100).ToArray());
         Assert.Equal("result_too_large", error.Detail.Code);
-        Assert.Contains("/0", Json.Serialize(Assert.Single(error.Detail.NextCalls)));
+        Assert.Equal(2, error.Detail.NextCalls.Count); // the outline of the row, then its values
+        Assert.All(error.Detail.NextCalls, call => Assert.Contains("/0", Json.Serialize(call)));
         Assert.Equal(0, store.Summary().ActiveLeases);
     }
 
@@ -199,6 +206,13 @@ public sealed class ResultStorageTests
             Assert.Equal(i, store.ReadElement(reference).GetProperty("i").GetInt32());
         });
         Assert.Empty(Directory.EnumerateDirectories(System.IO.Path.Combine(directory.Path, "pixmcp-results")));
+    }
+
+    private sealed class FakeTime : TimeProvider
+    {
+        private DateTimeOffset _now = new(2026, 9, 12, 12, 0, 0, TimeSpan.Zero);
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan by) => _now += by;
     }
 
     private sealed class Temp : IDisposable

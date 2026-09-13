@@ -11,7 +11,8 @@ public sealed partial class GpuCaptureHandle
 
     internal static Preparation<GpuCaptureHandle> AccessedResourcesPreparation(string handle)
         => new("accessed-resources", "accessed-resources", $"Gather accessed resources for {handle}",
-            h => h.AccessedResourcesGathered, (h, job) => h.EnsureAccessedResources(job));
+            h => h.AccessedResourcesGathered, (h, job) => h.EnsureAccessedResources(job))
+        { JoinKeys = [PreparationKeys.InspectionBindings, PreparationKeys.InspectionTimingBindings] };
 
     internal static Preparation<GpuCaptureHandle> ResourceUsesPreparation(string handle, string apiObjectId, EventRef? scope = null)
         => new("resource-uses:" + apiObjectId + (scope is null ? "" : $":scope:{scope.QueueIndex}:{scope.EventIndex}"),

@@ -12,7 +12,7 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class ShaderDiagnosticsTools
 {
-    [McpServerTool(Name = "pix_gpu_shader_diagnostics", ReadOnly = true), Description("Checks one shader's recorded PDB hash and HLSL/IL/ISA source-node availability without retrieving code text or scanning other shaders. Reports absent metadata separately from native query failures. A PDB hash identifies symbols; it does not prove PIX resolved a matching PDB. Does not configure symbol paths or load PDB files. Requires GPU analysis, prepared as a shared job.")]
+    [McpServerTool(Name = "pix_gpu_shader_diagnostics", Title = "Shader diagnostics", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Checks one shader's recorded PDB hash and HLSL/IL/ISA source-node availability without retrieving code text or scanning other shaders. Reports absent metadata separately from native query failures. A PDB hash identifies symbols; it does not prove PIX resolved a matching PDB. Does not configure symbol paths or load PDB files. Requires GPU analysis, prepared as a shared job.")]
     public static Task<string> Diagnostics(PixSession session, JobManager jobs,
         [Description("Shader reference returned by pipeline inspection or shader inventory.")] ShaderRef shaderRef,
         [Description("Nonempty subset of HLSL, IL, ISA; omitted checks all three. Duplicate kinds are checked once.")] ShaderCodeKind[]? codeTypes = null,
@@ -34,7 +34,7 @@ public static class ShaderDiagnosticsTools
     {
         if (codeTypes is null) return [ShaderCodeKind.HLSL, ShaderCodeKind.IL, ShaderCodeKind.ISA];
         if (codeTypes.Length == 0 || codeTypes.Any(kind => !Enum.IsDefined(kind)))
-            throw new PixToolException("invalid_arguments", "codeTypes must be a nonempty subset of HLSL, IL, ISA.");
+            throw new PixToolException(PixErrors.Codes.InvalidArguments, "codeTypes must be a nonempty subset of HLSL, IL, ISA.");
         return codeTypes.Distinct().ToArray();
     }
 

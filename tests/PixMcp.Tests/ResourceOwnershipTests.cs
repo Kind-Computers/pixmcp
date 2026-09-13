@@ -31,7 +31,7 @@ public sealed class ResourceOwnershipTests
         await blocker;
 
         using JsonDocument result = JsonDocument.Parse(json);
-        JsonElement summary = individual ? result.RootElement : Assert.Single(result.RootElement.EnumerateArray());
+        JsonElement summary = individual ? result.RootElement : Assert.Single(result.RootElement.GetProperty("items").EnumerateArray());
         Assert.Equal(handle.Id, summary.GetProperty("handle").GetString());
         Assert.False(handle.SummarizedOnWorker);
         Assert.Contains(handle.Id, tool);

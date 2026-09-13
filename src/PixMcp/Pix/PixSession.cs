@@ -20,17 +20,21 @@ public sealed class PixSession : IDisposable
     private readonly Dictionary<string, int> _counters = new();
     private IPixFactoryExperimental? _factory;
 
-    public PixSession(PixWorker worker, ILogger<PixSession> logger)
+    public PixSession(PixWorker worker, ILogger<PixSession> logger, ResultStore? results = null)
     {
         _worker = worker;
         _logger = logger;
+        Results = results ?? new();
         Log = new PixLog(logger);
     }
 
     public PixWorker Worker => _worker;
-    public ResultStore Results { get; } = new();
+    public ResultStore Results { get; }
     public PixLog Log { get; }
     public bool FactoryCreated => _factory is not null;
+    /// <summary>Whether IPixFactory.SetLogger succeeded (null until the factory exists); pix_info reports it with loggerError.</summary>
+    public bool? LoggerAttached { get; private set; }
+    public string? LoggerError { get; private set; }
 
     /// <summary>The PIX factory; created lazily on the worker thread on first use.</summary>
     public IPixFactoryExperimental Factory
@@ -41,8 +45,13 @@ public sealed class PixSession : IDisposable
             {
                 EnsurePixAvailable();
                 _factory = PixApiExtensions.PixCreateFactory<IPixFactoryExperimental>();
-                try { _factory.SetLogger(Log); }
-                catch (Exception ex) { _logger.LogWarning(ex, "SetLogger failed; PIX engine log messages will not be captured."); }
+                try { _factory.SetLogger(Log); LoggerAttached = true; LoggerError = null; }
+                catch (Exception ex)
+                {
+                    LoggerAttached = false;
+                    LoggerError = PixErrors.Describe(ex);
+                    _logger.LogWarning(ex, "SetLogger failed; PIX engine log messages will not be captured.");
+                }
                 _logger.LogInformation("PIX factory created from {Dir}", PixDiscovery.InstallDir);
             }
             return _factory;
@@ -53,7 +62,7 @@ public sealed class PixSession : IDisposable
     {
         if (PixDiscovery.InstallDir is null)
         {
-            throw new McpException("The PIX API is not available: " + (PixDiscovery.Error ?? "no PIX Preview install found") +
+            throw PixErrors.PixUnavailable("The PIX API is not available: " + (PixDiscovery.Error ?? "no PIX Preview install found") +
                                    $" Set the PIX_DIR environment variable to {PixDiscovery.Requirement}.");
         }
     }
@@ -81,21 +90,20 @@ public sealed class PixSession : IDisposable
     {
         if (string.IsNullOrWhiteSpace(handleId))
         {
-            throw new McpException("A handle id is required (e.g. the value returned by pix_gpu_open).");
+            throw PixErrors.HandleRequired();
         }
         if (_handles.TryGetValue(handleId.Trim(), out PixHandle? handle))
         {
             return handle;
         }
-        string known = _handles.Count == 0 ? "none open" : string.Join(", ", _handles.Keys);
-        throw new McpException($"Unknown handle '{handleId}'. Open handles: {known}.");
+        throw PixErrors.UnknownHandle(handleId, _handles.Keys);
     }
 
     public T Get<T>(string handleId) where T : PixHandle
     {
         PixHandle handle = Get(handleId);
         return handle as T
-            ?? throw new McpException($"Handle '{handleId}' is a {handle.Kind} handle, but this tool needs a {PixHandle.KindOf<T>()} handle.");
+            ?? throw PixErrors.WrongHandleKind(handleId, handle.Kind, PixHandle.KindOf<T>());
     }
 
     /// <summary>Lookup that never throws; safe to call from any thread (the handle table is concurrent).</summary>
@@ -126,7 +134,7 @@ public sealed class PixSession : IDisposable
         var warnings = new List<string>();
         try { handle.Close(warnings); }
         catch (Exception ex) { warnings.Add(PixErrors.Describe(ex)); }
-        handle.PreparationJobs.Clear();
+        lock (handle.PreparationGate) handle.PreparationJobs.Clear();
         if (collect) Collect();
         _logger.LogInformation("Closed handle {Id}", handle.Id);
         return new { closed = handle.Id, kind = handle.Kind, warnings = warnings.Count == 0 ? null : warnings };

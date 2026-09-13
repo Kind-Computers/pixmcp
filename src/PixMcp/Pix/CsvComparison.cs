@@ -69,15 +69,15 @@ internal static class CsvComparison
 
     internal static string ValidatePath(string path)
     {
-        if (string.IsNullOrWhiteSpace(path)) throw new PixToolException("invalid_arguments", "CSV paths must not be empty.");
+        if (string.IsNullOrWhiteSpace(path)) throw new PixToolException(PixErrors.Codes.InvalidArguments, "CSV paths must not be empty.");
         try
         {
             string fullPath = Path.GetFullPath(path);
-            if (!File.Exists(fullPath)) throw new PixToolException("csv_file_not_found", $"CSV file does not exist: {fullPath}");
+            if (!File.Exists(fullPath)) throw new PixToolException(PixErrors.Codes.CsvFileNotFound, $"CSV file does not exist: {fullPath}");
             return fullPath;
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-        { throw new PixToolException("invalid_arguments", "Invalid CSV path: " + ex.Message); }
+        { throw new PixToolException(PixErrors.Codes.InvalidArguments, "Invalid CSV path: " + ex.Message); }
     }
 
     internal static ProcessStartInfo BuildStartInfo(string executable, string baseline, string candidate, string prefix, string stat)
@@ -102,10 +102,10 @@ internal static class CsvComparison
         cancellation.ThrowIfCancellationRequested();
         try
         {
-            if (!process.Start()) throw new PixToolException("pixdiff_start_failed", "Could not start pixdiff.");
+            if (!process.Start()) throw new PixToolException(PixErrors.Codes.PixdiffStartFailed, "Could not start pixdiff.");
         }
         catch (System.ComponentModel.Win32Exception ex)
-        { throw new PixToolException("pixdiff_start_failed", "Could not start pixdiff: " + ex.Message); }
+        { throw new PixToolException(PixErrors.Codes.PixdiffStartFailed, "Could not start pixdiff: " + ex.Message); }
 
         // Always drain both pipes. Oversized stdout is discarded after the cap, then rejected in full.
         Task<(byte[] Bytes, bool Truncated)> stdout = DrainOutput(process.StandardOutput.BaseStream, maxOutputBytes);
@@ -124,14 +124,14 @@ internal static class CsvComparison
             process.StandardError.Dispose();
             await ObservePipes(stdout, stderr).ConfigureAwait(false);
             if (cancellation.IsCancellationRequested) throw new OperationCanceledException(cancellation);
-            throw new PixToolException("pixdiff_timeout", "pixdiff exceeded the comparison timeout and was terminated.", true);
+            throw new PixToolException(PixErrors.Codes.PixdiffTimeout, "pixdiff exceeded the comparison timeout and was terminated.", true);
         }
         string messages = await stderr.ConfigureAwait(false);
         diagnostic(messages);
         if (process.ExitCode != 0)
-            throw new PixToolException("pixdiff_failed", $"pixdiff exited with code {process.ExitCode}; see bounded job diagnostics.");
+            throw new PixToolException(PixErrors.Codes.PixdiffFailed, $"pixdiff exited with code {process.ExitCode}; see bounded job diagnostics.");
         (byte[] bytes, bool truncated) = await stdout.ConfigureAwait(false);
-        if (truncated) throw new PixToolException("pixdiff_output_too_large", $"pixdiff JSON exceeds the {maxOutputBytes} byte limit; use a narrower prefix.");
+        if (truncated) throw new PixToolException(PixErrors.Codes.PixdiffOutputTooLarge, $"pixdiff JSON exceeds the {maxOutputBytes} byte limit; use a narrower prefix.");
         try { return new UTF8Encoding(false, true).GetString(bytes); }
         catch (DecoderFallbackException) { throw ProtocolError("pixdiff output is not UTF-8 JSON."); }
     }
@@ -208,7 +208,7 @@ internal static class CsvComparison
 
     internal static (string Prefix, CsvPassDto Pass) ReadPass(ResultStore store, string resultRef, string passName, CancellationToken cancellation)
     {
-        if (string.IsNullOrWhiteSpace(passName)) throw new PixToolException("invalid_arguments", "passName must be an exact CSV column name returned by pix_csv_compare.");
+        if (string.IsNullOrWhiteSpace(passName)) throw new PixToolException(PixErrors.Codes.InvalidArguments, "passName must be an exact CSV column name returned by pix_csv_compare.");
         using ResultStore.Lease lease = store.Acquire(resultRef);
         using Stream stream = lease.Open();
         var json = new StoredJson(stream, cancellation);
@@ -237,12 +237,12 @@ internal static class CsvComparison
                 try { pass = Property("/total").Deserialize<CsvPassDto>(Json.Options); }
                 catch (PixToolException ex) when (ex.Detail.Code == "invalid_pointer") { }
             }
-            if (pass is null) throw new PixToolException("csv_pass_not_found", $"'{passName}' is not present in this saved CSV comparison.");
+            if (pass is null) throw new PixToolException(PixErrors.Codes.CsvPassNotFound, $"'{passName}' is not present in this saved CSV comparison.");
             return (prefix, pass);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException
             || ex is PixToolException p && p.Detail.Code == "invalid_pointer")
-        { throw new PixToolException("invalid_arguments", "resultRef must identify a complete result returned by pix_csv_compare."); }
+        { throw new PixToolException(PixErrors.Codes.InvalidArguments, "resultRef must identify a complete result returned by pix_csv_compare."); }
     }
 
     private static PixToolException ProtocolError(string message) => new("pixdiff_invalid_output", message);

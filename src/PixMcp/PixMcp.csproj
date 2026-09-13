@@ -11,7 +11,7 @@
     <RootNamespace>PixMcp</RootNamespace>
     <AssemblyName>PixMcp</AssemblyName>
     <!-- Single source of truth for the version reported to MCP clients (ServerHost.Version). -->
-    <Version>1.0.0</Version>
+    <Version>2.0.0</Version>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <InvariantGlobalization>true</InvariantGlobalization>
     <PixMcpRequiresPix>true</PixMcpRequiresPix>
@@ -26,6 +26,11 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="PixMcp.Tests" />
+  </ItemGroup>
+
+  <!-- Vendor counter presets and the compatibility-notes registry ship inside the assembly. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\*.json" LogicalName="PixMcp.Resources.%(Filename)%(Extension)" />
   </ItemGroup>
 
   <!-- PixApiCsExt.experimental.dll is loaded in place from the PIX install (see Pix/PixDiscovery.cs);

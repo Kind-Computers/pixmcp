@@ -237,7 +237,7 @@ public sealed class TimingQueryTests
     [SkippableFact]
     public void NativeRecordedFixtureProvidesQueryableCountersAndSampleCoverage()
     {
-        string? capture = Environment.GetEnvironmentVariable("PIX_TEST_TIMING_CAPTURE");
+        string? capture = TestArtifacts.TimingCapture;
         if (capture is null)
         {
             string existing = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pixmcp_timing_test.wpix");
@@ -263,8 +263,8 @@ public sealed class TimingQueryTests
     [SkippableFact]
     public void NamedNativeFixtureResolvesExpectedFunctionLeafAndCpuEvents()
     {
-        string? capture = Environment.GetEnvironmentVariable("PIX_TEST_TIMING_CAPTURE");
-        Skip.If(capture is null || !File.Exists(capture) || PixDiscovery.InstallDir is null, "Set PIX_TEST_TIMING_CAPTURE to the generated named/PDB timing fixture.");
+        string? capture = TestArtifacts.TimingCapture;
+        Skip.If(capture is null || PixDiscovery.InstallDir is null, "Set PIX_TEST_TIMING_CAPTURE to the generated named/PDB timing fixture.");
         using var db = new TimingDatabase(capture!, System.IO.Path.Combine(PixDiscovery.InstallDir!, "pixstorage.dll"));
         TimingEventsDto events = db.Events("timing-native", "cpu", null, null, null, "Fixture CPU Work", null, null, "start", 0, 25);
         Assert.NotEmpty(events.Events.Items);
@@ -291,7 +291,7 @@ public sealed class TimingQueryTests
     [SkippableFact]
     public async Task NativeToolQueriesShareSnapshotsAndInvalidateProfilesAfterSave()
     {
-        string source = Environment.GetEnvironmentVariable("PIX_TEST_TIMING_CAPTURE")
+        string source = TestArtifacts.TimingCapture
             ?? System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pixmcp_timing_test.wpix");
         Skip.If(!File.Exists(source) || PixDiscovery.InstallDir is null, "Provide an existing timing capture.");
         DirectoryInfo directory = Directory.CreateTempSubdirectory("pixmcp-timing-lifecycle-");

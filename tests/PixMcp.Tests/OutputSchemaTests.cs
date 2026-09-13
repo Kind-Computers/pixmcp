@@ -38,12 +38,14 @@ public sealed class OutputSchemaTests
         Validate("pix_gpu_shader_code", new ShaderCodeDto(new(reference, 0),
             new(new(reference, 0), 0, "0x1", "PS", null, null, null, null, null, 12, "0x0", ["HLSL"]),
             "HLSL", new(0, 0, 0, null, [], null), null, 1, 0, 0, null, null));
-        Validate("pix_gpu_counters_collect", new PageResult<CounterValueRowDto>(1, 0, 1, null,
+        Validate("pix_gpu_counters_read", new PageResult<CounterValueRowDto>(1, 0, 1, null,
             [new(reference, 12, null, "Draw", ["Frame"], new Dictionary<string, object?> { ["3"] = 12UL })], null));
-        var leaf = new TimingBranchDto(reference, 12, "Draw", null, null, 100, 100, 100, false, 0, 0, [], false, []);
-        var branch = leaf with { Name = "Frame", Children = [leaf], ChildCount = 1, SelfEopNs = 0 };
-        Validate("pix_gpu_timing_tree", new TimingTreeDto("gpu-1", 0, 100, 1, 0, 1, [branch], null, false, 2, false,
-            new { source = "gpuReplay" }, []));
+        var totals = new QueueTotals(0, 100, 100, 0, 100, false, 1, 0, 0, 100, "eopOnly");
+        var leaf = new TimingBranchDto(reference, 12, "Draw", null, TimingSemantics.Measured, Metrics.Duration(100, totals, null, 1),
+            Metrics.Duration(100, totals), 100, 0, false, 0, 0, false, 0, 100, true, 0, 0, [], false, []);
+        var branch = leaf with { Name = "Frame", Semantics = TimingSemantics.DerivedSum, Children = [leaf], ChildCount = 1, Self = Metrics.Duration(0, totals) };
+        Validate("pix_gpu_timing_tree", new TimingTreeDto("gpu-1", 0, null, "inclusive", totals, Metrics.Denominators, 1, 0, 0, 0, 1, [branch],
+            null, false, 2, false, new { source = "gpuReplay" }, []));
         var job = new Job("job-1", "timing", "Collect timings").ToDto();
         Validate("pix_job_status", job);
         Validate("pix_gpu_pipeline_state", new PendingDto(true, "job-1", "pix_gpu_pipeline_state", "Waiting", job,

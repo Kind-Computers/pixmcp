@@ -10,5 +10,25 @@ if (PixDiscovery.InstallDir is null || !string.IsNullOrEmpty(PixDiscovery.Error)
     return 1;
 }
 
+// Build-versus-runtime PIX compatibility (version.xml and assembly file version against the
+// AssemblyMetadata recorded by Directory.Build.props). Exit code 2 keeps it apart from
+// discovery and option failures; PIXMCP_PIX_STRICT tunes it (see PixDiscovery.Classify).
+PixCompatibility compatibility = PixDiscovery.Compatibility;
+if (compatibility.Exit)
+{
+    Console.Error.WriteLine($"pixmcp: {compatibility.Message} (compatibility {compatibility.State}; set {PixDiscovery.StrictVariable}=0 to start anyway)");
+    return 2;
+}
+if (compatibility.State != "match")
+{
+    Console.Error.WriteLine($"pixmcp: warning: {compatibility.Message} (compatibility {compatibility.State})");
+}
+
+if (ServerOptions.Current.Problems is { Count: > 0 } problems)
+{
+    foreach (string problem in problems) Console.Error.WriteLine("pixmcp: " + problem);
+    return 1;
+}
+
 await ServerHost.RunAsync(args);
 return 0;

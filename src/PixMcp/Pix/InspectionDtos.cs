@@ -51,6 +51,7 @@ public sealed record ResourceUsesDto(ResourceRef ResourceRef, string Evidence, l
     int Count, int? NextOffset, IReadOnlyList<ResourceUseDto> Items, IReadOnlyList<object> Coverage)
 {
     public IReadOnlyList<ToolCallDto> NextCalls { get; init; } = [];
+    public ScopeDescriptionDto? Scope { get; init; }
 }
 
 public sealed record ShaderNodeDto(ulong Index, string? Id, string? Name);
@@ -72,9 +73,12 @@ public sealed record ShaderSearchDto(ShaderRef ShaderRef, string CodeType, strin
     public IReadOnlyList<ToolCallDto> NextCalls { get; init; } = [];
 }
 
+/// <summary>Sections are typed objects when ready and a <see cref="PendingSectionDto"/> while their preparation still runs.</summary>
 public sealed record EventInspectionDto(EventRef EventRef, IReadOnlyList<string> MarkerPath, EventDto Event,
-    object? Timing, PipelineStateDto? Pipeline, EventResourcesDto? Bindings,
+    object? Timing, object? Pipeline, object? Bindings,
     IReadOnlyList<object> Coverage)
 {
     public IReadOnlyList<ToolCallDto> NextCalls { get; init; } = [];
+    /// <summary>Set on a partial answer: the shared preparation job the replay-dependent sections wait for.</summary>
+    public PendingSectionDto? Preparation { get; init; }
 }

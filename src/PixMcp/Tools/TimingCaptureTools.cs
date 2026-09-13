@@ -12,7 +12,7 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class TimingCaptureTools
 {
-    [McpServerTool(Name = "pix_timing_open"), Description("Opens a PIX timing capture (.wpix) and returns a handle with the capture path and PixStorage path.")]
+    [McpServerTool(Name = "pix_timing_open", Title = "Open timing capture", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description("Opens a PIX timing capture (.wpix) and returns a handle with the capture path and PixStorage path.")]
     public static Task<string> Open(PixSession session, [Description("Path to the timing capture .wpix file.")] string path, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_timing_open", () =>
         {
@@ -21,7 +21,7 @@ public static class TimingCaptureTools
             return session.Register(new TimingCaptureHandle(full, document)).Summary();
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_timing_resolve_symbols"), Description("Resolves PDB symbols for a timing capture so CPU samples and callstacks show function names. Long-running; returns a job.")]
+    [McpServerTool(Name = "pix_timing_resolve_symbols", Title = "Resolve timing symbols", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Resolves PDB symbols for a timing capture so CPU samples and callstacks show function names. Long-running; returns a job.")]
     public static async Task<string> ResolveSymbols(
         PixSession session,
         JobManager jobs,
@@ -38,7 +38,7 @@ public static class TimingCaptureTools
         {
             if (string.IsNullOrWhiteSpace(pdbSearchPath))
             {
-                throw new McpException("pdbSearchPath is required.");
+                throw PixErrors.InvalidArguments("pdbSearchPath is required.");
             }
             Job job = jobs.StartForHandle<TimingCaptureHandle>("symbols", $"Resolve symbols for {handle}", handle, (j, h) =>
             {
@@ -63,11 +63,12 @@ public static class TimingCaptureTools
         }
     }
 
-    [McpServerTool(Name = "pix_timing_save"), Description("Saves the timing capture (e.g. after resolving symbols), optionally to a new path.")]
+    [McpServerTool(Name = "pix_timing_save", Title = "Save timing capture", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description("Saves the timing capture (e.g. after resolving symbols), optionally to a new path.")]
     public static Task<string> Save(
         PixSession session,
         [Description("Timing capture handle")] string handle,
-        [Description("New path to save as; omit to save in place.")] string? asPath = null,
+        [Description("New path to save as; omit to save in place. The parent directory must exist.")] string? asPath = null,
+        [Description("Replace an existing asPath file (default false: file_exists).")] bool overwrite = false,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_timing_save", () =>
         {
@@ -79,7 +80,7 @@ public static class TimingCaptureTools
                 h.RefreshCapturePath();
                 return new { saved = h.CapturePath };
             }
-            string full = Path.GetFullPath(asPath);
+            string full = Tools.PrepareOutputPath(asPath, overwrite, session.Results);
             _IPixTimingCaptureDocument_Extensions.SaveAs(h.Document, full);
             h.RefreshCapturePath();
             return new { saved = full };

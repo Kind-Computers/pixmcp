@@ -10,7 +10,7 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class ConverterTools
 {
-    [McpServerTool(Name = "pix_capture_format", ReadOnly = true), Description("Detects the on-disk format of a GPU capture file: NO_FILE, INVALID_OR_CORRUPT, PRE2026 (needs upgrade) or 2026 (current).")]
+    [McpServerTool(Name = "pix_capture_format", Title = "Inspect capture file format", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Detects the on-disk format of a GPU capture file: NO_FILE, INVALID_OR_CORRUPT, PRE2026 (needs upgrade) or 2026 (current).")]
     public static Task<string> Format(PixSession session, [Description("Path to a .wpix file.")] string path, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_capture_format", () =>
         {
@@ -26,21 +26,22 @@ public static class ConverterTools
             };
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_capture_upgrade"), Description("Upgrades an older (pre-2026) GPU capture file to the current format, writing a new file. Returns a job with progress.")]
+    [McpServerTool(Name = "pix_capture_upgrade", Title = "Upgrade capture file", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description("Upgrades an older (pre-2026) GPU capture file to the current format, writing a new file. Returns a job with progress.")]
     public static async Task<string> Upgrade(
         PixSession session,
         JobManager jobs,
         [Description("Path to the source .wpix file.")] string path,
         [Description("Output path (default: <name>_upgraded.wpix next to the source).")] string? outPath = null,
         [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
+        [Description("Replace an existing output file (default false: file_exists).")] bool overwrite = false,
         CancellationToken cancellationToken = default)
     {
         try
         {
             string full = Tools.RequireFile(path, "Capture file");
-            string target = string.IsNullOrWhiteSpace(outPath)
+            string target = Tools.PrepareOutputPath(string.IsNullOrWhiteSpace(outPath)
                 ? Path.Combine(Path.GetDirectoryName(full) ?? ".", Path.GetFileNameWithoutExtension(full) + "_upgraded" + Path.GetExtension(full))
-                : Path.GetFullPath(outPath);
+                : outPath, overwrite, session.Results);
             Job job = jobs.Start("upgrade", $"Upgrade {Path.GetFileName(full)}", j =>
             {
                 IPixCaptureFileConverter converter = session.Factory.CreatePixCaptureFileConverter<IPixCaptureFileConverter>();
@@ -51,7 +52,7 @@ public static class ConverterTools
                 }
                 if (source != PIX_GPU_CAPTURE_FILE_FORMAT.PIX_GPU_CAPTURE_FILE_FORMAT_PRE2026)
                 {
-                    throw new McpException($"Capture format {Json.EnumName(source)} cannot be upgraded.");
+                    throw PixErrors.UnsupportedFeature($"Capture format {Json.EnumName(source)} cannot be upgraded.");
                 }
                 j.ThrowIfCancellationRequested();
                 _IPixCaptureFileConverter_Extensions.UpgradeGpuCaptureFile(converter, full, target, j.Sink);

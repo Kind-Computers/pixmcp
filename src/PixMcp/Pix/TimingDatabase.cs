@@ -35,10 +35,10 @@ internal sealed partial class TimingDatabase : IDisposable
             if (configureForTests is null)
             {
                 if (string.IsNullOrWhiteSpace(extensionPath) || !File.Exists(extensionPath))
-                    throw new PixToolException("timing_sql_unavailable", "The timing document's PixStorage SQLite extension is missing. Check the PIX installation.",
+                    throw new PixToolException(PixErrors.Codes.TimingSqlUnavailable, "The timing document's PixStorage SQLite extension is missing. Check the PIX installation.",
                         nextCalls: [new("pix_info", new { })]);
                 try { _connection.LoadExtension(Path.GetFullPath(extensionPath), "sqlite3_batchexpand_init"); }
-                catch (SqliteException ex) { throw new PixToolException("timing_sql_unavailable", "Unable to load the document's PixStorage extension: " + ex.Message); }
+                catch (SqliteException ex) { throw new PixToolException(PixErrors.Codes.TimingSqlUnavailable, "Unable to load the document's PixStorage extension: " + ex.Message); }
             }
             else configureForTests(_connection);
             _connection.EnableExtensions(false);
@@ -63,7 +63,7 @@ internal sealed partial class TimingDatabase : IDisposable
     {
         _cancellation.ThrowIfCancellationRequested();
         if (_elapsed.Elapsed.TotalSeconds >= _timeoutSeconds)
-            throw new PixToolException("timing_query_timeout", $"The timing query exceeded its {_timeoutSeconds:g}-second execution budget. Select a narrower time or process range.", true);
+            throw new PixToolException(PixErrors.Codes.TimingQueryTimeout, $"The timing query exceeded its {_timeoutSeconds:g}-second execution budget. Select a narrower time or process range.", true);
     }
 
     internal T Guard<T>(Func<T> work)
@@ -72,12 +72,12 @@ internal sealed partial class TimingDatabase : IDisposable
         catch (SqliteException ex) when (ex.SqliteErrorCode == SQLitePCL.raw.SQLITE_INTERRUPT)
         {
             Check();
-            throw new PixToolException("timing_query_interrupted", "SQLite interrupted the timing query: " + ex.Message, true);
+            throw new PixToolException(PixErrors.Codes.TimingQueryInterrupted, "SQLite interrupted the timing query: " + ex.Message, true);
         }
         catch (SqliteException ex) when (ex.SqliteErrorCode is SQLitePCL.raw.SQLITE_BUSY or SQLitePCL.raw.SQLITE_LOCKED)
-        { throw new PixToolException("timing_capture_busy", "The timing capture is locked by another writer. Retry after it finishes.", true); }
+        { throw new PixToolException(PixErrors.Codes.TimingCaptureBusy, "The timing capture is locked by another writer. Retry after it finishes.", true); }
         catch (SqliteException ex) when (ex.SqliteErrorCode is SQLitePCL.raw.SQLITE_CORRUPT or SQLitePCL.raw.SQLITE_NOTADB)
-        { throw new PixToolException("timing_capture_invalid", "The timing capture is not a readable SQLite timing database: " + ex.Message); }
+        { throw new PixToolException(PixErrors.Codes.TimingCaptureInvalid, "The timing capture is not a readable SQLite timing database: " + ex.Message); }
     }
 
     private SqliteCommand Command(string sql, IEnumerable<(string name, object? value)>? parameters = null)
@@ -118,7 +118,7 @@ internal sealed partial class TimingDatabase : IDisposable
     private void Require(string table, params string[] columns)
     {
         if (!Has(table, columns))
-            throw new PixToolException("timing_schema_unsupported", $"This timing capture does not expose the required {table} columns ({string.Join(", ", columns)}). Other timing sections may still be available.");
+            throw new PixToolException(PixErrors.Codes.TimingSchemaUnsupported, $"This timing capture does not expose the required {table} columns ({string.Join(", ", columns)}). Other timing sections may still be available.");
     }
 
     private bool HasFunction(string name, int arguments)
@@ -130,12 +130,12 @@ internal sealed partial class TimingDatabase : IDisposable
     private static string? Text(SqliteDataReader r, int i) => r.IsDBNull(i) ? null : r.GetString(i);
     internal static long? ParseNs(string? value, string name)
         => value is null ? null : long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long parsed)
-            ? parsed : throw new PixToolException("invalid_arguments", $"{name} must be a nonnegative decimal nanosecond timestamp within Int64 range.");
+            ? parsed : throw new PixToolException(PixErrors.Codes.InvalidArguments, $"{name} must be a nonnegative decimal nanosecond timestamp within Int64 range.");
     internal static long ParseId(string value, string name)
-        => ParseNs(value, name) ?? throw new PixToolException("invalid_arguments", name + " is required.");
+        => ParseNs(value, name) ?? throw new PixToolException(PixErrors.Codes.InvalidArguments, name + " is required.");
     internal static void ValidatePage(int offset, int limit)
     {
-        if (offset < 0 || limit is < 1 or > 1000) throw new PixToolException("invalid_arguments", "offset must be nonnegative and limit must be between 1 and 1000.");
+        if (offset < 0 || limit is < 1 or > 1000) throw new PixToolException(PixErrors.Codes.InvalidArguments, "offset must be nonnegative and limit must be between 1 and 1000.");
     }
 
     internal (long start, long end, TimingRangeDto provenance) Range(long? start = null, long? end = null)
@@ -143,9 +143,9 @@ internal sealed partial class TimingDatabase : IDisposable
         Require("CaptureFacts", "Id", "Value");
         Dictionary<long, long> facts = Rows("SELECT Id,Value FROM CaptureFacts WHERE Id IN (2,24)", r => (r.GetInt64(0), r.GetInt64(1))).ToDictionary(x => x.Item1, x => x.Item2);
         if (!facts.TryGetValue(2, out long reliableStart) || !facts.TryGetValue(24, out long reliableEnd) || reliableEnd <= reliableStart)
-            throw new PixToolException("timing_range_unavailable", "The capture has no valid first-reliable/stop timestamp interval.");
+            throw new PixToolException(PixErrors.Codes.TimingRangeUnavailable, "The capture has no valid first-reliable/stop timestamp interval.");
         long a = start ?? reliableStart, b = end ?? reliableEnd;
-        if (a < 0 || b <= a) throw new PixToolException("invalid_arguments", "The selected time range requires 0 <= startNs < endNs.");
+        if (a < 0 || b <= a) throw new PixToolException(PixErrors.Codes.InvalidArguments, "The selected time range requires 0 <= startNs < endNs.");
         return (a, b, new(Ns(a), Ns(b), Ns(reliableStart), Ns(reliableEnd)));
     }
 

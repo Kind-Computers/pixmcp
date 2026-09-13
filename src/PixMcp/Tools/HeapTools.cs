@@ -12,7 +12,7 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class HeapTools
 {
-    [McpServerTool(Name = "pix_gpu_heap", ReadOnly = true), Description("Details of one D3D12 heap in a GPU capture: heap description (type, CPU page property, memory pool, size, alignment, flags) and the placed resources it hosts, paged. Identify the heap by the index or apiObjectId from pix_gpu_api_objects(type: HEAP), or by exact name. No GPU analysis needed. Placed resources of pix_gpu_resource report heapId; pass it here as apiObjectId.")]
+    [McpServerTool(Name = "pix_gpu_heap", Title = "Heap detail", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Details of one D3D12 heap in a GPU capture: heap description (type, CPU page property, memory pool, size, alignment, flags) and the placed resources it hosts, paged. Identify the heap by the index or apiObjectId from pix_gpu_api_objects(type: HEAP), or by exact name. No GPU analysis needed. Placed resources of pix_gpu_resource report heapId; pass it here as apiObjectId.")]
     public static Task<string> Heap(
         PixSession session,
         [Description("GPU capture handle")] string handle,
@@ -51,20 +51,20 @@ public static class HeapTools
         {
             if (index.Value >= count)
             {
-                throw new McpException($"API object index {index} is out of range; the capture has {count} API object(s).");
+                throw PixErrors.InvalidReference($"API object index {index} is out of range; the capture has {count} API object(s).");
             }
             PIX_API_OBJECT_TYPE type = PixApiExtensionsGpuCapture.GetApiObjectType(objects, index.Value);
             if (type != PIX_API_OBJECT_TYPE.PIX_API_OBJECT_TYPE_HEAP)
             {
-                throw new McpException($"API object {index} is a {Json.EnumName(type)}, not a heap. List heaps with pix_gpu_api_objects(type: \"HEAP\").");
+                throw PixErrors.InvalidReference($"API object {index} is a {Json.EnumName(type)}, not a heap. List heaps with pix_gpu_api_objects(type: \"HEAP\").");
             }
-            return (index.Value, PixApiExtensions.TryGet<IPixD3D12Heap>(objects, index.Value, out Exception ex) ?? throw new McpException($"Heap {index} could not be read: {PixErrors.Describe(ex)}"));
+            return (index.Value, PixApiExtensions.TryGet<IPixD3D12Heap>(objects, index.Value, out Exception ex) ?? throw PixErrors.PixFailure($"Heap {index} could not be read", ex));
         }
 
         ulong? wantedId = string.IsNullOrEmpty(apiObjectId) ? null : Tools.ParseId(apiObjectId, "apiObjectId");
         if (wantedId is null && string.IsNullOrEmpty(name))
         {
-            throw new McpException("Specify apiObjectId, index or name.");
+            throw PixErrors.InvalidArguments("Specify apiObjectId, index or name.");
         }
         for (ulong i = 0; i < count; i++)
         {
@@ -82,6 +82,6 @@ public static class HeapTools
                 return (i, heap);
             }
         }
-        throw new McpException(wantedId.HasValue ? $"No heap with apiObjectId {apiObjectId} was found." : $"No heap named '{name}' was found.");
+        throw PixErrors.InvalidReference(wantedId.HasValue ? $"No heap with apiObjectId {apiObjectId} was found." : $"No heap named '{name}' was found.");
     }
 }

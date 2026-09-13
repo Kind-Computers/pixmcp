@@ -2,7 +2,7 @@
  ["pix_gpu_open", {"path": "$env.PIX_TEST_CAPTURE"}],
  ["pix_gpu_export_cpp", {"handle": "$pix_gpu_open.handle", "outputDirectory": "$env.PIX_TEST_CPP_OUTPUT", "waitSeconds": 600}, {"status": "succeeded"}],
  ["pix_result_read", {"resultRef": "$pix_gpu_export_cpp.resultRef"}, {"value.outputDirectory": "$env.PIX_TEST_CPP_OUTPUT", "value.backend": "pixtool", "value.options.useWinPixEventRuntime": false, "value.options.useAgilitySdk": false, "value.options.useReplayTimeExecuteIndirectBuffers": false}],
- ["pix_gpu_events", {"handle": "$pix_gpu_open.handle", "kind": "drawOrDispatch", "limit": 1}],
+ ["pix_gpu_events", {"handle": "$pix_gpu_open.handle", "kind": "work", "limit": 1}],
  ["pix_gpu_pipeline_state", {"eventRef": "$pix_gpu_events.items.0.eventRef", "waitSeconds": 120}],
  ["pix_gpu_shader_diagnostics", {"shaderRef": "$pix_gpu_pipeline_state.shaders.0.shaderRef", "waitSeconds": 120}, {"codeAvailability.0.codeType": "HLSL", "codeAvailability.1.codeType": "IL", "codeAvailability.2.codeType": "ISA"}],
  ["pix_gpu_analysis_stop", {"handle": "$pix_gpu_open.handle"}],

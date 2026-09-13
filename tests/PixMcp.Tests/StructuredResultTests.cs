@@ -7,6 +7,32 @@ namespace PixMcp.Tests;
 
 public class StructuredResultTests
 {
+    [Fact]
+    public void InlineBudgetComesFromServerOptionsAndDeferredResultsOfferOutlineFirst()
+    {
+        using var worker = new PixWorker();
+        using var session = new PixSession(worker, Microsoft.Extensions.Logging.Abstractions.NullLogger<PixSession>.Instance);
+        string json = Json.Serialize(new { handle = "gpu-1", text = new string('x', 10000) });
+        using (ServerOptions.Override(ServerOptions.With(inlineResultBytes: 4096)))
+        {
+            var result = new CallToolResult { Content = [new TextContentBlock { Text = json }] };
+            StructuredToolResults.AddStructuredContent(result);
+            StructuredToolResults.BoundResult(result, session, ["gpu-1"]);
+            JsonElement deferred = result.StructuredContent!.Value;
+            Assert.True(deferred.GetProperty("deferred").GetBoolean());
+            Assert.Equal("outline", deferred.GetProperty("nextCalls")[0].GetProperty("arguments").GetProperty("mode").GetString());
+            Assert.False(deferred.GetProperty("nextCalls")[1].GetProperty("arguments").TryGetProperty("mode", out _));
+            Assert.Matches("^r-[0-9a-z]{10}$", deferred.GetProperty("resultRef").GetString());
+        }
+        using (ServerOptions.Override(ServerOptions.With(inlineResultBytes: 200000)))
+        {
+            var result = new CallToolResult { Content = [new TextContentBlock { Text = json }] };
+            StructuredToolResults.AddStructuredContent(result);
+            StructuredToolResults.BoundResult(result, session, ["gpu-1"]);
+            Assert.False(result.StructuredContent!.Value.TryGetProperty("deferred", out _));
+        }
+    }
+
     [Theory]
     [InlineData("{\"handle\":\"gpu-1\",\"count\":2}", false)]
     [InlineData("[]", true)]

@@ -9,7 +9,7 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class GpuExportTools
 {
-    [McpServerTool(Name = "pix_gpu_export_cpp"), Description("Exports a GPU capture to a standalone C++/CMake project using installed pixtool. Returns a job. outputDirectory must not exist and its parent must exist; files are never overwritten. Stop connected GPU analyses first. Partial output is retained on failure or cancellation and its path is reported in job diagnostics. Does not build or execute the exported project.")]
+    [McpServerTool(Name = "pix_gpu_export_cpp", Title = "Export capture to C++", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description("Exports a GPU capture to a standalone C++/CMake project using installed pixtool. Returns a job. outputDirectory must not exist and its parent must exist; files are never overwritten. Stop connected GPU analyses first. Partial output is retained on failure or cancellation and its path is reported in job diagnostics. Does not build or execute the exported project.")]
     public static Task<string> Export(PixSession session, JobManager jobs,
         [Description("Open GPU capture handle.")] string handle,
         [Description("New output directory under an existing parent. Existing directories, even empty ones, are refused.")] string outputDirectory,
@@ -22,7 +22,7 @@ public static class GpuExportTools
     {
         session.Get<GpuCaptureHandle>(handle);
         if (timeoutSeconds is < 1 or > 3600)
-            throw new PixToolException("invalid_arguments", "timeoutSeconds must be between 1 and 3600.");
+            throw new PixToolException(PixErrors.Codes.InvalidArguments, "timeoutSeconds must be between 1 and 3600.");
         string output = ValidateOutputDirectory(outputDirectory);
         var options = new GpuExportOptionsDto(useWinPixEventRuntime, useAgilitySdk, useReplayTimeExecuteIndirectBuffers);
         return Tools.RunJob(jobs, "pix_gpu_export_cpp", () => jobs.StartForHandle<GpuCaptureHandle>("export-cpp",
@@ -62,16 +62,16 @@ public static class GpuExportTools
     internal static string ValidateOutputDirectory(string outputDirectory)
     {
         if (string.IsNullOrWhiteSpace(outputDirectory) || outputDirectory.Any(c => c == '"' || char.IsControl(c)))
-            throw new PixToolException("invalid_arguments", "outputDirectory must be a valid nonempty directory path without quotes or control characters.");
+            throw new PixToolException(PixErrors.Codes.InvalidArguments, "outputDirectory must be a valid nonempty directory path without quotes or control characters.");
         string full;
         try { full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(outputDirectory)); }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-        { throw new PixToolException("invalid_arguments", "Invalid outputDirectory: " + ex.Message); }
+        { throw new PixToolException(PixErrors.Codes.InvalidArguments, "Invalid outputDirectory: " + ex.Message); }
         string? parent = Path.GetDirectoryName(full);
         if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent) || Path.GetFileName(full).IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
-            throw new PixToolException("invalid_arguments", "outputDirectory must name a new directory under an existing parent.");
+            throw new PixToolException(PixErrors.Codes.InvalidArguments, "outputDirectory must name a new directory under an existing parent.");
         if (Path.Exists(full))
-            throw new PixToolException("output_exists", $"The output path already exists: {full}. Choose a new directory; export never overwrites files.");
+            throw new PixToolException(PixErrors.Codes.OutputExists, $"The output path already exists: {full}. Choose a new directory; export never overwrites files.");
         return full;
     }
 
@@ -94,7 +94,7 @@ public static class GpuExportTools
             checkCancellation();
             string cmake = Path.Combine(output, "CMakeLists.txt");
             if (!File.Exists(cmake))
-                throw new PixToolException("export_missing_output", "pixtool completed without producing CMakeLists.txt.");
+                throw new PixToolException(PixErrors.Codes.ExportMissingOutput, "pixtool completed without producing CMakeLists.txt.");
             return cmake;
         }
         catch

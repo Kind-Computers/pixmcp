@@ -2,10 +2,16 @@ namespace PixMcp.Pix;
 
 public sealed record ShaderInventoryItemDto(ShaderInfoDto Shader, int UseCount, IReadOnlyList<ToolCallDto> NextCalls);
 public sealed record ShaderInventoryDto(string Handle, long Total, int Offset, int Count, int? NextOffset,
-    IReadOnlyList<ShaderInventoryItemDto> Items, IReadOnlyList<object> Coverage, IReadOnlyList<ToolCallDto> NextCalls);
+    IReadOnlyList<ShaderInventoryItemDto> Items, IReadOnlyList<object> Coverage, IReadOnlyList<ToolCallDto> NextCalls)
+{
+    public ScopeDescriptionDto? Scope { get; init; }
+}
 public sealed record ShaderUseEventDto(EventRef EventRef, IReadOnlyList<string> MarkerPath, IReadOnlyList<ShaderRef> ShaderRefs);
 public sealed record ShaderUsesDto(ShaderRef ShaderRef, string MatchMethod, long Total, int Offset, int Count, int? NextOffset,
-    IReadOnlyList<ShaderUseEventDto> Items, IReadOnlyList<object> Coverage, IReadOnlyList<ToolCallDto> NextCalls);
+    IReadOnlyList<ShaderUseEventDto> Items, IReadOnlyList<object> Coverage, IReadOnlyList<ToolCallDto> NextCalls)
+{
+    public ScopeDescriptionDto? Scope { get; init; }
+}
 
 internal sealed record ShaderOccurrence(ShaderInfoDto Shader, IReadOnlyList<string> MarkerPath);
 
@@ -50,7 +56,7 @@ internal sealed class ShaderIndex
     internal (string MatchMethod, IReadOnlyList<ShaderUseEventDto> Items) Uses(ShaderRef shaderRef, Func<EventRef, bool> within)
     {
         if (!_byReference.TryGetValue(shaderRef, out ShaderOccurrence? occurrence))
-            throw new PixToolException("unavailable_shader_data", "This shader occurrence was not readable while indexing the capture.",
+            throw new PixToolException(PixErrors.Codes.UnavailableShaderData, "This shader occurrence was not readable while indexing the capture.",
                 nextCalls: [new("pix_gpu_pipeline_state", new { eventRef = shaderRef.EventRef })]);
         string key = Identity(occurrence.Shader);
         var items = _occurrences.Where(o => Identity(o.Shader) == key && within(o.Shader.ShaderRef!.EventRef))

@@ -47,4 +47,25 @@ public sealed class PixErrorsTests
         Assert.Equal("unknown", unavailable.GetProperty("state").GetString());
         Assert.Equal(PixErrors.Hex(hresult), unavailable.GetProperty("error").GetProperty("hresult").GetString());
     }
+
+    [Theory]
+    [InlineData(typeof(MissingMethodException))]
+    [InlineData(typeof(MissingFieldException))]
+    [InlineData(typeof(TypeLoadException))]
+    [InlineData(typeof(EntryPointNotFoundException))]
+    [InlineData(typeof(BadImageFormatException))]
+    public void ManagedBindingFailuresBecomeApiMismatch(Type exceptionType)
+    {
+        var exception = (Exception)Activator.CreateInstance(exceptionType, "Method not found: IPixGpuCaptureTiming.GetQueueDataCount")!;
+        ErrorDto detail = PixErrors.ToDto(exception, "timing collection");
+        Assert.Equal("pix_api_mismatch", detail.Code);
+        Assert.False(detail.Retryable);
+        Assert.Contains("GetQueueDataCount", detail.Message);
+        Assert.Contains("compiled against", detail.Message);
+        Assert.Contains("timing collection", detail.Message);
+        ToolCallDto recovery = Assert.Single(detail.NextCalls);
+        Assert.Equal("pix_info", recovery.Tool);
+        Assert.Equal("pix_api_mismatch", PixErrors.ApiMismatch(exception).Detail.Code);
+        Assert.Equal("pix_api_mismatch", Assert.IsType<PixToolException>(PixErrors.ToMcp(exception, "timing collection")).Detail.Code);
+    }
 }

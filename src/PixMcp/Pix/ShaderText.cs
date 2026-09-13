@@ -18,15 +18,15 @@ internal static class ShaderText
 
     internal static void ValidateWindow(int startLine, int lineCount)
     {
-        if (startLine < 1) throw new McpException("startLine must be at least 1.");
-        if (lineCount is < 1 or > 1000) throw new McpException("lineCount must be between 1 and 1000.");
+        if (startLine < 1) throw PixErrors.InvalidArguments("startLine must be at least 1.");
+        if (lineCount is < 1 or > 1000) throw PixErrors.InvalidArguments("lineCount must be between 1 and 1000.");
     }
 
     internal static IEnumerable<ShaderSearchMatchDto> Search(string code, string query, ulong nodeIndex,
         string? nodeName, int contextLines)
     {
-        if (string.IsNullOrEmpty(query)) throw new McpException("query must not be empty.");
-        if (contextLines is < 0 or > 20) throw new McpException("contextLines must be between 0 and 20.");
+        if (string.IsNullOrEmpty(query)) throw PixErrors.InvalidArguments("query must not be empty.");
+        if (contextLines is < 0 or > 20) throw PixErrors.InvalidArguments("contextLines must be between 0 and 20.");
         string[] lines = Lines(code);
         for (int i = 0; i < lines.Length; i++)
         {

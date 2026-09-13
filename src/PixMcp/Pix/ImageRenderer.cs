@@ -1,9 +1,15 @@
+using System.ComponentModel;
 using Windows.Graphics.Imaging;
 using Windows.Storage.Streams;
 
 namespace PixMcp.Pix;
 
-public sealed record ImageCrop(int X, int Y, int Width, int Height);
+/// <summary>A crop rectangle in original pixel coordinates.</summary>
+public sealed record ImageCrop(
+    [property: Description("Left edge in original pixels.")] int X,
+    [property: Description("Top edge in original pixels.")] int Y,
+    [property: Description("Width in original pixels (positive).")] int Width,
+    [property: Description("Height in original pixels (positive).")] int Height);
 internal sealed record RenderedImage(byte[] Png, uint OriginalWidth, uint OriginalHeight, uint Width, uint Height,
     ImageCrop? Crop, bool Resized, bool AlphaIgnored = false);
 
@@ -25,7 +31,7 @@ internal static class ImageRenderer
         if (!ignoreAlpha && crop is null && outputWidth == width && outputHeight == height && png.Length <= MaxInlineBytes)
             return new(png, originalWidth, originalHeight, width, height, null, false);
         if ((ulong)originalWidth * originalHeight > MaxDecodedPixels)
-            throw new PixToolException("image_too_large", "The image exceeds the 64 megapixel decoding limit. Retrieve its original bytes instead.");
+            throw new PixToolException(PixErrors.Codes.ImageTooLarge, "The image exceeds the 64 megapixel decoding limit. Retrieve its original bytes instead.");
 
         using var input = new InMemoryRandomAccessStream();
         using (var writer = new DataWriter(input))
@@ -85,15 +91,34 @@ internal static class ImageRenderer
         }
     }
 
+    /// <summary>
+    /// Shrinks a rendered image until its base64 form fits <paramref name="maxBase64Bytes"/>, halving the longest edge
+    /// down to 64 pixels. Returns the image and whether the budget (not the caller) chose the size.
+    /// </summary>
+    internal static async Task<(RenderedImage Image, bool BudgetLimited)> FitToBudget(RenderedImage rendered, byte[] original, int maxBase64Bytes, CancellationToken cancellationToken)
+    {
+        bool limited = false;
+        while (Base64Length(rendered.Png.Length) > maxBase64Bytes && Math.Max(rendered.Width, rendered.Height) > 64)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            int next = Math.Max(64, (int)Math.Max(rendered.Width, rendered.Height) / 2);
+            rendered = await Render(original, rendered.Crop, next, rendered.AlphaIgnored, cancellationToken).ConfigureAwait(false);
+            limited = true;
+        }
+        return (rendered, limited);
+    }
+
+    internal static int Base64Length(int bytes) => checked((bytes + 2) / 3 * 4);
+
     internal static void Validate(uint width, uint height, ImageCrop? crop, int? maxDimension)
     {
         if (width is 0 or > int.MaxValue || height is 0 or > int.MaxValue)
-            throw new PixToolException("invalid_image", "PNG dimensions must be positive and representable as pixel coordinates.");
+            throw new PixToolException(PixErrors.Codes.InvalidImage, "PNG dimensions must be positive and representable as pixel coordinates.");
         if (maxDimension is < 1 or > 4096)
-            throw new PixToolException("invalid_arguments", "maxDimension must be between 1 and 4096.");
+            throw new PixToolException(PixErrors.Codes.InvalidArguments, "maxDimension must be between 1 and 4096.");
         if (crop is not null && (crop.X < 0 || crop.Y < 0 || crop.Width <= 0 || crop.Height <= 0 ||
             (long)crop.X + crop.Width > width || (long)crop.Y + crop.Height > height))
-            throw new PixToolException("invalid_arguments", "crop must be a positive rectangle within the original image bounds.");
+            throw new PixToolException(PixErrors.Codes.InvalidArguments, "crop must be a positive rectangle within the original image bounds.");
     }
 
     internal static (uint Width, uint Height) Fit(uint width, uint height, int? maxDimension)

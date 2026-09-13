@@ -17,7 +17,7 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static partial class DumpTools
 {
-    [McpServerTool(Name = "pix_dump_open"), Description("Opens a DirectX dump file (.dxdmp_preview, written when a GPU hang/TDR occurs) and returns a handle plus metadata: device error, error bucket, PIX's brief and detailed summaries, application, adapter, OS, CPU and memory info, and the queue list.")]
+    [McpServerTool(Name = "pix_dump_open", Title = "Open DirectX dump", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description("Opens a DirectX dump file (.dxdmp_preview, written when a GPU hang/TDR occurs) and returns a handle plus metadata: device error, error bucket, PIX's brief and detailed summaries, application, adapter, OS, CPU and memory info, and the queue list.")]
     public static Task<string> Open(PixSession session, [Description("Path to the .dxdmp_preview / .dxdmp file.")] string path, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_open", () =>
         {
@@ -28,7 +28,7 @@ public static partial class DumpTools
             return new { handle = handle.Id, path = full, metadata = handle.Metadata, queues = QueueList(handle) };
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_dump_info", ReadOnly = true), Description("Metadata (device error, summaries, system info) and the plain queue list for an open dump file; the same payload pix_dump_open returned. Use pix_dump_queues for per-queue hardware status and fault/event counts.")]
+    [McpServerTool(Name = "pix_dump_info", Title = "Dump summary", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Metadata (device error, summaries, system info) and the plain queue list for an open dump file; the same payload pix_dump_open returned. Use pix_dump_queues for per-queue hardware status and fault/event counts.")]
     public static Task<string> Info(PixSession session, [Description("Dump handle")] string handle, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_info", () =>
         {
@@ -216,12 +216,12 @@ public static partial class DumpTools
             hardwareStatusCount = q.GetHardwareStatusCount(),
         }).ToArray();
 
-    [McpServerTool(Name = "pix_dump_queues", ReadOnly = true), Description("Queues in the dump with their status at dump time, hardware status fields (severity/values), page fault counts and root event counts (more detail than the queue list in pix_dump_info). Feed queueIndex to pix_dump_events.")]
+    [McpServerTool(Name = "pix_dump_queues", Title = "Dump queues", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Queues in the dump with their status at dump time, hardware status fields (severity/values), page fault counts and root event counts (more detail than the queue list in pix_dump_info). Feed queueIndex to pix_dump_events.")]
     public static Task<string> DumpQueues(PixSession session, [Description("Dump handle")] string handle, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_queues", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
-            return Queues(h).Select((q, i) =>
+            return SessionTools.Envelope(Queues(h).Select((q, i) =>
             {
                 object? hw;
                 try
@@ -242,7 +242,7 @@ public static partial class DumpTools
                     pageFaultCount = faults,
                     rootEventCount = eventCount,
                 };
-            }).ToArray();
+            }).ToArray());
         }, cancellationToken);
 
     private static string EventName(IPixPostmortemEvent evt)
@@ -357,7 +357,7 @@ public static partial class DumpTools
         return new { id = shader.GetId(), stage = shader.GetStage(), hash, entry = Interop.WOrNull(shader.GetEntry()), target = Interop.WOrNull(shader.GetTarget()) };
     }
 
-    [McpServerTool(Name = "pix_dump_events", ReadOnly = true), Description("Command queue event history from the dump (D3D API calls, PIX markers, custom markers, driver events) as a tree of root events with nested children, with completion status (IN_PROGRESS / POSSIBLY_COMPLETED marks work that was running when the GPU hung) and correlated shaders/resources. Root events are paged with offset/limit; maxEvents bounds the expanded tree (childrenTruncated marks cut nodes, extra.eventBudgetExhausted the page).")]
+    [McpServerTool(Name = "pix_dump_events", Title = "Dump events", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Command queue event history from the dump (D3D API calls, PIX markers, custom markers, driver events) as a tree of root events with nested children, with completion status (IN_PROGRESS / POSSIBLY_COMPLETED marks work that was running when the GPU hung) and correlated shaders/resources. Root events are paged with offset/limit; maxEvents bounds the expanded tree (childrenTruncated marks cut nodes, extra.eventBudgetExhausted the page).")]
     public static Task<string> Events(
         PixSession session,
         [Description("Dump handle")] string handle,
@@ -375,7 +375,8 @@ public static partial class DumpTools
             List<IPixPostmortemQueueInfo> queues = Queues(h);
             if (queueIndex < 0 || queueIndex >= queues.Count)
             {
-                throw new McpException($"queueIndex {queueIndex} is out of range; the dump has {queues.Count} queue(s).");
+                throw PixErrors.InvalidReference($"queueIndex {queueIndex} is out of range; the dump has {queues.Count} queue(s).",
+                    new ToolCallDto("pix_dump_queues", new { handle }, CostHints.Query));
             }
             (int o, int l) = Paging.Normalize(offset, limit);
             IPixCollection? events = PixApiExtensionsPostmortemDump.TryGetEvents(queues[queueIndex], out Exception ex);
@@ -414,7 +415,7 @@ public static partial class DumpTools
             return Paging.Page(page, total, o, l, exhausted ? new { eventBudgetExhausted = true, maxEvents } : null);
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_dump_page_faults", ReadOnly = true), Description("GPU page faults recorded in the dump, paged: faulting virtual address, type, access, timestamp, queue, and the resource allocation/free events around that address (each capped by maxResourceEvents). extra.dred carries DRED page fault data when present.")]
+    [McpServerTool(Name = "pix_dump_page_faults", Title = "Dump page faults", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("GPU page faults recorded in the dump, paged: faulting virtual address, type, access, timestamp, queue, and the resource allocation/free events around that address (each capped by maxResourceEvents). extra.dred carries DRED page fault data when present.")]
     public static Task<string> PageFaults(
         PixSession session,
         [Description("Dump handle")] string handle,
@@ -428,7 +429,7 @@ public static partial class DumpTools
             DumpHandle h = session.Get<DumpHandle>(handle);
             (int o, int l) = Paging.Normalize(offset, limit);
             int maxEvents = Math.Clamp(maxResourceEvents, 1, Paging.MaxLimit);
-            if (resourceEventsOffset < 0) throw new PixToolException("invalid_arguments", "resourceEventsOffset must be nonnegative.");
+            if (resourceEventsOffset < 0) throw new PixToolException(PixErrors.Codes.InvalidArguments, "resourceEventsOffset must be nonnegative.");
             object? dred = Tools.Try(() =>
             {
                 DredPageFaultData? data = PixApiExtensionsPostmortemDump.TryGetDredPageFault(h.Document, out _);
@@ -488,7 +489,7 @@ public static partial class DumpTools
             }, new { dred });
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_dump_breadcrumbs", ReadOnly = true), Description("DRED auto-breadcrumb nodes from the dump: per command list, the recorded operations and how many completed, plus context strings. Shows where each command list was when the GPU hung. Operations are windowed per node (opsOffset/returnedOps/nextOpsOffset, indices absolute): by default around the completion boundary, or from offset when given.")]
+    [McpServerTool(Name = "pix_dump_breadcrumbs", Title = "Dump breadcrumbs", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("DRED auto-breadcrumb nodes from the dump: per command list, the recorded operations and how many completed, plus context strings. Shows where each command list was when the GPU hung. Operations are windowed per node (opsOffset/returnedOps/nextOpsOffset, indices absolute): by default around the completion boundary, or from offset when given.")]
     public static Task<string> Breadcrumbs(PixSession session,
         [Description("Dump handle")] string handle,
         [Description("Maximum ops to list per node (default 200, max 5000).")] int maxOps = 200,
@@ -504,7 +505,8 @@ public static partial class DumpTools
                 return new { nodes = Array.Empty<object>(), unavailable = ex is null ? null : PixErrors.Describe(ex) };
             }
             if (nodeIndex.HasValue && (nodeIndex < 0 || nodeIndex >= nodes.Count))
-                throw new McpException($"nodeIndex {nodeIndex} is out of range; there are {nodes.Count} breadcrumb node(s).");
+                throw PixErrors.InvalidReference($"nodeIndex {nodeIndex} is out of range; there are {nodes.Count} breadcrumb node(s).",
+                    new ToolCallDto("pix_dump_breadcrumbs", new { handle }, CostHints.Query));
             return new
             {
                 nodes = nodes.Select((n, i) => (Node: n, Index: i)).Where(n => !nodeIndex.HasValue || n.Index == nodeIndex.Value).Select(entry =>
@@ -540,7 +542,7 @@ public static partial class DumpTools
         return (start, take, next < total ? (int)next : null);
     }
 
-    [McpServerTool(Name = "pix_dump_resources", ReadOnly = true), Description("Resources known to the dump, paged: name, GPU virtual address, size, dimensions, attributes, and optionally their lifetime events (create/destroy/map...). To correlate a fault address use pix_dump_page_faults.")]
+    [McpServerTool(Name = "pix_dump_resources", Title = "Dump resources", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Resources known to the dump, paged: name, GPU virtual address, size, dimensions, attributes, and optionally their lifetime events (create/destroy/map...). To correlate a fault address use pix_dump_page_faults.")]
     public static Task<string> Resources(
         PixSession session,
         [Description("Dump handle")] string handle,
@@ -583,7 +585,7 @@ public static partial class DumpTools
             });
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_dump_gpu_state", ReadOnly = true), Description("GPU state tables captured at dump time (engine/queue registers, hardware status), as named tables with columns and (nested) rows.")]
+    [McpServerTool(Name = "pix_dump_gpu_state", Title = "Dump GPU state tables", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("GPU state tables captured at dump time (engine/queue registers, hardware status), as named tables with columns and (nested) rows.")]
     public static Task<string> GpuState(
         PixSession session,
         [Description("Dump handle")] string handle,
@@ -616,7 +618,8 @@ public static partial class DumpTools
             }
             if (tableIndex.Value < 0 || tableIndex.Value >= list.Count)
             {
-                throw new McpException($"tableIndex {tableIndex} is out of range; there are {list.Count} table(s).");
+                throw PixErrors.InvalidReference($"tableIndex {tableIndex} is out of range; there are {list.Count} table(s).",
+                    new ToolCallDto("pix_dump_gpu_state", new { handle }, CostHints.Query));
             }
             IPixGpuStateTable table = list[tableIndex.Value];
             string[] columns = Columns(table);
@@ -650,7 +653,7 @@ public static partial class DumpTools
     {
         if (rowCount <= Math.Clamp(maxRows, 1, 20000)) return fullTable;
         string resultRef = results.Store(fullTable, owner: handle);
-        return new DeferredResultDto(true, resultRef, Encoding.UTF8.GetByteCount(Json.Serialize(fullTable)), [ResultStore.ReadCall(resultRef)]);
+        return new DeferredResultDto(true, resultRef, Encoding.UTF8.GetByteCount(Json.Serialize(fullTable)), ResultStore.DeferredCalls(resultRef));
     }
 
     private static object RowDto(IPixGpuStateTableRow row, string[] columns, ref int rowCount, CancellationToken cancellationToken)
@@ -686,19 +689,20 @@ public static partial class DumpTools
         return new { id = row.GetId(), name = Interop.W(row.GetName()), description = Interop.WOrNull(row.GetDescription()), values, children };
     }
 
-    [McpServerTool(Name = "pix_dump_blobs", ReadOnly = false), Description("Application-provided blobs embedded in the dump (metadata id and size). With blobIndex, returns bytes written to outPath (whole blob) or a retrievable base64 byte window. Native reads start at the beginning of the blob, so later byte windows require reading their preceding bytes as well.")]
+    [McpServerTool(Name = "pix_dump_blobs", Title = "Dump application blobs", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Application-provided blobs embedded in the dump (metadata id and size). With blobIndex, returns bytes written to outPath (whole blob) or a retrievable base64 byte window. Native reads start at the beginning of the blob, so later byte windows require reading their preceding bytes as well.")]
     public static Task<string> Blobs(
         PixSession session,
         [Description("Dump handle")] string handle,
         [Description("Blob index to read; omit to list only.")] int? blobIndex = null,
         [Description("Maximum bytes to return inline as base64 (default 65536, max 1 MB); larger blobs should go to outPath.")] int maxBytes = 65536,
-        [Description("File to write the selected blob to (whole blob, no size cap); nothing is returned inline then.")] string? outPath = null,
+        [Description("File to write the selected blob to (whole blob, no size cap); nothing is returned inline then. The parent directory must exist.")] string? outPath = null,
+        [Description("Replace an existing outPath file (default false: file_exists).")] bool overwrite = false,
         [Description("First byte to return inline. Does not affect whole-blob outPath export.")] int offset = 0,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_blobs", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
-            if (offset < 0) throw new PixToolException("invalid_arguments", "offset must be nonnegative.");
+            if (offset < 0) throw new PixToolException(PixErrors.Codes.InvalidArguments, "offset must be nonnegative.");
             IPixCollection? blobs = PixApiExtensionsPostmortemDump.GetApplicationBlobs(h.Document);
             if (blobs is null)
             {
@@ -710,13 +714,14 @@ public static partial class DumpTools
             {
                 if (blobIndex.Value < 0 || blobIndex.Value >= list.Count)
                 {
-                    throw new McpException($"blobIndex {blobIndex} is out of range; there are {list.Count} blob(s).");
+                    throw PixErrors.InvalidReference($"blobIndex {blobIndex} is out of range; there are {list.Count} blob(s).",
+                        new ToolCallDto("pix_dump_blobs", new { handle }, CostHints.Query));
                 }
                 IPixApplicationBlob blob = list[blobIndex.Value];
                 ulong size = blob.GetSizeBytes();
                 if (!string.IsNullOrWhiteSpace(outPath))
                 {
-                    string target = Path.GetFullPath(outPath);
+                    string target = Tools.PrepareOutputPath(outPath, overwrite, session.Results);
                     File.WriteAllBytes(target, PixApiExtensions.GetData(blob, size));
                     data = new { blobIndex, sizeBytes = size, path = target };
                 }
@@ -737,16 +742,16 @@ public static partial class DumpTools
 
     internal static (byte[] Bytes, int? NextOffset) ReadBlobWindow(ulong size, int offset, int maxBytes, Func<ulong, byte[]> readPrefix)
     {
-        if (offset < 0) throw new PixToolException("invalid_arguments", "offset must be nonnegative.");
+        if (offset < 0) throw new PixToolException(PixErrors.Codes.InvalidArguments, "offset must be nonnegative.");
         int cap = Math.Clamp(maxBytes, 1, 1024 * 1024);
         int take = (int)Math.Min(size > (ulong)offset ? size - (ulong)offset : 0, (ulong)cap);
         long end = (long)offset + take;
-        if (end > int.MaxValue) throw new PixToolException("blob_window_too_large", "This window exceeds managed array indexing. Export the complete blob with outPath.");
+        if (end > int.MaxValue) throw new PixToolException(PixErrors.Codes.BlobWindowTooLarge, "This window exceeds managed array indexing. Export the complete blob with outPath.");
         byte[] bytes = take == 0 ? [] : readPrefix((ulong)end).AsSpan(offset, take).ToArray();
         return (bytes, (ulong)end < size ? (int)end : null);
     }
 
-    [McpServerTool(Name = "pix_dump_journal", ReadOnly = true), Description("D3D runtime journal entries recorded before the device removal (error codes, thread ids, messages), paged with offset/limit.")]
+    [McpServerTool(Name = "pix_dump_journal", Title = "Dump runtime journal", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("D3D runtime journal entries recorded before the device removal (error codes, thread ids, messages), paged with offset/limit.")]
     public static Task<string> Journal(
         PixSession session,
         [Description("Dump handle")] string handle,
@@ -766,7 +771,7 @@ public static partial class DumpTools
                 e => new { code = Interop.Hex(e.GetCode()), threadId = e.GetThreadID(), tickCount = e.GetTickCount(), message = Interop.WOrNull(e.GetErrorMessage()) });
         }, cancellationToken);
 
-    [McpServerTool(Name = "pix_dump_shader_waves", ReadOnly = true), Description("Shader debugging data captured at the hang, paged: in-flight shader waves with stage, status, coordinates, instruction pointer, exceptions hit, offending HLSL locations (first 32), and optionally lanes (first 256).")]
+    [McpServerTool(Name = "pix_dump_shader_waves", Title = "Dump shader waves", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Shader debugging data captured at the hang, paged: in-flight shader waves with stage, status, coordinates, instruction pointer, exceptions hit, offending HLSL locations (first 32), and optionally lanes (first 256).")]
     public static Task<string> ShaderWaves(
         PixSession session,
         [Description("Dump handle")] string handle,

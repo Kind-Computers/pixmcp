@@ -4,16 +4,11 @@ public sealed partial class ResultStore
 {
     public ResultExportDto Export(string resultRef, string outPath, string pointer = "", bool overwrite = false, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(outPath)) throw new PixToolException("invalid_arguments", "outPath is required.");
-        string path = Path.GetFullPath(outPath);
-        if (path.StartsWith(Path.GetDirectoryName(_directory)! + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-            throw new PixToolException("invalid_arguments", "Export output cannot replace files in the server's private result storage.");
-        if (!overwrite && File.Exists(path)) throw new PixToolException("file_exists", $"Output already exists: {path}. Choose another path or set overwrite=true.");
+        string path = Tools.Tools.PrepareOutputPath(outPath, overwrite, this);
         using Lease lease = Acquire(resultRef); using Stream source = lease.Open();
-        var json = new StoredJson(source, cancellationToken);
+        var json = new StoredJson(source, cancellationToken, resultRef);
         StoredJson.Node node = json.Locate(pointer);
         string directory = Path.GetDirectoryName(path)!;
-        if (!Directory.Exists(directory)) throw new PixToolException("directory_not_found", $"Output parent directory does not exist: {directory}.");
         string temporary = Path.Combine(directory, ".pixmcp-export-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
@@ -25,7 +20,7 @@ public sealed partial class ResultStore
             }
             cancellationToken.ThrowIfCancellationRequested();
             try { File.Move(temporary, path, overwrite); }
-            catch (IOException) when (!overwrite && File.Exists(path)) { throw new PixToolException("file_exists", $"Output already exists: {path}. Choose another path or set overwrite=true."); }
+            catch (IOException) when (!overwrite && File.Exists(path)) { throw PixErrors.FileExists(path); }
             return new(resultRef, pointer, path, bytes);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
@@ -85,7 +80,7 @@ public sealed partial class ResultStore
                     if (!store.MakeDiskRoom(_length + buffer.Length, jobId))
                     {
                         while (store._memoryBytes > store._memoryLimit - buffer.Length)
-                            if (!store.EvictOne(jobId)) throw Capacity();
+                            if (!store.EvictOne(jobId)) throw store.Capacity();
                         _memory!.Write(buffer); store._memoryBytes += buffer.Length; _length += buffer.Length; return;
                     }
                     Directory.CreateDirectory(store._directory);
@@ -97,16 +92,16 @@ public sealed partial class ResultStore
                     store._diskBytes += _length; store._memoryBytes -= _length;
                     _memory!.Dispose(); _memory = null;
                 }
-                if (!store.MakeDiskRoom(buffer.Length, jobId)) throw Capacity();
+                if (!store.MakeDiskRoom(buffer.Length, jobId)) throw store.Capacity();
                 _file.Write(buffer); store._diskBytes += buffer.Length; _length += buffer.Length;
             }
         }
-        internal Snapshot Commit(string id, HashSet<string> owners, string? job)
+        internal Snapshot Commit(string id, HashSet<string> owners, string? job, long sequence, ToolCallDto? origin)
         {
             _file?.Dispose(); _file = null;
             byte[]? bytes = _memory?.ToArray(); _memory?.Dispose(); _memory = null;
             _committed = true;
-            return new(id, bytes, _path, _length, owners, job);
+            return new(id, bytes, _path, _length, owners, job, sequence, origin);
         }
         internal Stream OpenRead()
         {

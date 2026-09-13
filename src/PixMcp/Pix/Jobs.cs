@@ -20,15 +20,22 @@ public sealed class Job
     private string? _error;
     private ErrorDto? _errorDetail;
     private string? _resultRef;
+    private string _resultState = "none";
+    private ErrorDto? _resultError;
     private readonly ResultStore? _results;
     private readonly string[] _owners;
     private DateTimeOffset? _startedAt, _finishedAt;
     private bool _cancellationRequested;
     private IPixCancellationToken? _pixToken;
 
-    public Job(string id, string kind, string description, ResultStore? results = null, string? owner = null, IEnumerable<string>? owners = null)
-    { Id = id; Kind = kind; Description = description; _results = results; _owners = owner is null ? (owners ?? []).ToArray() : [owner]; }
+    public Job(string id, string kind, string description, ResultStore? results = null, string? owner = null, IEnumerable<string>? owners = null, ToolCallDto? origin = null)
+    { Id = id; Kind = kind; Description = description; _results = results; _owners = owner is null ? (owners ?? []).ToArray() : [owner]; Origin = origin; }
     public string Id { get; }
+    /// <summary>The tool call that started this job; repeated in nextCalls when its result must be recomputed.</summary>
+    public ToolCallDto? Origin { get; }
+    /// <summary>available, evicted, retentionFailed or none (see <see cref="JobDto"/>).</summary>
+    public string ResultState { get { lock (_lock) return _resultState; } }
+    public ErrorDto? ResultError { get { lock (_lock) return _resultError; } }
     public string Kind { get; }
     public string Description { get; }
     public DateTimeOffset CreatedAt { get; } = DateTimeOffset.UtcNow;
@@ -74,7 +81,7 @@ public sealed class Job
         IPixCancellationToken? token;
         lock (_lock)
         {
-            if (IsFinished) throw new McpException($"Job {Id} already finished with status {_status}.");
+            if (IsFinished) throw PixErrors.JobAlreadyFinished(Id, _status.ToString().ToLowerInvariant(), _resultRef);
             if (_cancellationRequested) return;
             _cancellationRequested = true;
             token = _pixToken;
@@ -92,10 +99,29 @@ public sealed class Job
         catch (Exception ex) { AddMessage("Native cancellation unavailable: " + PixErrors.Describe(ex)); }
     }
 
+    /// <summary>
+    /// Finishes the job as succeeded. A result that cannot be retained (capacity, an owner closed meanwhile) does not
+    /// turn minutes of replay into a failed job: the state becomes retentionFailed and the origin call is offered.
+    /// </summary>
     internal void Succeed(object? result)
     {
-        string? resultRef = result is null ? null : _results?.Store(result, jobId: Id, owners: _owners, operation: Kind);
-        lock (_lock) { _resultRef = resultRef; _progress = 1; Finish(JobStatus.Succeeded); }
+        string? resultRef = null; string state = "none"; ErrorDto? retention = null;
+        if (result is not null && _results is not null)
+        {
+            try { resultRef = _results.Store(result, jobId: Id, owners: _owners, operation: Kind, origin: Origin); state = "available"; }
+            catch (PixToolException ex) { retention = ex.Detail; state = "retentionFailed"; }
+        }
+        lock (_lock) { _resultRef = resultRef; _resultState = state; _resultError = retention; _progress = 1; Finish(JobStatus.Succeeded); }
+    }
+
+    /// <summary>Called when storage pressure removed the retained result; the job stays listed so the eviction is observable.</summary>
+    internal void MarkResultEvicted()
+    {
+        lock (_lock)
+        {
+            if (_resultRef is null) return;
+            _resultRef = null; _resultState = "evicted";
+        }
     }
 
     internal void Fail(Exception ex)
@@ -143,13 +169,24 @@ public sealed class Job
                 _progress, CreatedAt, _startedAt, _finishedAt,
                 _startedAt is null ? null : ((_finishedAt ?? DateTimeOffset.UtcNow) - _startedAt.Value).TotalSeconds,
                 _messages.TakeLast(20).Select(m => m.Length > 500 ? m[..500] + "…" : m).ToArray(),
-                _errorDetail, _resultRef, CancellationRequested,
-                _resultRef is not null ? [ResultStore.ReadCall(_resultRef)] : !IsFinished
-                    ? [new ToolCallDto("pix_job_wait", new { jobId = Id, timeoutSeconds = 2 })] : []);
+                _errorDetail, _resultRef, CancellationRequested, [], _resultState, _resultError, Origin);
         }
         // Never hold the job lock while checking retention; keep status/result identity atomic.
-        return snapshot.ResultRef is not null && _results?.IsAvailable(snapshot.ResultRef) == false
-            ? snapshot with { ResultRef = null, NextCalls = [] } : snapshot;
+        if (snapshot.ResultRef is not null && _results?.IsAvailable(snapshot.ResultRef) == false)
+            snapshot = snapshot with { ResultRef = null, ResultState = "evicted" };
+        return snapshot with { NextCalls = NextCallsFor(snapshot) };
+    }
+
+    /// <summary>available: read it; unfinished: wait; evicted, retentionFailed, failed or cancelled: the origin call, then remediation.</summary>
+    private IReadOnlyList<ToolCallDto> NextCallsFor(JobDto dto)
+    {
+        if (dto.ResultRef is not null) return [ResultStore.ReadCall(dto.ResultRef)];
+        if (dto.Status is "queued" or "running") return [new ToolCallDto("pix_job_wait", new { jobId = Id, timeoutSeconds = 2 }, CostHints.Job)];
+        var next = new List<ToolCallDto>();
+        bool recompute = dto.ResultState is "evicted" or "retentionFailed" || dto.Status is "failed" or "cancelled";
+        if (recompute && Origin is not null) next.Add(Origin);
+        if (dto.ResultState == "retentionFailed") next.Add(new ToolCallDto("pix_info", new { }, CostHints.Cached));
+        return next;
     }
 
     public ProgressSink Sink => new(this);
@@ -182,18 +219,20 @@ public sealed class JobManager : IDisposable
     internal JobManager(PixWorker worker, PixSession session, Func<IPixCancellationToken?> createNativeToken)
     {
         _worker = worker; _session = session; _createNativeToken = createNativeToken;
+        // An evicted result stays observable through pix_job_status (resultState = evicted) until the job is pruned.
         _session.Results.JobEvicted += id =>
         {
-            if (_jobs.TryRemove(id, out Job? removed)) removed.Cancellation.Dispose();
+            if (_jobs.TryGetValue(id, out Job? evicted)) evicted.MarkResultEvicted();
         };
     }
 
     public IReadOnlyCollection<Job> All => _jobs.Values.OrderBy(j => j.CreatedAt).ToArray();
+    internal PixSession Session => _session;
     /// <summary>The job currently executing on the PIX thread, if any (at most one, since the worker is single-threaded).</summary>
     public Job? Running => _worker.Snapshot().Operation is string operation
         ? _jobs.Values.FirstOrDefault(j => operation.StartsWith(j.Id + ": ", StringComparison.Ordinal)) : null;
     public Job Get(string jobId)
-        => _jobs.TryGetValue(jobId, out Job? job) ? job : throw new McpException($"Unknown job '{jobId}'. Known jobs: {string.Join(", ", _jobs.Keys.OrderBy(k => k))}");
+        => _jobs.TryGetValue(jobId, out Job? job) ? job : throw PixErrors.UnknownJob(jobId, _jobs.Keys);
     public Job StartForHandle<T>(string kind, string description, string handleId, Func<Job, T, object?> work) where T : PixHandle
         => Start(kind, description, job => work(job, _session.Get<T>(handleId)), handleId);
 
@@ -201,14 +240,15 @@ public sealed class JobManager : IDisposable
     public Job Start(string kind, string description, Func<Job, object?> work, string? owner = null)
         => StartAfter(kind, description, null, work, owner);
 
-    /// <summary>Runs managed work independently of the PIX worker and native factory.</summary>
-    internal Job StartManaged(string kind, string description, Func<Job, Task<object?>> work)
+    /// <summary>Runs managed work independently of the PIX worker and native factory. Results are owned by <paramref name="owner"/> (or the call's handles).</summary>
+    internal Job StartManaged(string kind, string description, Func<Job, Task<object?>> work, string? owner = null)
     {
-        var job = new Job($"job-{Interlocked.Increment(ref _next)}", kind, description, _session.Results);
+        string[] owners = owner is null ? StructuredToolResults.CurrentOwners() : [owner];
+        var job = new Job($"job-{Interlocked.Increment(ref _next)}", kind, description, _session.Results, owners: owners, origin: StructuredToolResults.CurrentCall());
         lock (_managedGate)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            _session.Results.RegisterJobOwners(job.Id, []);
+            if (_disposed) throw PixErrors.ServerShuttingDown(description);
+            _session.Results.RegisterJobOwners(job.Id, owners);
             _jobs[job.Id] = job;
             _managedJobs[job.Id] = job;
         }
@@ -256,7 +296,7 @@ public sealed class JobManager : IDisposable
     internal Job StartAfter(string kind, string description, Func<Job, Task>? prerequisite,
         Func<Job, object?> work, string? owner = null)
     {
-        var job = new Job($"job-{Interlocked.Increment(ref _next)}", kind, description, _session.Results, owner, StructuredToolResults.CurrentOwners());
+        var job = new Job($"job-{Interlocked.Increment(ref _next)}", kind, description, _session.Results, owner, StructuredToolResults.CurrentOwners(), StructuredToolResults.CurrentCall());
         _session.Results.RegisterJobOwners(job.Id, owner is null ? StructuredToolResults.CurrentOwners() : [owner]);
         _jobs[job.Id] = job;
         Prune();

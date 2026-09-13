@@ -65,7 +65,7 @@ public sealed class LifecycleTests
         Assert.True(result.CancellationRequested);
         Assert.NotNull(result.FinishedAt);
         Assert.Equal(1, result.Progress);
-        Assert.Throws<McpException>(() => fixture.Jobs.Cancel(job));
+        Assert.Equal(PixErrors.Codes.JobAlreadyFinished, Assert.Throws<PixToolException>(() => fixture.Jobs.Cancel(job)).Detail.Code);
     }
 
     [Theory]
@@ -184,8 +184,8 @@ public sealed class LifecycleTests
         options.ValidateRunningRequest(new());
         options.ValidateRunningRequest(new(Adapter: 1));
         options.ValidateRunningRequest(options);
-        Assert.Throws<McpException>(() => options.ValidateRunningRequest(new(PowerState: 3)));
-        Assert.Throws<McpException>(() => new AnalysisOptions().ValidateRunningRequest(new(Adapter: 1)));
+        Assert.Equal(PixErrors.Codes.AnalysisSettingsConflict, Assert.Throws<PixToolException>(() => options.ValidateRunningRequest(new(PowerState: 3))).Detail.Code);
+        Assert.Equal(PixErrors.Codes.AnalysisSettingsConflict, Assert.Throws<PixToolException>(() => new AnalysisOptions().ValidateRunningRequest(new(Adapter: 1))).Detail.Code);
     }
 
     [Fact]

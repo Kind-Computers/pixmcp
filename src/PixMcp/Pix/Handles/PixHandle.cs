@@ -21,6 +21,12 @@ public abstract class PixHandle
     /// </summary>
     internal ConcurrentDictionary<string, Job> PreparationJobs { get; } = new();
 
+    /// <summary>Serializes "find a running preparation or start one" so two callers never start the same replay twice.</summary>
+    internal object PreparationGate { get; } = new();
+
+    /// <summary>Fingerprint of the last provenance block returned for this handle, per property name (provenance dedup).</summary>
+    internal ConcurrentDictionary<string, string> ProvenanceFingerprints { get; } = new(StringComparer.Ordinal);
+
     /// <summary>Releases PIX objects. Called on the worker thread. Append non-fatal problems to <paramref name="warnings"/>.</summary>
     public abstract void Close(List<string> warnings);
 

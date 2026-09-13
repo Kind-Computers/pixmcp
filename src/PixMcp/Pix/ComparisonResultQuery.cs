@@ -17,7 +17,7 @@ internal static class ComparisonResultQuery
     {
         if (direction is not ("all" or "regressions" or "improvements") || sortBy is not ("absoluteDeltaNs" or "deltaNs" or "deltaPercent" or "event")
             || minDeltaNs < 0 || !double.IsFinite(minDeltaPercent) || minDeltaPercent < 0 || offset < 0 || limit is < 1 or > 1000)
-            throw new PixToolException("invalid_arguments", "Use direction all/regressions/improvements, sortBy absoluteDeltaNs/deltaNs/deltaPercent/event, nonnegative thresholds/offset, and limit 1 through 1000.");
+            throw new PixToolException(PixErrors.Codes.InvalidArguments, "Use direction all/regressions/improvements, sortBy absoluteDeltaNs/deltaNs/deltaPercent/event, nonnegative thresholds/offset, and limit 1 through 1000.");
         cancellationToken.ThrowIfCancellationRequested();
         using ResultStore.Lease lease = store.Acquire(fullResultRef);
         using Stream stream = lease.Open();
@@ -25,15 +25,15 @@ internal static class ComparisonResultQuery
         StoredJson.Node items;
         try { items = json.Locate("/items"); }
         catch (PixToolException ex) when (ex.Detail.Code == "invalid_pointer")
-        { throw new PixToolException("invalid_arguments", "fullResultRef must identify the complete result returned by pix_gpu_compare."); }
-        if (items.Kind != JsonValueKind.Array) throw new PixToolException("invalid_arguments", "The comparison's items value must be an array.");
+        { throw new PixToolException(PixErrors.Codes.InvalidArguments, "fullResultRef must identify the complete result returned by pix_gpu_compare."); }
+        if (items.Kind != JsonValueKind.Array) throw new PixToolException(PixErrors.Codes.InvalidArguments, "The comparison's items value must be an array.");
         var comparer = Comparer<Row>.Create((a, b) => Compare(a, b, sortBy, descending));
         var selected = new PriorityQueue<Row, Row>(Comparer<Row>.Create((a, b) => comparer.Compare(b, a)));
         long keep = (long)offset + limit; int total = 0, index = 0;
         foreach (var entry in json.Children(items))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (entry.Value.Kind != JsonValueKind.Object) throw new PixToolException("invalid_arguments", "The result contains a value that is not a comparison row.");
+            if (entry.Value.Kind != JsonValueKind.Object) throw new PixToolException(PixErrors.Codes.InvalidArguments, "The result contains a value that is not a comparison row.");
             var properties = json.Children(entry.Value).ToDictionary(p => p.Key, p => p.Value);
             JsonElement Property(string name)
                 => properties.TryGetValue(name, out var node) ? json.Element(node, ResultStore.TargetBytes, fullResultRef, $"/items/{index}/{name}") : default;
@@ -69,9 +69,9 @@ internal static class ComparisonResultQuery
     }
     private static EventRef Reference(JsonElement value)
     {
-        if (value.ValueKind != JsonValueKind.Object) throw new PixToolException("invalid_arguments", "The result lacks comparison event references.");
+        if (value.ValueKind != JsonValueKind.Object) throw new PixToolException(PixErrors.Codes.InvalidArguments, "The result lacks comparison event references.");
         try { return value.Deserialize<EventRef>(Json.Options) ?? throw new JsonException(); }
-        catch (JsonException) { throw new PixToolException("invalid_arguments", "The result contains an invalid comparison event reference."); }
+        catch (JsonException) { throw new PixToolException(PixErrors.Codes.InvalidArguments, "The result contains an invalid comparison event reference."); }
     }
     private static int Compare(Row a, Row b, string sortBy, bool descending)
     {

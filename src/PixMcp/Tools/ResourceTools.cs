@@ -15,7 +15,7 @@ namespace PixMcp.Tools;
 [McpServerToolType]
 public static class ResourceTools
 {
-    [McpServerTool(Name = "pix_gpu_resources", ReadOnly = true), Description("Lists the D3D12 resources in a GPU capture (buffers and textures) with dimensions and formats, paged and filterable. No GPU analysis needed. Use pix_gpu_resource for one resource's full details and views, pix_gpu_event_resources for what a draw binds.")]
+    [McpServerTool(Name = "pix_gpu_resources", Title = "List resources", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Lists the D3D12 resources in a GPU capture (buffers and textures) with dimensions and formats, paged and filterable. No GPU analysis needed. Use pix_gpu_resource for one resource's full details and views, pix_gpu_event_resources for what a draw binds.")]
     public static Task<string> Resources(
         PixSession session,
         [Description("GPU capture handle")] string handle,
@@ -24,11 +24,17 @@ public static class ResourceTools
         [Description("Only resources whose name contains this text (case-insensitive).")] string? nameContains = null,
         [Description("Filter by allocation type: COMMITTED, PLACED, RESERVED.")] string? type = null,
         [Description("Filter by dimension: BUFFER, TEXTURE1D, TEXTURE2D, TEXTURE3D.")] string? dimension = null,
+        [Description(Shaping.FormatDescription)] string format = "objects",
+        [Description(Shaping.BriefDescription)] bool brief = false,
+        [Description(Shaping.TopNDescription)] int? topN = null,
+        [Description(Shaping.MaxStringLengthDescription)] int? maxStringLength = null,
         CancellationToken cancellationToken = default)
-        => Tools.Run(session, "pix_gpu_resources", () =>
+    {
+        ShapingOptions shaping = Shaping.Options(format, brief, topN, maxStringLength, offset);
+        return Tools.Run(session, "pix_gpu_resources", () =>
         {
             GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
-            (int o, int l) = Paging.Normalize(offset, limit);
+            (int o, int l) = Shaping.Window(shaping, offset, limit);
             PIX_D3D12_RESOURCE_TYPE? wantedType = string.IsNullOrEmpty(type) ? null : Tools.ParseEnum<PIX_D3D12_RESOURCE_TYPE>(type);
             D3D12_RESOURCE_DIMENSION? wantedDim = string.IsNullOrEmpty(dimension) ? null : Tools.ParseEnum<D3D12_RESOURCE_DIMENSION>(dimension);
 
@@ -66,19 +72,21 @@ public static class ResourceTools
                 }
                 total++;
             }
-            return Paging.Page(page, total, o, l);
+            ToolCallDto Call(int at, int? strings) => new("pix_gpu_resources", new { handle, offset = at, limit = l, nameContains, type, dimension, format, brief, maxStringLength = strings });
+            return Shaping.Apply(page, total, o, l, shaping, RowShapes.Resources, handle, null, next => Call(next, maxStringLength), () => Call(o, Shaping.FullStringLength));
         }, cancellationToken);
+    }
 
-    [McpServerTool(Name = "pix_gpu_resource", ReadOnly = true), Description("Full details for a resource reference returned by pix_gpu_resources: description, clear value, initial state/layout, castable formats, heap info and independently paged views and bindings.")]
+    [McpServerTool(Name = "pix_gpu_resource", Title = "Resource detail", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Full details for a resource reference returned by pix_gpu_resources: description, clear value, initial state/layout, castable formats, heap info and independently paged views and bindings.")]
     public static Task<string> Resource(
         PixSession session,
-        ResourceRef resourceRef,
+        [Description("Resource reference { handle, apiObjectId } as returned by pix_gpu_resources or pix_gpu_event_resources.")] ResourceRef resourceRef,
         [Description("Include views created on the resource (default true; may need analysis).")] bool includeViews = true,
         [Description("Resource-local view index to include; omit for all views.")] uint? viewIndex = null,
         [Description("First binding to return in each included view (default 0).")] int bindingOffset = 0,
         [Description("Maximum bindings per view (default 25, max 1000).")] int bindingLimit = Paging.DefaultLimit,
-        int viewOffset = 0,
-        int viewLimit = Paging.DefaultLimit,
+        [Description("First resource view to return (default 0).")] int viewOffset = 0,
+        [Description("Maximum resource views to return (default 25, max 1000).")] int viewLimit = Paging.DefaultLimit,
         CancellationToken cancellationToken = default)
     {
         ReferenceValidation.Resource(session, resourceRef);
@@ -88,7 +96,7 @@ public static class ResourceTools
         {
             GpuCaptureHandle h = session.Get<GpuCaptureHandle>(resourceRef.Handle);
             IPixD3D12Resource resource = FindResource(h, resourceRef.ApiObjectId, null, null);
-            if (viewIndex.HasValue && !includeViews) throw new McpException("viewIndex requires includeViews=true.");
+            if (viewIndex.HasValue && !includeViews) throw PixErrors.InvalidArguments("viewIndex requires includeViews=true.");
             return ResourceDto(resource, includeViews, includeDesc: true, viewIndex, bindingOffset, bindingLimit, h, viewOffset, viewLimit);
         }, cancellationToken);
     }
@@ -100,7 +108,8 @@ public static class ResourceTools
         {
             if (index.Value >= resources.GetCount())
             {
-                throw new McpException($"Resource index {index} is out of range; the capture has {resources.GetCount()} resource(s).");
+                throw PixErrors.InvalidReference($"Resource index {index} is out of range; the capture has {resources.GetCount()} resource(s).",
+                    new ToolCallDto("pix_gpu_resources", new { handle = h.Id }, CostHints.Query));
             }
             return PixApiExtensionsGpuCaptureResources.GetD3D12Resource<IPixD3D12Resource>(resources, index.Value);
         }
@@ -110,7 +119,8 @@ public static class ResourceTools
             {
                 return byName;
             }
-            throw new McpException($"No resource named '{name}' was found.");
+            throw PixErrors.InvalidReference($"No resource named '{name}' was found.",
+                new ToolCallDto("pix_gpu_resources", new { handle = h.Id, nameContains = name }, CostHints.Query));
         }
         if (!string.IsNullOrEmpty(apiObjectId))
         {
@@ -126,9 +136,10 @@ public static class ResourceTools
                     return candidate;
                 }
             }
-            throw new McpException($"No resource with apiObjectId {apiObjectId} was found.");
+            throw PixErrors.InvalidReference($"No resource with apiObjectId {apiObjectId} was found.",
+                new ToolCallDto("pix_gpu_resources", new { handle = h.Id }, CostHints.Query));
         }
-        throw new McpException("Specify apiObjectId, index or name.");
+        throw PixErrors.InvalidArguments("Specify apiObjectId, index or name.");
     }
 
     internal static object ResourceDesc(D3D12_RESOURCE_DESC2 desc) => new
@@ -227,7 +238,7 @@ public static class ResourceTools
 
     internal static void ValidateViewIndex(uint? viewIndex, uint count)
     {
-        if (viewIndex >= count) throw new McpException($"viewIndex {viewIndex} is out of range; there are {count} view(s).");
+        if (viewIndex >= count) throw PixErrors.InvalidReference($"viewIndex {viewIndex} is out of range; there are {count} view(s).");
     }
 
     internal static unsafe object ViewDto(IPixResourceViews views, uint index, bool includeResource, int bindingOffset = 0,
@@ -475,10 +486,10 @@ public static class ResourceTools
         return match;
     }
 
-    [McpServerTool(Name = "pix_gpu_event_resources", ReadOnly = true), Description("Views and resources accessed by a draw/dispatch, including actual DWORD root constants and binding events. Views and bindings have independent offsets. Gathering accessed resources runs once as a shared preparation job.")]
-    public static Task<string> EventResources(PixSession session, JobManager jobs, EventRef eventRef,
-        uint? viewIndex = null, int bindingOffset = 0, int bindingLimit = Paging.DefaultLimit,
-        int viewOffset = 0, int viewLimit = Paging.DefaultLimit,
+    [McpServerTool(Name = "pix_gpu_event_resources", Title = "Resources bound at event", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Views and resources accessed by a draw/dispatch, including actual DWORD root constants and binding events. Views and bindings have independent offsets. Gathering accessed resources runs once as a shared preparation job.")]
+    public static Task<string> EventResources(PixSession session, JobManager jobs, [Description("Event reference { handle, queueIndex, eventIndex } as returned by pix_gpu_events or pix_gpu_overview.")] EventRef eventRef,
+        [Description("Return only this view index of the event.")] uint? viewIndex = null, [Description("First binding to return (default 0).")] int bindingOffset = 0, [Description("Maximum bindings to return (default 25, max 1000).")] int bindingLimit = Paging.DefaultLimit,
+        [Description("First resource view to return (default 0).")] int viewOffset = 0, [Description("Maximum resource views to return (default 25, max 1000).")] int viewLimit = Paging.DefaultLimit,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
         CancellationToken cancellationToken = default)
     {
@@ -529,7 +540,8 @@ public static class ResourceTools
             }
             catch (Exception ex) { rootConstantCoverage.Add(PixErrors.Unavailable("rootConstants", ex)); }
         }
-        if (!h.AccessedResourcesGathered) throw new McpException("Accessed resources have not been prepared.");
+        if (!h.AccessedResourcesGathered) throw PixErrors.InvalidState("Accessed resources have not been prepared for this capture.",
+            [new ToolCallDto("pix_gpu_event_resources", new { eventRef }, CostHints.Replay)]);
         h.GetAnalysis().GetAccessedResources(viewsAtEvent);
         var byResource = new Dictionary<string, (object resource, List<object> views)>();
         var unattached = new List<object>();
@@ -571,16 +583,18 @@ public static class ResourceTools
         };
     }
 
-    [McpServerTool(Name = "pix_gpu_resource_uses", ReadOnly = true), Description("Find observed bindings of a resource, with event references, marker paths, shader stages, registers and binding locations. This is binding/access evidence, not proof of pixel provenance. Missing binding events are reported in coverage. An explicit scope bounds fallback event inspection to that event and its descendants; initial accessed-resource gathering remains capture-wide.")]
-    public static async Task<string> ResourceUses(PixSession session, JobManager jobs, ResourceRef resourceRef,
-        int offset = 0, int limit = Paging.DefaultLimit, int? queueIndex = null,
+    [McpServerTool(Name = "pix_gpu_resource_uses", Title = "Resource uses", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Find observed bindings of a resource, with event references, marker paths, shader stages, registers and binding locations. This is binding/access evidence, not proof of pixel provenance. Missing binding events are reported in coverage. An explicit scope bounds fallback event inspection to that event and its descendants; initial accessed-resource gathering remains capture-wide.")]
+    public static async Task<string> ResourceUses(PixSession session, JobManager jobs, [Description("Resource reference { handle, apiObjectId } as returned by pix_gpu_resources or pix_gpu_event_resources.")] ResourceRef resourceRef,
+        [Description("First item to return (default 0).")] int offset = 0, [Description("Maximum items to return (default 25, max 1000).")] int limit = Paging.DefaultLimit, [Description("Only uses on this queue index; omit for all queues.")] int? queueIndex = null,
         [Description(Tools.ReadyWaitDescription)] double waitSeconds = Tools.DefaultReadyWaitSeconds,
         [Description(EventScope.Description)] EventRef? scope = null,
+        [Description(EventScope.PrefixDescription)] string? markerPathPrefix = null,
         CancellationToken cancellationToken = default)
     {
         ReferenceValidation.Resource(session, resourceRef);
         ReferenceValidation.Page(offset, limit);
-        queueIndex = EventScope.ResolveQueue(session, resourceRef.Handle, queueIndex, scope);
+        ScopeSelection selection = EventScope.Resolve(session, resourceRef.Handle, queueIndex, scope, markerPathPrefix);
+        queueIndex ??= scope?.QueueIndex;
         if (queueIndex.HasValue) session.Get<GpuCaptureHandle>(resourceRef.Handle).Queue(queueIndex.Value);
         // Normalize without touching the PIX worker so concurrent callers can immediately
         // join an active index job. The preparation validates resource existence before replay.
@@ -592,14 +606,15 @@ public static class ResourceTools
                 if (!h.ResourceUses.TryGet(new(resourceRef.Handle, key), scope, out ResourceUsesSnapshot snapshot))
                     throw new InvalidOperationException("Resource-use preparation did not publish its completed snapshot.");
                 ResourceUseDto[] rows = snapshot.Items.Where(i => (!queueIndex.HasValue || i.Binding.EventRef?.QueueIndex == queueIndex.Value)
-                    && EventScope.Contains(h, i.Binding.EventRef, scope)).ToArray();
+                    && selection.Contains(h, i.Binding.EventRef)).ToArray();
                 ResourceUseDto[] items = rows.Skip(offset).Take(limit).ToArray();
                 int? next = offset + (long)items.Length < rows.Length ? offset + items.Length : null;
                 return new ResourceUsesDto(new(resourceRef.Handle, key), snapshot.Evidence, rows.Length, offset, items.Length,
                     next, items, snapshot.Coverage)
                 {
                     NextCalls = next.HasValue ? [new("pix_gpu_resource_uses", new { resourceRef,
-                        offset = next.Value, limit, queueIndex, scope })] : [],
+                        offset = next.Value, limit, queueIndex, scope, markerPathPrefix })] : [],
+                    Scope = selection.DescribeOrNull(h),
                 };
             }, waitSeconds, cancellationToken).ConfigureAwait(false);
     }
@@ -703,7 +718,7 @@ public static class ResourceTools
                         new BindingDto(argumentIndex++, "API_PARAMETER", eventRef,
                             EventNavigation.MarkerPath(events, record.Index), new { parameter, apiCall = record.Name })
                         { EventSource = "capturedApiArgument" }) { ViewIndexScope = "none" });
-                if (!Tools.MatchesKind(record, "drawOrDispatch")) continue;
+                if (!Tools.MatchesKind(record, "work")) continue;
                 try
                 {
                     PIX_EVENT_INFO info = h.EventInfo(queue.Index, record.Index);

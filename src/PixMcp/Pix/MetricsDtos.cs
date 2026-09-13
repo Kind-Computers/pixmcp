@@ -1,18 +1,30 @@
 namespace PixMcp.Pix;
 
-public sealed record TimingEventDto(EventRef EventRef, IReadOnlyList<string> MarkerPath, int QueueIndex, uint Index,
-    uint? GpuId, string Name, ulong? TopStartNs, ulong? TopDurationNs, ulong? EopStartNs, ulong? EopDurationNs);
+/// <summary>One replay timing row. Eop is the end-of-pipe interval (includes idle before the event); Exec is TOP-to-EOP and overlaps neighbours.</summary>
+public sealed record TimingEventDto(EventRef EventRef, IReadOnlyList<string>? MarkerPath, int QueueIndex, uint Index,
+    uint? GpuId, string Name, string Kind, DurationDto Eop, DurationDto? Exec,
+    ulong? TopStartNs, ulong? TopDurationNs, ulong? EopStartNs, ulong? EopEndNs);
 
-public sealed record TimingBranchDto(EventRef EventRef, uint Index, string Name, uint? GpuId,
-    ulong? MeasuredEopNs, ulong InclusiveEopNs, ulong SelfEopNs, double PercentOfQueue,
+public sealed record TimingBranchDto(EventRef EventRef, uint Index, string Name, uint? GpuId, string Semantics,
+    DurationDto Inclusive, DurationDto Self, ulong? MeasuredEopNs, ulong ChildSumEopNs, bool ChildrenExceedMeasured,
+    ulong ChildOverflowNs, int UntimedChildren, bool Repaired, ulong? TopStartNs, ulong? ExecutionNs,
     bool HasOwnTiming, int TimedDescendants, int ChildCount, IReadOnlyList<TimingBranchDto> Children,
     bool ChildrenTruncated, IReadOnlyList<ToolCallDto> NextCalls);
-public sealed record TimingTreeDto(string Handle, int QueueIndex, ulong TotalEopNs,
-    int TimedEvents, int Offset, int ChildCount, IReadOnlyList<TimingBranchDto> Children,
-    int? NextOffset, bool ChildrenTruncated, int ReturnedNodes, bool NodeBudgetExhausted,
-    object Provenance, IReadOnlyList<ToolCallDto> NextCalls);
+public sealed record TimingTreeDto(string Handle, int QueueIndex, EventRef? Scope, string SortBy, QueueTotals Queue,
+    DenominatorsDto Denominators, int TimedEvents, int UntimedEvents, int RepairedLinks, int Offset, int ChildCount,
+    IReadOnlyList<TimingBranchDto> Children, int? NextOffset, bool ChildrenTruncated, int ReturnedNodes,
+    bool NodeBudgetExhausted, object Provenance, IReadOnlyList<ToolCallDto> NextCalls)
+{
+    /// <summary>What scope/markerPathPrefix resolved to; null when the tree is unrestricted.</summary>
+    public ScopeDescriptionDto? Selection { get; init; }
+}
+/// <summary>
+/// One counter row. <c>rowKind</c> is <c>marker</c> for a PIX marker (its values are PIX's own measurement over the
+/// marker's span, collected in a separate playback round, never the sum of its children) or <c>event</c> for a leaf.
+/// <c>descendantDataEvents</c> counts the leaf rows with data under a marker.
+/// </summary>
 public sealed record CounterValueRowDto(EventRef EventRef, uint Index, uint? GpuId, string Name,
-    IReadOnlyList<string> MarkerPath, IReadOnlyDictionary<string, object?> Values);
+    IReadOnlyList<string>? MarkerPath, IReadOnlyDictionary<string, object?> Values, string RowKind = "event", int? DescendantDataEvents = null);
 
 public static class CounterQuery
 {

@@ -11,7 +11,10 @@ using PixMcp.Pix.Handles;
 namespace PixMcp.Tools;
 
 /// <summary>Stable collection-index path within a dump queue, independent of duplicate native event IDs.</summary>
-public sealed record DumpEventRef(string Handle, int QueueIndex, int[] EventPath)
+public sealed record DumpEventRef(
+    [property: Description("Dump handle (from pix_dump_open).")] string Handle,
+    [property: Description("Queue index in the dump (from pix_dump_queues).")] int QueueIndex,
+    [property: Description("Path of child indices from the queue's root events to the event (from pix_dump_events).")] int[] EventPath)
 {
     internal DumpEventRef Child(int index) => this with { EventPath = [.. EventPath, index] };
 }
@@ -26,12 +29,12 @@ public sealed record DumpTriageDto(string Handle, object Device, string Interpre
 
 public static partial class DumpTools
 {
-    [McpServerTool(Name = "pix_dump_event", ReadOnly = true), Description("Inspects one dump event using its stable eventRef and pages its immediate children. Use child eventRefs recursively to retrieve every descendant, including nodes cut from pix_dump_events.")]
+    [McpServerTool(Name = "pix_dump_event", Title = "Dump event detail", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Inspects one dump event using its stable eventRef and pages its immediate children. Use child eventRefs recursively to retrieve every descendant, including nodes cut from pix_dump_events.")]
     public static Task<string> Event(PixSession session,
         [Description("Unmodified eventRef returned by dump events or triage.")] DumpEventRef eventRef,
         [Description("First immediate child index.")] int offset = 0,
-        [Description("Maximum immediate children, 1 through 1000.")] int limit = 25,
-        [Description("Include correlated shaders and resources.")] bool includeCorrelations = true,
+        [Description("Maximum immediate children, 1 through 1000. Default: 25.")] int limit = 25,
+        [Description("Include correlated shaders and resources. Default: true.")] bool includeCorrelations = true,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_dump_event", () =>
         {
@@ -56,21 +59,21 @@ public static partial class DumpTools
     {
         List<IPixPostmortemQueueInfo> queues = Queues(h);
         if (reference.QueueIndex < 0 || reference.QueueIndex >= queues.Count || reference.EventPath is not { Length: > 0 } || reference.EventPath.Any(i => i < 0))
-            throw new PixToolException("invalid_reference", "A dump eventRef needs a valid queueIndex and a nonempty path of nonnegative collection indices.");
+            throw new PixToolException(PixErrors.Codes.InvalidReference, "A dump eventRef needs a valid queueIndex and a nonempty path of nonnegative collection indices.");
         IPixCollection? collection = PixApiExtensionsPostmortemDump.TryGetEvents(queues[reference.QueueIndex], out _);
         IPixPostmortemEvent? result = null;
         for (int depth = 0; depth < reference.EventPath.Length; depth++)
         {
             int index = reference.EventPath[depth];
             if (collection is null || (ulong)index >= collection.GetCount())
-                throw new PixToolException("invalid_reference", $"Dump eventRef path is out of range at depth {depth}.");
+                throw new PixToolException(PixErrors.Codes.InvalidReference, $"Dump eventRef path is out of range at depth {depth}.");
             result = collection.Get<IPixPostmortemEvent>((ulong)index);
             if (depth + 1 < reference.EventPath.Length) collection = PixApiExtensionsPostmortemDump.TryGetChildEvents(result, out _);
         }
         return result!;
     }
 
-    [McpServerTool(Name = "pix_dump_triage", ReadOnly = true), Description("Builds a deterministic evidence report for device removal: page faults with resource lifetime evidence, shader exceptions, in-progress and possibly-completed events, and DRED breadcrumb boundaries. Traverses children even when their parent completed. Returns ranked observations and explicit coverage; observations do not establish a causal diagnosis. Page with offset/limit.")]
+    [McpServerTool(Name = "pix_dump_triage", Title = "Triage dump", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Builds a deterministic evidence report for device removal: page faults with resource lifetime evidence, shader exceptions, in-progress and possibly-completed events, and DRED breadcrumb boundaries. Traverses children even when their parent completed. Returns ranked observations and explicit coverage; observations do not establish a causal diagnosis. Page with offset/limit.")]
     public static Task<string> Triage(PixSession session,
         [Description("Open dump handle.")] string handle,
         [Description("First ranked observation.")] int offset = 0,

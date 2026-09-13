@@ -1,6 +1,6 @@
 [
  ["pix_gpu_open", {"path": "$env.PIX_TEST_CAPTURE"}],
- ["pix_gpu_events", {"handle": "$pix_gpu_open.handle", "kind": "drawOrDispatch", "limit": 10}],
+ ["pix_gpu_events", {"handle": "$pix_gpu_open.handle", "kind": "work", "limit": 10}],
  ["pix_gpu_analysis_start", {"handle": "$pix_gpu_open.handle", "waitSeconds": 300}, {"status": "succeeded"}],
  ["pix_gpu_timing_events", {"handle": "$pix_gpu_open.handle", "limit": 10}],
  ["pix_gpu_pipeline_state", {"eventRef": "$pix_gpu_events.items.0.eventRef"}],

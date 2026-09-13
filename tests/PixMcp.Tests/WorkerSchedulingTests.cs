@@ -115,6 +115,48 @@ public sealed class WorkerSchedulingTests
         Assert.Equal(JobStatus.Succeeded, job.Status);
     }
 
+    [Fact]
+    public async Task DisposeFailsQueuedWorkWithServerShuttingDownAndLetsTheActiveCallFinish()
+    {
+        var worker = new PixWorker();
+        using var gate = new Gate();
+        Task<int> active = worker.Run(() => { gate.Block(); return 7; });
+        await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Task<int> queued = worker.Run(() => 1, operation: "pix_gpu_events");
+        Task queuedTask = worker.Run(() => { }, operation: "pix_close");
+        Task dispose = Task.Run(worker.Dispose);
+        PixToolException error = await Assert.ThrowsAsync<PixToolException>(() => queued.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(PixErrors.Codes.ServerShuttingDown, error.Detail.Code);
+        Assert.Contains("pix_gpu_events", error.Detail.Message);
+        await Assert.ThrowsAsync<PixToolException>(() => queuedTask.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(0, worker.PendingCount);
+        gate.Release.Set();
+        Assert.Equal(7, await active);
+        await dispose.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(PixErrors.Codes.ServerShuttingDown, (await Assert.ThrowsAsync<PixToolException>(() => worker.Run(() => 1))).Detail.Code);
+    }
+
+    [Fact]
+    public async Task EnqueueAndCancelRacesLeaveNothingQueued()
+    {
+        using var worker = new PixWorker();
+        using var gate = new Gate();
+        Task active = worker.Run(gate.Block);
+        await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var tasks = new List<Task>();
+        Parallel.For(0, 500, _ =>
+        {
+            using var cancellation = new CancellationTokenSource();
+            Task queued = worker.Run(() => 1, cancellation.Token);
+            cancellation.Cancel();
+            lock (tasks) tasks.Add(queued);
+        });
+        await Task.WhenAll(tasks.Select(async t => { try { await t; } catch (OperationCanceledException) { } }));
+        Assert.Equal(0, worker.PendingCount);
+        gate.Release.Set();
+        await active;
+    }
+
     private sealed class FakeHandle() : PixHandle("fake")
     {
         public override string Kind => "fake";

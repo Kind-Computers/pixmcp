@@ -110,7 +110,7 @@ public class EventFilterTests
         Assert.Single(draws);
         Assert.Equal(1u, draws[0].Index);
 
-        var both = ToolHelpers.FilterEvents(Events, null, null, null, "drawOrDispatch", null, null, null).ToArray();
+        var both = ToolHelpers.FilterEvents(Events, null, null, null, "work", null, null, null).ToArray();
         Assert.Equal(2, both.Length);
 
         var byName = ToolHelpers.FilterEvents(Events, "shadow", null, null, null, null, null, null).ToArray();
@@ -128,7 +128,7 @@ public class EventFilterTests
     [Fact]
     public void UnknownKindIsAnError()
     {
-        Assert.Throws<ModelContextProtocol.McpException>(() => ToolHelpers.FilterEvents(Events, null, null, null, "bogus", null, null, null).ToArray());
+        Assert.Throws<PixToolException>(() => ToolHelpers.FilterEvents(Events, null, null, null, "bogus", null, null, null).ToArray());
     }
 
     [Fact]
@@ -149,7 +149,7 @@ public class ToolHelperTests
     {
         Assert.Equal(0x1A2Bul, ToolHelpers.ParseId("0x1A2B", "id"));
         Assert.Equal(42ul, ToolHelpers.ParseId("42", "id"));
-        Assert.Throws<ModelContextProtocol.McpException>(() => ToolHelpers.ParseId("zz", "id"));
+        Assert.Equal(PixErrors.Codes.InvalidArguments, Assert.Throws<PixToolException>(() => ToolHelpers.ParseId("zz", "id")).Detail.Code);
     }
 
     [Fact]
