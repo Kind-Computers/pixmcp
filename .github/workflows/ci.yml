@@ -11,32 +11,50 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
 jobs:
   harness:
-    name: Smoke harness and scenarios (no PIX needed)
+    name: Smoke harness, scenarios, coverage and docs (no PIX needed)
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Unit-test the stdio MCP client used by the smoke scenarios
+      - name: Unit-test the harness scripts (stdio client, fixtures, benchmark, coverage, environment)
         run: python -m unittest discover -s scripts -p "test_*.py" -v
       - name: Check PIX version strings against Directory.Build.props
         run: python scripts/check_versions.py
-      - name: Validate scenario files
-        run: python -c "import glob, json; [json.load(open(p, encoding='utf-8')) for p in glob.glob('scripts/scenarios/*.json')]; print('scenarios ok')"
+      - name: Validate scenarios (shape, registered tool names, step references)
+        run: python scripts/smoke.py --validate-scenarios scripts/scenarios
+      - name: Check the synthetic PixStorage fixture against its seed, schema and logical hash
+        run: python scripts/make_timing_fixture.py --check
+      - name: Require every registered tool to be exercised or allowlisted with a reason
+        run: python scripts/tool_coverage.py --fail-on-uncovered
+      - name: Check the README tool catalog and docs/tools.md against the registered tools
+        run: python scripts/check_docs.py
 
   # The server, its unit tests and the smoke scenarios need the PIX Preview API, a D3D12 GPU and
   # Windows Developer Mode, none of which hosted runners have. Register a self-hosted Windows runner
-  # with PIX Preview (newer than 2606.15) installed and the labels below, then run this job on demand.
+  # with PIX Preview (newer than 2606.15) installed and the labels below; the job runs on demand and
+  # on every push to main.
   pix:
-    name: Build, test and smoke (self-hosted runner with PIX Preview)
-    if: github.event_name == 'workflow_dispatch'
+    name: Build, test, smoke and benchmark (self-hosted runner with PIX Preview)
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: [self-hosted, windows, pix]
+    timeout-minutes: 150
     concurrency:
       group: pix-gpu-validation
       cancel-in-progress: false
+    env:
+      SERVER: src/PixMcp/bin/x64/Release/net10.0-windows10.0.26100.0/PixMcp.exe
+      PIX_TEST_CAPTURE: ${{ github.workspace }}\tests\artifacts\baseline.wpix
+      PIX_TEST_ANALYSIS: "1"
+      PIX_TEST_TIMING_CAPTURE: ${{ github.workspace }}\tests\artifacts\timing.wpix
+      PIX_TEST_CPP_OUTPUT: ${{ runner.temp }}\pixmcp-cpp-export-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -45,34 +63,49 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: dotnet build pixmcp.sln -c Release
-      - run: dotnet test pixmcp.sln -c Release --no-build --logger "trx;LogFileName=unit-tests.trx"
+      - name: Build
+        timeout-minutes: 15
+        run: dotnet build pixmcp.sln -c Release
       - name: Build the D3D12 test app (needs Visual Studio C++ tools)
+        timeout-minutes: 10
         run: cmd /c tests\D3D12TestApp\build.cmd
       - name: Generate GPU and symbol-resolved timing fixtures serially
-        run: python scripts/capture_fixtures.py src/PixMcp/bin/x64/Release/net10.0-windows10.0.26100.0/PixMcp.exe
-      - name: Run capture and timing integration tests without overlapping GPU work
-        env:
-          PIX_TEST_CAPTURE: ${{ github.workspace }}\tests\artifacts\baseline.wpix
-          PIX_TEST_ANALYSIS: "1"
-          PIX_TEST_TIMING_CAPTURE: ${{ github.workspace }}\tests\artifacts\timing.wpix
-        run: dotnet test pixmcp.sln -c Release --no-build --logger "trx;LogFileName=capture-tests.trx" -- xUnit.ParallelizeTestCollections=false
-      - name: Benchmark investigations and preserve partial failures
+        timeout-minutes: 20
+        run: python scripts/capture_fixtures.py ${{ env.SERVER }}
+      - name: Record the environment (commit, PIX build, GPU adapters, capture hashes)
+        timeout-minutes: 2
+        run: python scripts/environment.py --out tests/artifacts/environment.json
+      - name: Check the recorded PixStorage schema for drift from the golden census
+        timeout-minutes: 5
+        run: python scripts/pixstorage_schema.py tests/artifacts/timing.wpix --check
+      - name: Unit, capture and timing tests in one run without overlapping GPU work
+        timeout-minutes: 60
+        run: dotnet test pixmcp.sln -c Release --no-build --logger "trx;LogFileName=tests.trx" -- xUnit.ParallelizeTestCollections=false
+      - name: Check the generated tool reference is current
+        timeout-minutes: 2
+        run: ${{ env.SERVER }} --tool-reference docs/tools.md --check
+      - name: Run every smoke scenario whose environment is available
         if: success() || failure()
+        timeout-minutes: 45
+        run: python scripts/smoke.py --max 2000 --all scripts/scenarios --skip-missing-env ${{ env.SERVER }}
+      - name: Benchmark investigations against budgets and preserve partial failures
+        if: success() || failure()
+        timeout-minutes: 30
         env:
           STRICT_BENCHMARK: ${{ inputs.strict_benchmark }}
         shell: pwsh
         run: |
-          $benchmarkArguments = @('scripts/benchmark.py', 'src/PixMcp/bin/x64/Release/net10.0-windows10.0.26100.0/PixMcp.exe', '--capture', 'tests/artifacts/baseline.wpix', '--candidate', 'tests/artifacts/candidate.wpix')
+          $benchmarkArguments = @('scripts/benchmark.py', $env:SERVER, '--capture', 'tests/artifacts/baseline.wpix', '--candidate', 'tests/artifacts/candidate.wpix', '--enforce-budgets')
           if ($env:STRICT_BENCHMARK -eq 'true') { $benchmarkArguments += '--strict' }
           python @benchmarkArguments
           exit $LASTEXITCODE
-      - name: Upload captures, PDBs, test results, and partial investigation reports
+      - name: Upload reports, test results and preview images
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pix-validation
+          retention-days: 14
           path: |
-            tests/artifacts/
-            tests/D3D12TestApp/bin/*.pdb
+            tests/artifacts/*.json
+            tests/artifacts/**/*.png
             **/TestResults/*.trx

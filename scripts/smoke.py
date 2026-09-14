@@ -7,6 +7,9 @@ Usage: python scripts/smoke.py [--max=6000] [--timeout=660] <server exe> <tool> 
  - Scenario steps are [tool, args] or [tool, args, {"result.path": expected_json_value}].
    Assertions use dotted paths into that step's result, for example {"status": "succeeded"}.
  - RPC, tool, failed/cancelled jobs, missing references, and assertion errors exit nonzero.
+ - --validate-scenarios DIR checks every scenario (shape, registered tool names, step references) without a server.
+ - --all DIR runs every scenario on a fresh server, except manual ones (provoke-hang); --skip-missing-env skips
+   scenarios whose $env references are unset, naming the variables.
 """
 import argparse
 import base64
@@ -254,27 +257,77 @@ def run_steps(client, steps, maxchars):
             raise SmokeError(f"Step {index} ({tool}): {error}") from error
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--max", type=int, default=6000, dest="maxchars")
-    parser.add_argument("--timeout", type=float, default=660, help="Deadline in seconds for each RPC response")
-    parser.add_argument("server")
-    parser.add_argument("steps", nargs=argparse.REMAINDER)
-    options = parser.parse_args(argv)
+MANUAL_SCENARIOS = {"provoke-hang": "deliberately hangs and resets the GPU"}
+PSEUDO_TOOLS = {"tools", "sleep"}
+
+
+def environment_references(value):
+    """Names of the $env.NAME references anywhere in a step."""
+    if isinstance(value, str):
+        return {value[5:]} if value.startswith("$env.") else set()
+    items = value.values() if isinstance(value, dict) else value if isinstance(value, list) else ()
+    found = set()
+    for item in items:
+        found |= environment_references(item)
+    return found
+
+
+def step_references(value):
+    """Result names referenced as $name.path ($env references excluded)."""
+    if isinstance(value, str):
+        return {value[1:].split(".", 1)[0]} if value.startswith("$") and not value.startswith("$env.") else set()
+    items = value.values() if isinstance(value, dict) else value if isinstance(value, list) else ()
+    found = set()
+    for item in items:
+        found |= step_references(item)
+    return found
+
+
+def scenario_files(folder):
+    return sorted(os.path.join(folder, name) for name in os.listdir(folder) if name.endswith(".json"))
+
+
+def validate_scenario(path, registered):
+    """Problems in one scenario: its shape, unregistered tools, and references to results no earlier step produced."""
+    name = os.path.basename(path)
+    try:
+        steps = parse_steps(["@" + path])
+    except (SmokeError, OSError, ValueError) as error:
+        return [f"{name}: {error}"]
+    problems = []
+    earlier = {"last"}
+    for index, step in enumerate(steps, 1):
+        if step[0] not in PSEUDO_TOOLS and step[0] not in registered:
+            problems.append(f"{name}: step {index} calls unregistered tool {step[0]!r}")
+        for missing in sorted(step_references(step[1:]) - earlier):
+            problems.append(f"{name}: step {index} references ${missing} before any step produced it")
+        earlier.add(step[0])
+    return problems
+
+
+def validate_scenarios(folder, registered=None):
+    if registered is None:
+        from tool_registry import registered_tools
+        registered = set(registered_tools())
+    problems = []
+    for path in scenario_files(folder):
+        problems += validate_scenario(path, registered)
+    return problems
+
+
+def run_scenario(server, steps, maxchars, timeout):
+    """Starts the server, runs the steps, shuts the server down and returns the exit code."""
     client = None
     exit_code = 0
     try:
-        if options.maxchars <= 0:
-            raise SmokeError("--max must be positive")
-        steps = parse_steps(options.steps)
-        client = Client([os.path.abspath(options.server)], timeout=options.timeout)
+        client = Client([os.path.abspath(server)], timeout=timeout)
         init = client.send("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
                                           "clientInfo": {"name": "smoke", "version": "1"}})
         if not isinstance(init["result"], dict) or "serverInfo" not in init["result"]:
             raise SmokeError("initialize: missing serverInfo")
         print("initialize:", json.dumps(init["result"]["serverInfo"]))
         client.send("notifications/initialized", notify=True)
-        run_steps(client, steps, options.maxchars)
+        run_steps(client, steps, maxchars)
     except (SmokeError, OSError, ValueError, TypeError) as error:
         print(f"smoke: {error}", file=sys.stderr)
         exit_code = 1
@@ -299,6 +352,67 @@ def main(argv=None):
             if lines:
                 print("--- server stderr ---\n" + "\n".join(lines), file=sys.stderr)
     return exit_code
+
+
+def run_all(server, folder, maxchars, timeout, skip_missing_env, environ=None):
+    """Runs every scenario in folder; the last stdout line is 'smoke: {passed, failed, skipped}'."""
+    environ = os.environ if environ is None else environ
+    summary = {"passed": [], "failed": [], "skipped": []}
+    for path in scenario_files(folder):
+        name = os.path.splitext(os.path.basename(path))[0]
+        if name in MANUAL_SCENARIOS:
+            summary["skipped"].append(f"{name} (manual: {MANUAL_SCENARIOS[name]})")
+            continue
+        steps = parse_steps(["@" + path])
+        missing = sorted(environment_references(steps) - set(environ))
+        if missing and skip_missing_env:
+            summary["skipped"].append(f"{name} (unset: {', '.join(missing)})")
+            continue
+        print(f"=== scenario {name}", flush=True)
+        code = run_scenario(server, steps, maxchars, timeout)
+        summary["passed" if code == 0 else "failed"].append(name)
+        if code == 130:
+            break
+    print("smoke: " + json.dumps(summary), flush=True)
+    return 1 if summary["failed"] else 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--max", type=int, default=6000, dest="maxchars")
+    parser.add_argument("--timeout", type=float, default=660, help="Deadline in seconds for each RPC response")
+    parser.add_argument("--validate-scenarios", metavar="DIR", help="Check every scenario in DIR without starting a server.")
+    parser.add_argument("--all", metavar="DIR", dest="all_dir", help="Run every scenario in DIR, each on a fresh server.")
+    parser.add_argument("--skip-missing-env", action="store_true", help="With --all, skip scenarios whose $env references are unset.")
+    parser.add_argument("server", nargs="?")
+    parser.add_argument("steps", nargs=argparse.REMAINDER)
+    options = parser.parse_args(argv)
+    if options.validate_scenarios:
+        try:
+            problems = validate_scenarios(options.validate_scenarios)
+        except (OSError, ValueError) as error:
+            problems = [str(error)]
+        for problem in problems:
+            print(f"smoke: {problem}", file=sys.stderr)
+        print(f"smoke: {len(scenario_files(options.validate_scenarios)) if not problems else 'invalid'} scenarios"
+              f" {'valid' if not problems else ''} in {options.validate_scenarios}".replace("  ", " "))
+        return 1 if problems else 0
+    if not options.server:
+        print("smoke: a server executable is required", file=sys.stderr)
+        return 1
+    if options.maxchars <= 0:
+        print("smoke: --max must be positive", file=sys.stderr)
+        return 1
+    try:
+        if options.all_dir:
+            if options.steps:
+                raise SmokeError("--all runs the scenarios in DIR; do not pass steps")
+            return run_all(options.server, options.all_dir, options.maxchars, options.timeout, options.skip_missing_env)
+        steps = parse_steps(options.steps)
+    except (SmokeError, OSError, ValueError, TypeError) as error:
+        print(f"smoke: {error}", file=sys.stderr)
+        return 1
+    return run_scenario(options.server, steps, options.maxchars, options.timeout)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,13 @@
+# Registered tools no test, scenario or script exercises yet, each with the fixture that is missing.
+# scripts/tool_coverage.py --fail-on-uncovered fails on uncovered tools not listed here and on entries that became covered.
+pix_capture_upgrade  # needs a capture in an older file format; every fixture is written by the current PIX build
+pix_device_attach  # needs a running capturable process started outside PIX; scenarios launch the fixture under pix_device_launch
+pix_gpu_heap  # needs a capture with a heap and a stable heap reference; rich.wpix (--placed-heap) is not asserted yet
+pix_dump_blobs  # needs a DirectX dump (.dxdmp_preview); only the manual provoke-hang scenario produces one
+pix_dump_breadcrumbs  # needs a DirectX dump (.dxdmp_preview); only the manual provoke-hang scenario produces one
+pix_dump_gpu_state  # needs a DirectX dump (.dxdmp_preview); only the manual provoke-hang scenario produces one
+pix_dump_info  # needs a DirectX dump (.dxdmp_preview); only the manual provoke-hang scenario produces one
+pix_dump_shader_eval  # needs a DirectX dump with shader waves; no dump fixture exists
+pix_dump_shader_variable  # needs a DirectX dump with shader waves; no dump fixture exists
+pix_dump_shader_wave  # needs a DirectX dump with shader waves; no dump fixture exists
+pix_dump_shader_wave_data  # needs a DirectX dump with shader waves; no dump fixture exists

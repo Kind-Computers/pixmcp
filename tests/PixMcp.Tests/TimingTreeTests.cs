@@ -16,28 +16,11 @@ public sealed class TimingTreeTests
     //       6 Dispatch (5 ns)
     //     7 Draw (untimed)
     // 8 Present (1 ns, top level)
-    private static readonly EventRecord[] Events =
-    {
-        new(0, uint.MaxValue, uint.MaxValue, "Frame", "", 0, 0),
-        new(1, uint.MaxValue, 0, "Shadow pass", "", 0, 0),
-        new(2, 1, 1, "DrawInstanced", "DrawInstanced(3)", 0, 0),
-        new(3, 2, 1, "DrawInstanced", "DrawInstanced(6)", 0, 0),
-        new(4, uint.MaxValue, 0, "Main pass", "", 0, 0),
-        new(5, uint.MaxValue, 4, "Marker", "", 0, 0),
-        new(6, 3, 5, "Dispatch", "Dispatch(1,1,1)", 0, 0),
-        new(7, 4, 4, "DrawInstanced", "DrawInstanced(3)", 0, 0),
-        new(8, 5, uint.MaxValue, "Present", "", 0, 0),
-    };
-
-    private static readonly EventTimingRow[] Rows =
-    {
-        Row(2, 10), Row(3, 20), Row(4, 8), Row(6, 5), Row(8, 1),
-        new(0, 7, 4, "DrawInstanced", "DrawInstanced(3)", 0, 0, 0, GpuCaptureHandle.TimingNone),
-    };
+    private static readonly SyntheticQueue Canonical = SyntheticGpuCapture.Canonical().Queues[0];
+    private static readonly EventRecord[] Events = Canonical.Events;
+    private static readonly EventTimingRow[] Rows = Canonical.Rows;
 
     private static readonly object Provenance = new { source = "test" };
-
-    private static EventTimingRow Row(uint index, ulong eop) => new(0, index, index, Events[index].Name, Events[index].ApiCallData, 0, eop, 0, eop);
 
     [Fact]
     public void UnmeasuredMarkersSumTheirChildrenAndMeasuredOnesAreTakenAsIs()

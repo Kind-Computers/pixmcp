@@ -239,12 +239,7 @@ public sealed class TimingQueryTests
     public void NativeRecordedFixtureProvidesQueryableCountersAndSampleCoverage()
     {
         string? capture = TestArtifacts.TimingCapture;
-        if (capture is null)
-        {
-            string existing = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pixmcp_timing_test.wpix");
-            if (File.Exists(existing)) capture = existing;
-        }
-        Skip.If(capture is null || !File.Exists(capture) || PixDiscovery.InstallDir is null, "Provide PIX_TEST_TIMING_CAPTURE or an existing pixmcp_timing_test.wpix fixture.");
+        Skip.If(capture is null || PixDiscovery.InstallDir is null, "Set PIX_TEST_TIMING_CAPTURE to a timing capture.");
         byte[] before = SHA256.HashData(File.ReadAllBytes(capture!));
         using (var db = new TimingDatabase(capture!, System.IO.Path.Combine(PixDiscovery.InstallDir!, "pixstorage.dll")))
         {
@@ -292,9 +287,8 @@ public sealed class TimingQueryTests
     [SkippableFact]
     public async Task NativeToolQueriesShareSnapshotsAndInvalidateProfilesAfterSave()
     {
-        string source = TestArtifacts.TimingCapture
-            ?? System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pixmcp_timing_test.wpix");
-        Skip.If(!File.Exists(source) || PixDiscovery.InstallDir is null, "Provide an existing timing capture.");
+        string? source = TestArtifacts.TimingCapture;
+        Skip.If(source is null || PixDiscovery.InstallDir is null, "Set PIX_TEST_TIMING_CAPTURE to a timing capture.");
         DirectoryInfo directory = Directory.CreateTempSubdirectory("pixmcp-timing-lifecycle-");
         try
         {

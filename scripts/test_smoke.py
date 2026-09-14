@@ -200,5 +200,67 @@ class SmokeTests(unittest.TestCase):
                 smoke.Client(["does-not-exist.exe"], timeout=timeout)
 
 
+
+class ScenarioSuiteTests(unittest.TestCase):
+    @staticmethod
+    def write(directory, name, steps):
+        path = Path(directory) / f"{name}.json"
+        path.write_text(json.dumps(steps), encoding="utf-8")
+        return path
+
+    def test_validation_reports_shape_unknown_tools_and_forward_references(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.write(directory, "good", [["pix_gpu_open", {"path": "$env.PIX_TEST_CAPTURE"}],
+                                           ["pix_gpu_events", {"handle": "$pix_gpu_open.handle"}, {"total": "$last.total"}], ["sleep", {"seconds": 0}]])
+            self.write(directory, "bad", [["pix_gpu_events", {"handle": "$pix_gpu_open.handle"}], ["pix_gpu_nope", {}]])
+            (Path(directory) / "broken.json").write_text("[[1]]", encoding="utf-8")
+            problems = smoke.validate_scenarios(directory, {"pix_gpu_open", "pix_gpu_events"})
+        self.assertEqual(3, len(problems), problems)
+        self.assertIn("bad.json: step 1 references $pix_gpu_open before any step produced it", problems)
+        self.assertIn("bad.json: step 2 calls unregistered tool 'pix_gpu_nope'", problems)
+        self.assertTrue(any(problem.startswith("broken.json: Invalid scenario step 1") for problem in problems), problems)
+
+    def test_repository_scenarios_are_valid_against_the_registered_tools(self):
+        folder = Path(smoke.__file__).resolve().parent / "scenarios"
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(0, smoke.main(["--validate-scenarios", str(folder)]), errors.getvalue())
+
+    def test_all_runs_each_scenario_on_its_own_server_and_skips_manual_and_unset_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.write(directory, "first", [["sleep", {"seconds": 0}]])
+            self.write(directory, "needs-env", [["pix_gpu_open", {"path": "$env.PIXMCP_SMOKE_TEST_NEVER_SET"}]])
+            self.write(directory, "provoke-hang", [["sleep", {"seconds": 0}]])
+            self.write(directory, "second", [["sleep", {"seconds": 1}]])
+            runs = []
+
+            def fake_run(server, steps, maxchars, timeout):
+                runs.append(steps)
+                return 0 if len(runs) == 1 else 1
+
+            output = io.StringIO()
+            with patch.dict(os.environ, {}, clear=False), patch.object(smoke, "run_scenario", side_effect=fake_run), \
+                    contextlib.redirect_stdout(output):
+                os.environ.pop("PIXMCP_SMOKE_TEST_NEVER_SET", None)
+                code = smoke.main(["--all", directory, "--skip-missing-env", "unused.exe"])
+        self.assertEqual(1, code)
+        self.assertEqual([[["sleep", {"seconds": 0}]], [["sleep", {"seconds": 1}]]], runs)
+        summary = json.loads(output.getvalue().strip().splitlines()[-1][len("smoke: "):])
+        self.assertEqual((["first"], ["second"]), (summary["passed"], summary["failed"]))
+        self.assertEqual(["needs-env (unset: PIXMCP_SMOKE_TEST_NEVER_SET)", "provoke-hang (manual: deliberately hangs and resets the GPU)"],
+                         summary["skipped"])
+
+    def test_all_without_skip_runs_scenarios_with_unset_environment_and_they_fail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.write(directory, "needs-env", [["pix_gpu_open", {"path": "$env.PIXMCP_SMOKE_TEST_NEVER_SET"}]])
+            with patch.object(smoke, "run_scenario", return_value=1) as run, contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(1, smoke.main(["--all", directory, "unused.exe"]))
+            run.assert_called_once()
+
+    def test_server_is_required_unless_validating(self):
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(1, smoke.main([]))
+        self.assertIn("server executable is required", errors.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

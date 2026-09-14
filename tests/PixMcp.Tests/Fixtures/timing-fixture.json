@@ -1,0 +1,285 @@
+{
+ "description": "Rows of the PIX-free synthetic timing capture built by scripts/make_timing_fixture.py. Timestamps are ns in the capture clock; ProcThreadId packs pid << 32 | tid ((4242 << 32) | 7 = 18219251269639). Virtual tables are plain stand-ins without hidden columns. BLOB cells are {\"hex\": \"...\"}.",
+ "tables": {
+  "ApiCommandQueue": {
+   "columns": ["Id", "TypeId", "ProcessId", "HardwareAdapterId", "NameId", "BeginTimestamp", "EndTimestamp", "ExecutionCount", "WorkCount", "MaxExecutionLevel", "MaxWorkLevel", "MarkerCount", "ApiExecutionCount", "CommandListCount"],
+   "rows": [
+    [1, 5, 1, 1, 4, 0, 10000, 4, 0, 0, 0, 0, 4, 4]
+   ]
+  },
+  "ApiQueueExecution": {
+   "columns": ["Id", "ApiCommandQueueId", "ThreadId", "SubmitTimestamp", "BeginTimestamp", "EndTimestamp", "FrameToken"],
+   "rows": [
+    [1, 1, 10, 150, 200, 300, 0],
+    [2, 1, 10, 400, 500, 600, 0],
+    [3, 1, 11, 700, 700, 900, 0],
+    [4, 1, 10, 1000, 990, 1100, 0]
+   ]
+  },
+  "CaptureData": {
+   "columns": ["Id", "NameId", "ValueId"],
+   "rows": [
+    [1, 23, 1]
+   ]
+  },
+  "CaptureFacts": {
+   "columns": ["Id", "Value"],
+   "rows": [
+    [2, 100],
+    [3, 10000],
+    [4, 4242],
+    [5, 4],
+    [24, 5000]
+   ]
+  },
+  "CaptureStats": {
+   "columns": ["Id", "Timestamp", "EventCount", "ByteCount", "LostEtwEventCount", "LostEtwBufferCount"],
+   "rows": [
+    [1, 500, 10, 100, 0, 0]
+   ]
+  },
+  "ContextSwitch": {
+   "columns": ["Core", "Timestamp", "FromProcThreadId", "ToProcThreadId", "ReadyThreadId", "FromThreadPriority", "ToThreadPriority", "FromThreadWaitReason"],
+   "rows": [
+    [0, 1000, 0, 18219251269639, 1, 0, 8, 0],
+    [0, 1500, 18219251269639, 0, 0, 8, 0, 6],
+    [0, 2500, 0, 18219251269639, 2, 0, 8, 0],
+    [0, 2600, 18219251269639, 0, 0, 8, 0, 32],
+    [1, 2650, 0, 18219251269639, 0, 0, 8, 0],
+    [1, 3000, 18219251269639, 0, 0, 8, 0, 6],
+    [1, 3600, 0, 18219251269639, 3, 0, 8, 0],
+    [1, 20000, 18219251269639, 0, 0, 8, 0, 6]
+   ]
+  },
+  "Cores": {
+   "columns": ["Id", "StartingThreadId", "ContextSwitchCount", "MaxPixEventLevel", "SampleCount", "PhysicalCoreId"],
+   "rows": [
+    [0, 0, 10, 0, 4, 0],
+    [1, 0, 6, 0, 2, 1],
+    [2, 0, 4, 0, 1, 2],
+    [3, 0, 2, 0, 0, 2]
+   ]
+  },
+  "CpuMemoryEvent": {
+   "columns": ["OSProcessId", "AllocatorId", "Timestamp", "BaseAddress", "Size", "Flags", "OSThreadId", "IsFree"],
+   "rows": [
+    [4242, 1, 200, 4096, 100, 0, 7, 0],
+    [4242, 1, 300, 8192, 50, 0, 7, 0],
+    [4242, 1, 400, 4096, 100, 0, 7, 1]
+   ]
+  },
+  "CustomDataTypeInfo": {
+   "columns": ["Id", "NameId", "SubNameId", "TypeDefinitionId", "EventCount", "MarkerCount"],
+   "rows": [
+    [1, 11, 9, 0, 0, 5]
+   ]
+  },
+  "CustomMarker": {
+   "columns": ["Id", "MarkerInfoId", "Color", "Timestamp"],
+   "rows": [
+    [1, 1, 0, 1000],
+    [2, 1, 0, 2000],
+    [3, 1, 0, 3000],
+    [4, 1, 0, 4000],
+    [5, 1, 0, 8000]
+   ]
+  },
+  "CustomMarkerInfo": {
+   "columns": ["Id", "DataTypeId", "NameId", "Count"],
+   "rows": [
+    [1, 1, 10, 5]
+   ]
+  },
+  "DroppedData": {
+   "columns": ["Id", "LaneId", "Type", "Count", "BeginTimestamp", "EndTimestamp"],
+   "rows": [
+    [1, 7, 3, 4, 100, 200]
+   ]
+  },
+  "FileEvents": {
+   "columns": ["BeginTimestamp", "EndTimestamp", "DeviceId", "FileId", "ProcThreadId", "Offset", "Size", "TypeId", "Type", "Flags0", "Flags1", "Status"],
+   "rows": [
+    [100, 150, 1, 1, 18219251269639, 0, 4096, 1, "Read", 0, 0, 0],
+    [200, 400, 1, 1, 18219251269639, 0, 1024, 2, "Write", 0, 0, 0],
+    [300, 310, 1, 1, 18219251269639, 0, 2048, 1, "Read", 0, 0, 0]
+   ]
+  },
+  "FunctionInformation": {
+   "columns": ["Id", "ModuleId", "Offset", "Size", "DecoratedNameId", "MethodToken"],
+   "rows": [
+    [1, 1, 0, 10, 1, 0],
+    [2, 1, 10, 10, 2, 0]
+   ]
+  },
+  "GpuFrame": {
+   "columns": ["Id", "PresentCallTime", "PresentReturnTime", "VSyncTime", "GPUBusyDuration"],
+   "rows": [
+    [1, 1000, 1010, 1500, 7],
+    [2, null, null, null, null]
+   ]
+  },
+  "GpuWorkRange": {
+   "columns": ["Id", "HardwareQueueId", "ApiCommandQueueId", "BeginTimestamp", "EndTimestamp", "OverlapLevel", "Work"],
+   "rows": [
+    [1, 45, 1, 150, 950, 0, {"hex": "00"}],
+    [2, 45, 1, 300, 400, 1, {"hex": "00"}]
+   ]
+  },
+  "HardwareAdapter": {
+   "columns": ["Id", "NameId"],
+   "rows": [
+    [1, 9]
+   ]
+  },
+  "HardwareCommandQueue": {
+   "columns": ["Id", "AdapterId", "NameId"],
+   "rows": [
+    [45, 1, 8]
+   ]
+  },
+  "Images": {
+   "columns": ["Id", "OSProcessId", "PELoadAddress", "LoadSize", "LoadTimestamp", "UnloadTimestamp", "FilePathId", "ModuleId", "XMemFlags"],
+   "rows": [
+    [1, 4242, 4096, 100, 10, 0, 18, 1, 0],
+    [2, 4242, 8192, 100, 20, 0, 20, 2, 0]
+   ]
+  },
+  "Modules": {
+   "columns": ["Id", "PEPathId", "PETimestamp", "PESize", "PDBPathId", "PDBGuid", "PDBAge"],
+   "rows": [
+    [1, 18, 0, 0, 19, {"hex": "00"}, 1],
+    [2, 20, 0, 0, null, null, 0]
+   ]
+  },
+  "PhysicalCores": {
+   "columns": ["Id", "EfficiencyClass"],
+   "rows": [
+    [0, 1],
+    [1, 1],
+    [2, 0]
+   ]
+  },
+  "PixCounterGroup": {
+   "columns": ["Id", "ParentGroupId", "NameId", "DescriptionId", "DefinitionId"],
+   "rows": [
+    [1, null, 12, 0, 0],
+    [2, null, 16, 0, 0]
+   ]
+  },
+  "PixCounterInfo": {
+   "columns": ["Id", "GroupId", "ProcessId", "NameId", "DescriptionId", "DefinitionId", "UnitsId", "Flags", "MinValue", "MaxValue"],
+   "rows": [
+    [1, 1, 1, 13, 0, 0, 15, 0, 0.0, 0.0],
+    [2, 1, 1, 14, 0, 0, 15, 0, 0.0, 0.0],
+    [3, 2, 1, 17, 0, 0, 0, 0, 0.0, 0.0],
+    [4, 1, 1, 21, 0, 0, 15, 0, 0.0, 0.0],
+    [5, 1, 1, 22, 0, 0, 15, 0, 0.0, 0.0]
+   ]
+  },
+  "PixCounters": {
+   "columns": ["CounterId", "Timestamp", "Value"],
+   "rows": [
+    [1, 50, 1000.0],
+    [1, 5000, 800.0],
+    [2, 60, 100.0],
+    [2, 3000, 900.0],
+    [2, 9000, 300.0],
+    [3, 150, 1.0],
+    [3, 1150, 2.0],
+    [3, 2150, 3.0],
+    [3, 3150, 4.0],
+    [4, 50, 500.0],
+    [5, 60, 50.0]
+   ]
+  },
+  "PixCpuExecution": {
+   "columns": ["BeginTimestamp", "EndTimestamp", "Level", "ThreadRowId", "EventId", "Color"],
+   "rows": [
+    [200, 400, 0, 10, 1, 0],
+    [600, 700, 0, 10, 1, 0]
+   ]
+  },
+  "PixCpuExecutionTimes": {
+   "columns": ["Duration", "Execution", "Stall", "EventId", "BeginTimestamp", "EndTimestamp"],
+   "rows": [
+    [200, 150, 50, 1, 200, 400],
+    [100, 100, 0, 1, 600, 700]
+   ]
+  },
+  "PixCpuMarker": {
+   "columns": ["InfoId", "Timestamp", "ThreadId", "Color"],
+   "rows": [
+    [1, 300, 10, 0],
+    [1, 400, 10, 0],
+    [1, 6000, 11, 0]
+   ]
+  },
+  "PixEventInfo": {
+   "columns": ["Id", "NameId", "Count", "GpuCount", "MinCpuLevel", "MinGpuLevel"],
+   "rows": [
+    [1, 6, 2, 0, 0, 0]
+   ]
+  },
+  "PixMarkerInfo": {
+   "columns": ["Id", "NameId", "CpuCount", "GpuCount"],
+   "rows": [
+    [1, 7, 3, 0]
+   ]
+  },
+  "Processes": {
+   "columns": ["Id", "ProcessId", "ImageNameId", "StartTimestamp", "EndTimestamp"],
+   "rows": [
+    [1, 4242, 1, 0, 10000]
+   ]
+  },
+  "ReadyThread": {
+   "columns": ["Id", "Timestamp", "Core", "ReadyingThreadRowId", "AdjustReason", "AdjustIncrement"],
+   "rows": [
+    [1, 990, 0, 11, 0, 0],
+    [2, 2400, 0, 11, 0, 0],
+    [3, 3580, 1, 11, 0, 0]
+   ]
+  },
+  "Strings": {
+   "columns": ["Id", "Value"],
+   "rows": [
+    [1, "game.exe"],
+    [2, "Render"],
+    [3, "Worker"],
+    [4, "Main Graphics Queue"],
+    [5, "Direct"],
+    [6, "Frame"],
+    [7, "Tick"],
+    [8, "3D"],
+    [9, "Test Adapter"],
+    [10, "VSync"],
+    [11, "Monitor #{}1"],
+    [12, "GPU Memory (Adapter #1)"],
+    [13, "Local Budget"],
+    [14, "Local Usage"],
+    [15, "MB"],
+    [16, "Custom counters"],
+    [17, "Frame Number"],
+    [18, "game.exe"],
+    [19, "game.pdb"],
+    [20, "other.dll"],
+    [21, "Non-Local Budget"],
+    [22, "Non-Local Usage"],
+    [23, "Target Process Name"]
+   ]
+  },
+  "Threads": {
+   "columns": ["Id", "ProcThreadId", "ThreadNameId", "MaxPixEventLevel", "StartTimestamp", "EndTimestamp", "PixEventCount", "ContextSwitchCount", "ProcessRowId", "SampleCount", "MarkerCount", "ApiMarkerCount", "ApiObjectEventCount"],
+   "rows": [
+    [10, 18219251269639, 2, 1, 0, 10000, 2, 6, 1, 5, 2, 0, 0],
+    [11, 18219251269640, 3, 0, 0, 10000, 0, 2, 1, 1, 0, 0, 0]
+   ]
+  },
+  "TruncatedData": {
+   "columns": ["Id", "Count"],
+   "rows": [
+    [1, 0]
+   ]
+  }
+ }
+}

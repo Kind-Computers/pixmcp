@@ -14,6 +14,13 @@ internal static class TestArtifacts
     public static bool AnalysisEnabled => Environment.GetEnvironmentVariable("PIX_TEST_ANALYSIS") == "1";
     public static string? Capture => Resolve("PIX_TEST_CAPTURE");
     public static string? TimingCapture => Resolve("PIX_TEST_TIMING_CAPTURE");
+    // Fixture profiles from scripts/capture_fixtures.py --profile rich|perf|sm6|programmatic.
+    public static string? RichCapture => Resolve("PIX_TEST_RICH_CAPTURE");
+    public static string? RichTimingCapture => Resolve("PIX_TEST_RICH_TIMING_CAPTURE");
+    public static string? PerfBaseline => Resolve("PIX_TEST_PERF_BASELINE");
+    public static string? PerfCandidate => Resolve("PIX_TEST_PERF_CANDIDATE");
+    public static string? Sm6Capture => Resolve("PIX_TEST_SM6_CAPTURE");
+    public static string? ProgrammaticCapture => Resolve("PIX_TEST_PROGRAMMATIC_CAPTURE");
 
     /// <summary>The file named by <paramref name="variable"/>, resolved against the repository root when relative; null when unset or missing.</summary>
     public static string? Resolve(string variable)

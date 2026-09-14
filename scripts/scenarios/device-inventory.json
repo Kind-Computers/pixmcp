@@ -1,0 +1,8 @@
+[
+ ["pix_device_connect", {}],
+ ["pix_device_info", {"handle": "$pix_device_connect.handle"}],
+ ["pix_device_processes", {"handle": "$pix_device_connect.handle", "limit": 5}],
+ ["pix_device_packaged_apps", {"handle": "$pix_device_connect.handle", "limit": 5}],
+ ["pix_device_counters", {"handle": "$pix_device_connect.handle", "limit": 5}],
+ ["pix_close_all", {}]
+]

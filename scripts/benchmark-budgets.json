@@ -1,0 +1,19 @@
+{
+ "version": 1,
+ "note": "About twice the calls and returned JSON bytes observed on the 2606.18 fixture captures (2026-09-13), excluding the per-task pix_jobs inventory. --enforce-budgets allows 10 % slack; recalibrate when inline thresholds or text modes change.",
+ "wireToJsonRatio": {"full": 3.0, "summary": 1.3},
+ "tasks": {
+  "Open baseline capture": {"maxToolCalls": 4, "maxReturnedJsonBytes": 13000},
+  "Find GPU hotspots": {"maxToolCalls": 4, "maxReturnedJsonBytes": 26000},
+  "Inspect a draw and actual root constants": {"maxToolCalls": 6, "maxReturnedJsonBytes": 25000},
+  "Navigate and search shader code": {"maxToolCalls": 8, "maxReturnedJsonBytes": 18500},
+  "Discover shaders and follow their uses": {"maxToolCalls": 6, "maxReturnedJsonBytes": 16000},
+  "Scope event and timing queries to one pass": {"maxToolCalls": 8, "maxReturnedJsonBytes": 20000},
+  "Return positional table rows and rebuild references": {"maxToolCalls": 22, "maxReturnedJsonBytes": 141000},
+  "Cost hints and provenance stubs on repeated calls": {"maxToolCalls": 10, "maxReturnedJsonBytes": 56500},
+  "Follow a resource to its events": {"maxToolCalls": 8, "maxReturnedJsonBytes": 26000},
+  "Open candidate capture": {"maxToolCalls": 4, "maxReturnedJsonBytes": 20000},
+  "Compare, filter and export baseline differences": {"maxToolCalls": 14, "maxReturnedJsonBytes": 66000},
+  "View replay output": {"maxToolCalls": 16, "maxReturnedJsonBytes": 18600}
+ }
+}

@@ -464,7 +464,7 @@ internal static class StructuredToolResults
         else if (node is JsonArray array) foreach (JsonNode? child in array) RemoveNullableRequirements(child);
     }
 
-    private static string[]? Choices(string tool, string name) => (tool, name) switch
+    internal static string[]? Choices(string tool, string name) => (tool, name) switch
     {
         ("pix_shader_targets", "vendor") => StaticProfiling.StaticTargets.Vendors,
         ("pix_gpu_analysis_start", "flags") => AnalysisFlags.Names,
@@ -519,7 +519,7 @@ internal static class StructuredToolResults
         _ => null,
     };
 
-    private static (double? min, double? max) Bounds(string tool, string name) => (tool, name) switch
+    internal static (double? min, double? max) Bounds(string tool, string name) => (tool, name) switch
     {
         ("pix_dump_triage", "maxEvents") => (1, 50000),
         ("pix_gpu_shader_static_profile", "topN") => (1, 200),

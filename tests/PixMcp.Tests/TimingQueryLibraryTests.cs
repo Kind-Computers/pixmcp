@@ -10,101 +10,12 @@ namespace PixMcp.Tests;
 /// <summary>Every named timing query against a fixture that carries every table the library reads, with hand-computed aggregates.</summary>
 public sealed class TimingQueryLibraryTests : IDisposable
 {
-    private readonly DirectoryInfo _directory = Directory.CreateTempSubdirectory("pixmcp-timing-library-");
-    private string Path => System.IO.Path.Combine(_directory.FullName, "pixstorage.sqlite");
+    private readonly TimingFixture _fixture = new();
     private static readonly object Continuation = new { handle = "timing-1", query = "fixture" };
 
-    public TimingQueryLibraryTests()
-    {
-        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path, Pooling = false }.ToString());
-        connection.Open();
-        using SqliteCommand command = connection.CreateCommand();
-        // Column lists as observed on PIX 2606.18; virtual tables (ContextSwitch, PixCpuExecution, PixCpuExecutionTimes, PixCpuMarker,
-        // PixCounters, FileEvents, CpuMemoryEvent) are plain stand-ins.
-        command.CommandText = """
-            CREATE TABLE CaptureFacts(Id INTEGER PRIMARY KEY, Value INTEGER);
-            CREATE TABLE CaptureData(Id INTEGER PRIMARY KEY, NameId INTEGER, ValueId INTEGER);
-            CREATE TABLE Strings(Id INTEGER PRIMARY KEY, Value TEXT);
-            CREATE TABLE Processes(Id INTEGER PRIMARY KEY, ProcessId INTEGER, ImageNameId INTEGER, StartTimestamp INTEGER, EndTimestamp INTEGER);
-            CREATE TABLE Threads(Id INTEGER PRIMARY KEY, ProcThreadId INTEGER, ThreadNameId INTEGER, MaxPixEventLevel INTEGER, StartTimestamp INTEGER, EndTimestamp INTEGER, PixEventCount INTEGER, ContextSwitchCount INTEGER, ProcessRowId INTEGER, SampleCount INTEGER, MarkerCount INTEGER, ApiMarkerCount INTEGER, ApiObjectEventCount INTEGER);
-            CREATE TABLE Cores(Id INTEGER PRIMARY KEY, StartingThreadId INTEGER, ContextSwitchCount INTEGER, MaxPixEventLevel INTEGER, SampleCount INTEGER, PhysicalCoreId INTEGER);
-            CREATE TABLE PhysicalCores(Id INTEGER PRIMARY KEY, EfficiencyClass INTEGER);
-            CREATE TABLE ApiCommandQueue(Id INTEGER PRIMARY KEY, TypeId INTEGER, ProcessId INTEGER, HardwareAdapterId INTEGER, NameId INTEGER, BeginTimestamp INTEGER, EndTimestamp INTEGER, ExecutionCount INTEGER, WorkCount INTEGER, MaxExecutionLevel INTEGER, MaxWorkLevel INTEGER, MarkerCount INTEGER, ApiExecutionCount INTEGER, CommandListCount INTEGER);
-            CREATE TABLE ApiQueueExecution(Id INTEGER PRIMARY KEY, ApiCommandQueueId INTEGER, ThreadId INTEGER, SubmitTimestamp INTEGER, BeginTimestamp INTEGER, EndTimestamp INTEGER, FrameToken INTEGER);
-            CREATE TABLE HardwareAdapter(Id INTEGER PRIMARY KEY, NameId INTEGER);
-            CREATE TABLE HardwareCommandQueue(Id INTEGER PRIMARY KEY, AdapterId INTEGER, NameId INTEGER);
-            CREATE TABLE GpuWorkRange(Id INTEGER PRIMARY KEY, HardwareQueueId INTEGER, ApiCommandQueueId INTEGER, BeginTimestamp INTEGER, EndTimestamp INTEGER, OverlapLevel INTEGER, Work BLOB);
-            CREATE TABLE ContextSwitch(Core INTEGER, Timestamp INTEGER, FromProcThreadId INTEGER, ToProcThreadId INTEGER, ReadyThreadId INTEGER, FromThreadPriority INTEGER, ToThreadPriority INTEGER, FromThreadWaitReason INTEGER);
-            CREATE TABLE ReadyThread(Id INTEGER PRIMARY KEY, Timestamp INTEGER, Core INTEGER, ReadyingThreadRowId INTEGER, AdjustReason INTEGER, AdjustIncrement INTEGER);
-            CREATE TABLE PixEventInfo(Id INTEGER PRIMARY KEY, NameId INTEGER, Count INTEGER, GpuCount INTEGER, MinCpuLevel INTEGER, MinGpuLevel INTEGER);
-            CREATE TABLE PixCpuExecution(BeginTimestamp INTEGER, EndTimestamp INTEGER, Level INTEGER, ThreadRowId INTEGER, EventId INTEGER, Color INTEGER);
-            CREATE TABLE PixCpuExecutionTimes(Duration INTEGER, Execution INTEGER, Stall INTEGER, EventId INTEGER, BeginTimestamp INTEGER, EndTimestamp INTEGER);
-            CREATE TABLE PixMarkerInfo(Id INTEGER PRIMARY KEY, NameId INTEGER, CpuCount INTEGER, GpuCount INTEGER);
-            CREATE TABLE PixCpuMarker(InfoId INTEGER, Timestamp INTEGER, ThreadId INTEGER, Color INTEGER);
-            CREATE TABLE CustomDataTypeInfo(Id INTEGER PRIMARY KEY, NameId INTEGER, SubNameId INTEGER, TypeDefinitionId INTEGER, EventCount INTEGER, MarkerCount INTEGER);
-            CREATE TABLE CustomMarkerInfo(Id INTEGER PRIMARY KEY, DataTypeId INTEGER, NameId INTEGER, Count INTEGER);
-            CREATE TABLE CustomMarker(Id INTEGER PRIMARY KEY, MarkerInfoId INTEGER, Color INTEGER, Timestamp INTEGER);
-            CREATE TABLE GpuFrame(Id INTEGER PRIMARY KEY, PresentCallTime INTEGER, PresentReturnTime INTEGER, VSyncTime INTEGER, GPUBusyDuration INTEGER);
-            CREATE TABLE PixCounterGroup(Id INTEGER PRIMARY KEY, ParentGroupId INTEGER, NameId INTEGER, DescriptionId INTEGER, DefinitionId INTEGER);
-            CREATE TABLE PixCounterInfo(Id INTEGER PRIMARY KEY, GroupId INTEGER, ProcessId INTEGER, NameId INTEGER, DescriptionId INTEGER, DefinitionId INTEGER, UnitsId INTEGER, Flags INTEGER, MinValue REAL, MaxValue REAL);
-            CREATE TABLE PixCounters(CounterId INTEGER, Timestamp INTEGER, Value REAL);
-            CREATE TABLE Modules(Id INTEGER PRIMARY KEY, PEPathId INTEGER, PETimestamp INTEGER, PESize INTEGER, PDBPathId INTEGER, PDBGuid BLOB, PDBAge INTEGER);
-            CREATE TABLE Images(Id INTEGER PRIMARY KEY, OSProcessId INTEGER, PELoadAddress INTEGER, LoadSize INTEGER, LoadTimestamp INTEGER, UnloadTimestamp INTEGER, FilePathId INTEGER, ModuleId INTEGER, XMemFlags INTEGER);
-            CREATE TABLE FunctionInformation(Id INTEGER PRIMARY KEY, ModuleId INTEGER, Offset INTEGER, Size INTEGER, DecoratedNameId INTEGER, MethodToken INTEGER);
-            CREATE TABLE DroppedData(Id INTEGER PRIMARY KEY, LaneId INTEGER, Type INTEGER, Count INTEGER, BeginTimestamp INTEGER, EndTimestamp INTEGER);
-            CREATE TABLE TruncatedData(Id INTEGER PRIMARY KEY, Count INTEGER);
-            CREATE TABLE CaptureStats(Id INTEGER PRIMARY KEY, Timestamp INTEGER, EventCount INTEGER, ByteCount INTEGER, LostEtwEventCount INTEGER, LostEtwBufferCount INTEGER);
-            CREATE TABLE FileEvents(BeginTimestamp INTEGER, EndTimestamp INTEGER, DeviceId INTEGER, FileId INTEGER, ProcThreadId INTEGER, Offset INTEGER, Size INTEGER, TypeId INTEGER, Type TEXT, Flags0 INTEGER, Flags1 INTEGER, Status INTEGER);
-            CREATE TABLE CpuMemoryEvent(OSProcessId INTEGER, AllocatorId INTEGER, Timestamp INTEGER, BaseAddress INTEGER, Size INTEGER, Flags INTEGER, OSThreadId INTEGER, IsFree INTEGER);
+    public void Dispose() => _fixture.Dispose();
 
-            INSERT INTO CaptureFacts VALUES(2, 100), (3, 10000), (4, 4242), (5, 4), (24, 5000);
-            INSERT INTO CaptureData VALUES(1, 23, 1);
-            INSERT INTO Strings VALUES(1, 'game.exe'), (2, 'Render'), (3, 'Worker'), (4, 'Main Graphics Queue'), (5, 'Direct'), (6, 'Frame'), (7, 'Tick'), (8, '3D'),
-              (9, 'Test Adapter'), (10, 'VSync'), (11, 'Monitor #{}1'), (12, 'GPU Memory (Adapter #1)'), (13, 'Local Budget'), (14, 'Local Usage'), (15, 'MB'),
-              (16, 'Custom counters'), (17, 'Frame Number'), (18, 'game.exe'), (19, 'game.pdb'), (20, 'other.dll'), (21, 'Non-Local Budget'), (22, 'Non-Local Usage'), (23, 'Target Process Name');
-            INSERT INTO Processes VALUES(1, 4242, 1, 0, 10000);
-            INSERT INTO Threads VALUES(10, (4242 << 32) | 7, 2, 1, 0, 10000, 2, 6, 1, 5, 2, 0, 0), (11, (4242 << 32) | 8, 3, 0, 0, 10000, 0, 2, 1, 1, 0, 0, 0);
-            INSERT INTO Cores VALUES(0, 0, 10, 0, 4, 0), (1, 0, 6, 0, 2, 1), (2, 0, 4, 0, 1, 2), (3, 0, 2, 0, 0, 2);
-            INSERT INTO PhysicalCores VALUES(0, 1), (1, 1), (2, 0);
-            INSERT INTO ApiCommandQueue VALUES(1, 5, 1, 1, 4, 0, 10000, 4, 0, 0, 0, 0, 4, 4);
-            INSERT INTO ApiQueueExecution VALUES(1, 1, 10, 150, 200, 300, 0), (2, 1, 10, 400, 500, 600, 0), (3, 1, 11, 700, 700, 900, 0), (4, 1, 10, 1000, 990, 1100, 0);
-            INSERT INTO HardwareAdapter VALUES(1, 9);
-            INSERT INTO HardwareCommandQueue VALUES(45, 1, 8);
-            INSERT INTO GpuWorkRange VALUES(1, 45, 1, 150, 950, 0, x'00'), (2, 45, 1, 300, 400, 1, x'00');
-            INSERT INTO ContextSwitch VALUES
-              (0, 1000, 0, (4242 << 32) | 7, 1, 0, 8, 0), (0, 1500, (4242 << 32) | 7, 0, 0, 8, 0, 6),
-              (0, 2500, 0, (4242 << 32) | 7, 2, 0, 8, 0), (0, 2600, (4242 << 32) | 7, 0, 0, 8, 0, 32),
-              (1, 2650, 0, (4242 << 32) | 7, 0, 0, 8, 0), (1, 3000, (4242 << 32) | 7, 0, 0, 8, 0, 6),
-              (1, 3600, 0, (4242 << 32) | 7, 3, 0, 8, 0), (1, 20000, (4242 << 32) | 7, 0, 0, 8, 0, 6);
-            INSERT INTO ReadyThread VALUES(1, 990, 0, 11, 0, 0), (2, 2400, 0, 11, 0, 0), (3, 3580, 1, 11, 0, 0);
-            INSERT INTO PixEventInfo VALUES(1, 6, 2, 0, 0, 0);
-            INSERT INTO PixCpuExecution VALUES(200, 400, 0, 10, 1, 0), (600, 700, 0, 10, 1, 0);
-            INSERT INTO PixCpuExecutionTimes VALUES(200, 150, 50, 1, 200, 400), (100, 100, 0, 1, 600, 700);
-            INSERT INTO PixMarkerInfo VALUES(1, 7, 3, 0);
-            INSERT INTO PixCpuMarker VALUES(1, 300, 10, 0), (1, 400, 10, 0), (1, 6000, 11, 0);
-            INSERT INTO CustomDataTypeInfo VALUES(1, 11, 9, 0, 0, 5);
-            INSERT INTO CustomMarkerInfo VALUES(1, 1, 10, 5);
-            INSERT INTO CustomMarker VALUES(1, 1, 0, 1000), (2, 1, 0, 2000), (3, 1, 0, 3000), (4, 1, 0, 4000), (5, 1, 0, 8000);
-            INSERT INTO GpuFrame VALUES(1, 1000, 1010, 1500, 7), (2, NULL, NULL, NULL, NULL);
-            INSERT INTO PixCounterGroup VALUES(1, NULL, 12, 0, 0), (2, NULL, 16, 0, 0);
-            INSERT INTO PixCounterInfo VALUES(1, 1, 1, 13, 0, 0, 15, 0, 0, 0), (2, 1, 1, 14, 0, 0, 15, 0, 0, 0), (3, 2, 1, 17, 0, 0, 0, 0, 0, 0), (4, 1, 1, 21, 0, 0, 15, 0, 0, 0), (5, 1, 1, 22, 0, 0, 15, 0, 0, 0);
-            INSERT INTO PixCounters VALUES(1, 50, 1000.0), (1, 5000, 800.0), (2, 60, 100.0), (2, 3000, 900.0), (2, 9000, 300.0),
-              (3, 150, 1), (3, 1150, 2), (3, 2150, 3), (3, 3150, 4), (4, 50, 500.0), (5, 60, 50.0);
-            INSERT INTO Modules VALUES(1, 18, 0, 0, 19, x'00', 1), (2, 20, 0, 0, NULL, NULL, 0);
-            INSERT INTO Images VALUES(1, 4242, 4096, 100, 10, 0, 18, 1, 0), (2, 4242, 8192, 100, 20, 0, 20, 2, 0);
-            INSERT INTO FunctionInformation VALUES(1, 1, 0, 10, 1, 0), (2, 1, 10, 10, 2, 0);
-            INSERT INTO DroppedData VALUES(1, 7, 3, 4, 100, 200);
-            INSERT INTO TruncatedData VALUES(1, 0);
-            INSERT INTO CaptureStats VALUES(1, 500, 10, 100, 0, 0);
-            INSERT INTO FileEvents VALUES(100, 150, 1, 1, (4242 << 32) | 7, 0, 4096, 1, 'Read', 0, 0, 0), (200, 400, 1, 1, (4242 << 32) | 7, 0, 1024, 2, 'Write', 0, 0, 0), (300, 310, 1, 1, (4242 << 32) | 7, 0, 2048, 1, 'Read', 0, 0, 0);
-            INSERT INTO CpuMemoryEvent VALUES(4242, 1, 200, 4096, 100, 0, 7, 0), (4242, 1, 300, 8192, 50, 0, 7, 0), (4242, 1, 400, 4096, 100, 0, 7, 1);
-            """;
-        command.ExecuteNonQuery();
-    }
-
-    public void Dispose() => _directory.Delete(recursive: true);
-
-    private TimingDatabase Open() => new(Path, null, configureForTests: _ => { });
+    private TimingDatabase Open() => _fixture.Open();
 
     private static SqlResultDto Query(TimingDatabase db, string name, object? parameters = null, string mode = "full")
     {

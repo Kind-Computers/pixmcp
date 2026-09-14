@@ -24,6 +24,12 @@ if (compatibility.State != "match")
     Console.Error.WriteLine($"pixmcp: warning: {compatibility.Message} (compatibility {compatibility.State})");
 }
 
+// PixMcp.exe --tool-reference docs/tools.md [--check] writes (or checks) the generated tool reference instead of serving.
+if (args.Length > 0 && args[0] == "--tool-reference")
+{
+    return ToolReference.Run(args[1..], Console.Out, Console.Error);
+}
+
 if (ServerOptions.Current.Problems is { Count: > 0 } problems)
 {
     foreach (string problem in problems) Console.Error.WriteLine("pixmcp: " + problem);

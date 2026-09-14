@@ -151,5 +151,22 @@ public sealed class TimingCaptureOptionsTests
         }
     }
 
+    [Fact]
+    public void ExperimentPartsFromTheEnvironmentAreAppendedOnceInTypeOrder()
+    {
+        using (ServerOptions.Override(ServerOptions.With(timingExperimentParts: ["GPU_ONLY_EVENTS", "PAGEFAULT", "CAPTURE_SYSMON_COUNTERS"])))
+        {
+            var (_, parts) = TimingCaptureOptions.Create(Defaults);
+            Assert.Equal(new[] { "pageFaults=enabled", "captureSysmonCounters=false", "gpuOnlyEvents=true" },
+                TimingCaptureOptions.Describe(parts).Select(p => p.Type + "=" + p.Value));
+        }
+        ServerOptions unknown = ServerOptions.Parse(name => name == ServerOptions.TimingExperimentPartsVariable ? "circular, turbo" : null);
+        Assert.Contains(unknown.Problems, problem => problem.Contains("TURBO", StringComparison.Ordinal));
+        Assert.Null(unknown.TimingExperimentParts);
+        ServerOptions parsed = ServerOptions.Parse(name => name == ServerOptions.TimingExperimentPartsVariable ? "circular;gpu_only_events" : null);
+        Assert.Equal(new[] { "CIRCULAR", "GPU_ONLY_EVENTS" }, parsed.TimingExperimentParts);
+        Assert.Equal("env", parsed.TimingExperimentPartsSource);
+    }
+
     private static byte[] Bytes<T>(T value) where T : unmanaged => MemoryMarshal.AsBytes(new ReadOnlySpan<T>(in value)).ToArray();
 }

@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from benchmark import Investigator, TaskRecorder, exit_status, known_root_constant_limitation, main, new_report
+from benchmark import (Investigator, TaskRecorder, apply_budgets, compare_baseline, exit_status, known_root_constant_limitation, main,
+                       new_report)
 from smoke import SmokeError
 
 
@@ -50,6 +51,7 @@ class BenchmarkMainTests(unittest.TestCase):
                 arguments.append("--strict")
             stderr = io.StringIO()
             with patch("sys.argv", arguments), patch("benchmark.Client", return_value=client), \
+                    patch("benchmark.collect_environment", return_value={"git": {"commit": "abc"}}), \
                     patch("benchmark.run", side_effect=run), patch("sys.stdout", new=io.StringIO()), patch("sys.stderr", new=stderr):
                 status = main()
             report = json.loads(destination.read_text(encoding="utf-8"))
@@ -178,6 +180,7 @@ class BenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             output = Path(folder) / "report.json"
             with patch("sys.argv", ["benchmark.py", "missing.exe", "--capture", "a.wpix", "--output", str(output)]), \
+                    patch("benchmark.collect_environment", return_value={}), \
                     patch("benchmark.Client", side_effect=SmokeError("startup failed")), patch("sys.stdout", new=io.StringIO()), patch("sys.stderr", new=io.StringIO()):
                 self.assertEqual(1, main())
             self.assertIn("startup failed", json.loads(output.read_text(encoding="utf-8"))["fatalError"])
@@ -240,6 +243,63 @@ class BenchmarkTests(unittest.TestCase):
         expected = len(json.dumps(response, ensure_ascii=False).encode("utf-8"))
         self.assertEqual([expected, expected], [call["returnedJsonBytes"] for call in agent.calls])
         self.assertEqual({"j"}, agent.replay_jobs)
+
+
+
+class BenchmarkBudgetTests(unittest.TestCase):
+    @staticmethod
+    def report(**totals):
+        report = new_report()
+        report["tasks"] = [
+            {"name": "Find GPU hotspots", "status": "passed", "passed": True, "toolCalls": 3, "returnedJsonBytes": 12000},
+            {"name": "Compare", "status": "passed", "passed": True, "toolCalls": 9, "returnedJsonBytes": 50000},
+            {"name": "Skipped", "status": "skipped", "passed": False, "toolCalls": 0, "returnedJsonBytes": 0},
+        ]
+        report.update(totals)
+        return report
+
+    def test_inventory_is_overhead_not_task_calls(self):
+        client = ScriptedClient([("probe", {}, {"ok": True}), ("pix_jobs", {}, {"items": [{"kind": "timing", "jobId": "j"}]})])
+        report = new_report()
+        agent = Investigator(client)
+        TaskRecorder(agent, report).task("one call", lambda: agent.call("probe"))
+        task = report["tasks"][0]
+        self.assertEqual(1, task["toolCalls"])
+        self.assertEqual(1, task["overhead"]["toolCalls"])
+        self.assertEqual({"j"}, agent.replay_jobs)
+
+    def test_budgets_allow_ten_percent_slack_and_record_failures(self):
+        budgets = {"tasks": {"Find GPU hotspots": {"maxToolCalls": 3, "maxReturnedJsonBytes": 11000},
+                             "Compare": {"maxToolCalls": 8, "maxReturnedJsonBytes": 60000},
+                             "Skipped": {"maxToolCalls": 0}},
+                   "wireToJsonRatio": {"full": 3.0, "summary": 1.3}}
+        report = self.report(returnedJsonBytes=62000, returnedWireBytes=150000)
+        failures = apply_budgets(report, budgets, text_mode="full")
+        self.assertEqual(["Compare: toolCalls 9 > 8"], failures)
+        self.assertEqual([], report["tasks"][0]["budget"]["over"])
+        self.assertNotIn("budget", report["tasks"][2])
+        self.assertEqual({"mode": "full", "value": 2.419, "budget": 3.0}, report["wireToJsonRatio"])
+        self.assertEqual(0, exit_status(report))
+        self.assertEqual(1, exit_status(report, enforce_budgets=True))
+        summary = self.report(returnedJsonBytes=62000, returnedWireBytes=150000)
+        self.assertIn("wireToJsonRatio 2.419 > 1.3 (summary text content)", apply_budgets(summary, budgets, text_mode="summary"))
+
+    def test_baseline_marks_growth_beyond_a_quarter(self):
+        baseline = {"tasks": [{"name": "Find GPU hotspots", "toolCalls": 2, "returnedJsonBytes": 11000},
+                              {"name": "Compare", "toolCalls": 9, "returnedJsonBytes": 30000}]}
+        report = self.report()
+        self.assertEqual(["Find GPU hotspots: toolCalls", "Compare: returnedJsonBytes"], compare_baseline(report, baseline))
+        self.assertEqual({"toolCalls": 2, "returnedJsonBytes": 11000, "deltaToolCalls": 1, "deltaJsonBytes": 1000, "regression": ["toolCalls"]},
+                         report["tasks"][0]["baseline"])
+        self.assertEqual(0, exit_status(report))
+
+    def test_repository_budgets_name_existing_benchmark_tasks(self):
+        budgets = json.loads((Path(__file__).resolve().parent / "benchmark-budgets.json").read_text(encoding="utf-8"))
+        source = (Path(__file__).resolve().parent / "benchmark.py").read_text(encoding="utf-8")
+        for name, budget in budgets["tasks"].items():
+            self.assertIn(f'"{name}"', source, name)
+            self.assertTrue(budget["maxToolCalls"] > 0 and budget["maxReturnedJsonBytes"] > 0, name)
+        self.assertEqual({"full", "summary"}, set(budgets["wireToJsonRatio"]))
 
 
 if __name__ == "__main__":

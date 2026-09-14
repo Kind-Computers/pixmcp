@@ -333,6 +333,71 @@ add to this section until the release is tagged.
   `maxEvents` walk budget with truncated coverage and continuations, a correlation bonus for queues
   with page faults or in-progress events, and `d3dState` coverage (unsupported). `pix_dump_info`
   returns the shared `diagnosis`, and `pix_dump_queues` rows add `maxHardwareSeverity`.
+- Fixture app extensions (R30): `tests/D3D12TestApp` gains composable flags `--depth`, `--placed-heap`,
+  `--reserved`, `--indirect`, `--async-overlap`, `--msaa N`, `--mrt 2`, `--bandwidth`, `--hdr`, `--gpu-markers`,
+  `--dxc` (runtime DXC at shader model 6 with embedded debug information; `build.cmd` copies
+  `dxcompiler.dll` and `dxil.dll` and delay-loads the compiler), `--mesh`, `--programmatic-capture` with
+  `--capture-at`/`--capture-frames`, `--workload perf` and `--report` (effective flags, skips, adapter and
+  DXC version as JSON); unsupported features print a skip and rendering continues. The default fixture
+  is unchanged. `scripts/capture_fixtures.py --profile rich|perf|sm6|programmatic|all` produces
+  `rich.wpix`, `rich-timing.wpix`, `perf-baseline.wpix`, `perf-candidate.wpix`, `sm6.wpix` and
+  `programmatic.wpix` with each launch sidecar and the repository commit, `scripts/gpu_frame_experiment.py`
+  records which timing capture option parts populate `GpuFrame`, and `PIXMCP_TIMING_EXPERIMENT_PARTS`
+  appends option parts to every timing capture.
+- Test infrastructure (R31):
+  - `scripts/pixstorage_schema.py` records a timing capture's PixStorage schema in
+    `tests/PixMcp.Tests/Fixtures/pixstorage-schema-2606.18.json`: DDL, `table_xinfo` columns with hidden
+    flags, indexes, the eight virtual tables with their columns, and `findstackid/2`. `--check` reports
+    drift.
+  - `scripts/make_timing_fixture.py` builds the committed `timing-synthetic.sqlite` (203 KB) from that
+    schema and the `timing-fixture.json` seed. Determinism is pinned by a logical dump hash, and
+    `--check` runs in hosted CI.
+  - `TimingFixture` gives the PIX-free timing tests a private copy of the synthetic database;
+    `TimingQueryLibraryTests` moved off its inline DDL.
+  - `TimingNativeSchemaTests` compares a real capture with the recorded schema column by column. It
+    also checks refused writes and exact continuations.
+  - `SyntheticGpuCapture` builds EventRecord and timing-row fixtures with independent inclusive-time
+    and kind expectations; `Canonical()` now feeds `TimingTreeTests`.
+  - `GoldenCaptureTests` pins every event of the baseline and candidate captures behind a header of
+    capture, fixture-source and PIX-build hashes. It fails with `golden_header_mismatch` when the
+    fixture changes; `PIXMCP_UPDATE_GOLDEN=1` rewrites the goldens.
+  - `Fixtures/tool-names.txt` pins the registered tool list, and a test requires the README catalog
+    to name every tool once. This added the missing `pix_gpu_bottleneck` row.
+  - `capture_fixtures.py` records capture and source hashes.
+  - The `gpu-overview-golden` scenario was added, hosted CI parses every scenario with
+    `smoke.parse_steps`, and the self-hosted job checks schema drift.
+  - The stale `%TEMP%\pixmcp_timing_test.wpix` fallbacks were removed.
+- Verification harness (R32):
+  - `scripts/smoke.py --validate-scenarios DIR` checks shape, registered tool names and step references
+    without a server. `--all DIR [--skip-missing-env]` runs every scenario on its own server, skips the
+    manual `provoke-hang` and names unset variables.
+  - `scripts/tool_registry.py` maps tools to C# methods. `scripts/tool_coverage.py --fail-on-uncovered`
+    requires every tool to be exercised by a C# test call, StdioTests, a script or a scenario, or listed
+    with a reason in `scripts/tool-coverage-allowlist.txt`; stale entries fail. Current coverage is
+    105/116, with the dump tools, `pix_capture_upgrade`, `pix_device_attach` and `pix_gpu_heap`
+    allowlisted.
+  - `scripts/check_docs.py` checks the README catalog and `docs/tools.md` against the registered tools.
+  - `scripts/environment.py` records commit, server and PIX versions, GPU adapters, capture hashes and
+    options.
+  - New scenarios: `capture-format`, `device-inventory`, `jobs-and-log`.
+  - Benchmark v2: the report embeds the environment, and the per-task `pix_jobs` inventory moved to
+    `overhead`. `scripts/benchmark-budgets.json` caps calls and JSON bytes per task and the wire-to-JSON
+    ratio per text mode; `--enforce-budgets` fails beyond 10 % slack. `--baseline` marks tasks whose
+    calls or bytes grew more than 25 %.
+  - `PixMcp.exe --tool-reference docs/tools.md [--check]` generates the tool reference from reflection:
+    title, annotations, toolset, cost, parameters with defaults, enums and bounds, output fields, and
+    the error codes. `--check` exits 2 when the reference is stale.
+  - CI:
+    - The workflow has read-only permissions.
+    - The hosted job validates scenarios, the synthetic fixture, coverage and docs.
+    - The self-hosted job also runs on push to main. It has job and step timeouts and runs
+      `dotnet test` once.
+    - That job records the environment, checks schema drift and the tool reference, runs
+      `smoke --all`, and runs the budgeted benchmark.
+    - It uploads only JSON, TRX and PNG artifacts, kept for 14 days.
+  - The staged `PixMcp.Core` split and the hosted Core test project did not ship. As the roadmap's
+    fallback allows, C# validation stays on the self-hosted PIX job, which now also runs on push to
+    main.
 
 ### Changed
 

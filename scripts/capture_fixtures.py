@@ -1,12 +1,17 @@
-"""Generate baseline/candidate GPU captures and a symbol-resolved timing capture serially.
+"""Generate GPU and timing fixture captures serially through the MCP server.
 
-Build tests/D3D12TestApp/build.cmd first. It restores pinned WinPixEventRuntime and places
-the runtime DLL and PDB beside the fixture executable. No hang workloads are launched.
-Use --adapter-name B580 to require that hardware in GPU and timing launches. The
-fixture logs its selected adapter name, vendor/device IDs and LUID to stdout; the
-report records the requested filter and launch command lines, not a confirmed GPU.
+Build tests/D3D12TestApp/build.cmd first. It restores pinned WinPixEventRuntime, copies the Windows SDK
+DXC compiler and places the runtime DLLs and PDB beside the fixture executable. No hang workloads are
+launched. Profiles: default (baseline, candidate, timing), rich (rich, rich-timing), perf
+(perf-baseline, perf-candidate), sm6 (sm6), programmatic (programmatic) and all; --only narrows the
+default profile. Use --adapter-name B580 to require that hardware in every launch. Each launch writes
+<name>-fixture.json (flags, skips, adapter, DXC version), which the report embeds with the repository
+commit; the report records the requested adapter filter and launch command lines, not a confirmed GPU.
+It also records the SHA-256 of every capture and of the fixture sources (main.cpp and build.cmd with LF line
+endings), the same values GoldenCaptureTests pins in its golden headers.
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -17,14 +22,56 @@ import time
 from benchmark import Investigator
 from smoke import Client, SmokeError
 
+PROFILES = ("default", "rich", "perf", "sm6", "programmatic", "all")
+RICH_FLAGS = ["--depth", "--placed-heap", "--reserved", "--indirect", "--async-overlap", "--msaa", "4", "--mrt", "2",
+              "--bandwidth", "--hdr"]
+RICH_TIMING_FLAGS = ["--gpu-markers", "--depth", "--indirect", "--async-overlap"]
 
-def generate(client, app, output_dir, timing_seconds=3, startup_delay_ms=1500, sleep=time.sleep, only="all", adapter_name=None):
+
+def repository_commit(folder):
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=folder, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (result.stdout.strip() or None) if result.returncode == 0 else None
+
+
+def source_sha256(path):
+    """SHA-256 of a text source with LF line endings and no BOM; None when it cannot be read."""
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return hashlib.sha256(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def fixture_source_hashes(app):
+    """Hashes of the fixture sources next to the app (bin/ sits inside the D3D12TestApp folder)."""
+    folder = next((candidate for candidate in (Path(app).parent.parent, Path(app).parent) if (candidate / "main.cpp").is_file()), None)
+    if folder is None:
+        return None
+    return {name: source_sha256(folder / name) for name in ("main.cpp", "build.cmd")}
+
+
+def generate(client, app, output_dir, timing_seconds=3, startup_delay_ms=1500, sleep=time.sleep, only="all", adapter_name=None,
+             profile="default", clock=time.monotonic, programmatic_wait_seconds=120):
     if adapter_name is not None and (not isinstance(adapter_name, str) or not adapter_name.strip() or "\0" in adapter_name):
         raise ValueError("adapter-name must be a nonempty adapter-name substring without NUL characters")
+    if profile not in PROFILES:
+        raise ValueError(f"profile must be one of {', '.join(PROFILES)}")
     app = Path(app).resolve()
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    report = {"fixtures": [], "errors": [], "app": str(app), "outputDirectory": str(output_dir),
+    report = {"fixtures": [], "errors": [], "app": str(app), "outputDirectory": str(output_dir), "profile": profile,
+              "commit": repository_commit(Path(__file__).resolve().parent), "sourceHashes": fixture_source_hashes(app),
               "requestedAdapterName": adapter_name, "launches": []}
     agent = Investigator(client)
     def query(tool, **arguments):
@@ -39,16 +86,25 @@ def generate(client, app, output_dir, timing_seconds=3, startup_delay_ms=1500, s
 
     connection = query("pix_device_connect")["handle"]
 
-    def launch(arguments, under_gpu_capture=True):
-        tokens = [*arguments, *(["--adapter-name", adapter_name] if adapter_name is not None else [])]
+    def launch(arguments, name, under_gpu_capture=True):
+        sidecar = output_dir / f"{name}-fixture.json"
+        sidecar.unlink(missing_ok=True)
+        tokens = [*arguments, "--report", str(sidecar), *(["--adapter-name", adapter_name] if adapter_name is not None else [])]
         command_line = subprocess.list2cmdline(tokens)
-        report["launches"].append({"arguments": command_line, "underGpuCapture": under_gpu_capture})
+        report["launches"].append({"fixture": name, "arguments": command_line, "underGpuCapture": under_gpu_capture})
         result = query("pix_device_launch", handle=connection, exePath=str(app), arguments=command_line,
                        underGpuCapture=under_gpu_capture)
         if not result.get("capturable") or not result.get("processId"):
             raise SmokeError(f"Fixture process cannot be captured: {result}")
         report["activeProcessId"] = result["processId"]
         return result["processId"]
+
+    def fixture_details(name):
+        sidecar = output_dir / f"{name}-fixture.json"
+        try:
+            return json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
 
     def detach():
         query("pix_device_detach", handle=connection, terminate=True)
@@ -66,39 +122,71 @@ def generate(client, app, output_dir, timing_seconds=3, startup_delay_ms=1500, s
             if primary_error is None:
                 raise SmokeError("Fixture cleanup failed: " + "; ".join(errors))
 
-    def capture_gpu(variant):
+    def keep(source, destination):
+        if source.resolve() != destination:
+            temporary = destination.with_suffix(".wpix.tmp")
+            try:
+                shutil.copyfile(source, temporary)
+                temporary.replace(destination)
+            finally:
+                temporary.unlink(missing_ok=True)
+
+    def capture_gpu(name, arguments, frame_count=1):
         primary_error = None
         try:
-            pid = launch(["--hidden", "--frames", "1800", "--variant", variant,
-                          "--startup-delay-ms", str(startup_delay_ms)])
-            result = query("pix_device_take_gpu_capture", handle=connection, processId=pid,
-                                 delaySeconds=0.25, readinessTimeoutSeconds=30, open=False, waitSeconds=0)
+            pid = launch(["--hidden", "--frames", "1800", *arguments, "--startup-delay-ms", str(startup_delay_ms)], name)
+            result = query("pix_device_take_gpu_capture", handle=connection, processId=pid, delaySeconds=0.25,
+                           readinessTimeoutSeconds=30, frameCount=frame_count, open=False, waitSeconds=0)
             source = Path(result["path"])
             if not source.is_file() or source.stat().st_size == 0:
-                raise SmokeError(f"PIX did not produce a nonempty {variant} GPU capture")
-            destination = output_dir / f"{variant}.wpix"
-            if source.resolve() != destination:
-                temporary = destination.with_suffix(".wpix.tmp")
-                try:
-                    shutil.copyfile(source, temporary)
-                    temporary.replace(destination)
-                finally:
-                    temporary.unlink(missing_ok=True)
-            return {"path": str(destination), "bytes": destination.stat().st_size, "processId": pid}
+                raise SmokeError(f"PIX did not produce a nonempty {name} GPU capture")
+            destination = output_dir / f"{name}.wpix"
+            keep(source, destination)
+            return {"path": str(destination), "bytes": destination.stat().st_size, "sha256": file_sha256(destination), "processId": pid,
+                    "frameCount": frame_count, "fixture": fixture_details(name)}
         except Exception as error:
             primary_error = error
             raise
         finally:
             cleanup([detach], primary_error)
 
-    def capture_timing():
+    def capture_programmatic(name):
+        # The app calls PIXGpuCaptureNextFrames itself; the capture is done when its size stops changing.
+        primary_error = None
+        source = output_dir / f"{name}-source.wpix"
+        source.unlink(missing_ok=True)
+        try:
+            pid = launch(["--hidden", "--frames", "1800", "--programmatic-capture", str(source), "--capture-at", "60",
+                          "--capture-frames", "3", "--startup-delay-ms", str(startup_delay_ms)], name)
+            deadline = clock() + programmatic_wait_seconds
+            last_size = -1
+            while True:
+                size = source.stat().st_size if source.is_file() else -1
+                if size > 0 and size == last_size:
+                    break
+                if clock() > deadline:
+                    raise SmokeError(f"The programmatic capture did not appear at {source} within {programmatic_wait_seconds} s: "
+                                     f"{(fixture_details(name) or {}).get('programmaticCapture')}")
+                last_size = size
+                sleep(1)
+            destination = output_dir / f"{name}.wpix"
+            source.replace(destination)
+            return {"path": str(destination), "bytes": destination.stat().st_size, "sha256": file_sha256(destination), "processId": pid,
+                    "frameCount": 3, "fixture": fixture_details(name)}
+        except Exception as error:
+            primary_error = error
+            raise
+        finally:
+            cleanup([detach], primary_error)
+
+    def capture_timing(name, extra_arguments):
         active = False
         timing_handle = None
         primary_error = None
         try:
             # Launch/attach before capture start so the selected process has CPU sample stacks.
-            pid = launch(["--hidden", "--frames", "100000", "--timing-workload"], under_gpu_capture=False)
-            path = output_dir / "timing.wpix"
+            pid = launch(["--hidden", "--frames", "100000", "--timing-workload", *extra_arguments], name, under_gpu_capture=False)
+            path = output_dir / f"{name}.wpix"
             query("pix_device_timing_capture_start", handle=connection, outputPath=str(path),
                         cpuSamples=True, cpuSamplesPerSecond=1000, cpuSampleStacks=True,
                         contextSwitches=True, contextSwitchStacks=True, captureSysmonCounters=True,
@@ -115,9 +203,9 @@ def generate(client, app, output_dir, timing_seconds=3, startup_delay_ms=1500, s
                         includeKernelSymbols=False, useNtSymbolPath=False, waitSeconds=0)
             query("pix_timing_save", handle=timing_handle)
             if not path.is_file() or path.stat().st_size == 0:
-                raise SmokeError("PIX did not produce a nonempty timing capture")
-            return {"path": str(path), "bytes": path.stat().st_size, "processId": pid,
-                    "symbols": str(app.with_suffix(".pdb")), "durationSeconds": timing_seconds}
+                raise SmokeError(f"PIX did not produce a nonempty {name} timing capture")
+            return {"path": str(path), "bytes": path.stat().st_size, "sha256": file_sha256(path), "processId": pid,
+                    "symbols": str(app.with_suffix(".pdb")), "durationSeconds": timing_seconds, "fixture": fixture_details(name)}
         except Exception as error:
             primary_error = error
             raise
@@ -129,10 +217,25 @@ def generate(client, app, output_dir, timing_seconds=3, startup_delay_ms=1500, s
                 actions.append(lambda: query("pix_close", handle=timing_handle))
             cleanup([*actions, detach], primary_error)
 
-    for name, work in (("baseline", lambda: capture_gpu("baseline")),
-                       ("candidate", lambda: capture_gpu("candidate")), ("timing", capture_timing)):
-        if only == "gpu" and name == "timing" or only == "timing" and name != "timing":
-            continue
+    plan = []
+    if profile in ("default", "all"):
+        if only != "timing":
+            plan += [("baseline", lambda: capture_gpu("baseline", ["--variant", "baseline"])),
+                     ("candidate", lambda: capture_gpu("candidate", ["--variant", "candidate"]))]
+        if only != "gpu":
+            plan.append(("timing", lambda: capture_timing("timing", [])))
+    if profile in ("rich", "all"):
+        plan += [("rich", lambda: capture_gpu("rich", RICH_FLAGS, frame_count=3)),
+                 ("rich-timing", lambda: capture_timing("rich-timing", RICH_TIMING_FLAGS))]
+    if profile in ("perf", "all"):
+        plan += [("perf-baseline", lambda: capture_gpu("perf-baseline", ["--workload", "perf", "--variant", "baseline"])),
+                 ("perf-candidate", lambda: capture_gpu("perf-candidate", ["--workload", "perf", "--variant", "candidate"]))]
+    if profile in ("sm6", "all"):
+        plan.append(("sm6", lambda: capture_gpu("sm6", ["--dxc", "--mesh"])))
+    if profile in ("programmatic", "all"):
+        plan.append(("programmatic", lambda: capture_programmatic("programmatic")))
+
+    for name, work in plan:
         started = time.monotonic()
         try:
             report["fixtures"].append({"name": name, "status": "passed", **work(), "seconds": time.monotonic() - started})
@@ -154,7 +257,8 @@ def main():
     parser.add_argument("--output-dir", default="tests/artifacts")
     parser.add_argument("--timing-seconds", type=float, default=3)
     parser.add_argument("--startup-delay-ms", type=int, default=1500)
-    parser.add_argument("--only", choices=("all", "gpu", "timing"), default="all")
+    parser.add_argument("--profile", choices=PROFILES, default="default", help="Fixture set to capture (default: baseline, candidate, timing).")
+    parser.add_argument("--only", choices=("all", "gpu", "timing"), default="all", help="Narrow the default profile.")
     parser.add_argument("--adapter-name", help="Require a case-insensitive hardware-adapter name substring (for example B580); no fallback.")
     parser.add_argument("--timeout", type=float, default=60, help="Maximum seconds per MCP response.")
     args = parser.parse_args()
@@ -168,7 +272,10 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
         app = Path(args.app)
-        for path in (app, app.with_suffix(".pdb"), app.parent / "WinPixEventRuntime.dll"):
+        dependencies = [app, app.with_suffix(".pdb"), app.parent / "WinPixEventRuntime.dll"]
+        if args.profile in ("sm6", "all"):
+            dependencies += [app.parent / "dxcompiler.dll", app.parent / "dxil.dll"]
+        for path in dependencies:
             if not path.is_file():
                 raise SmokeError(f"Missing fixture dependency {path}; run tests/D3D12TestApp/build.cmd")
         client = Client([args.server], timeout=args.timeout)
@@ -176,7 +283,7 @@ def main():
                                    "clientInfo": {"name": "pixmcp-fixtures", "version": "1.0"}})
         client.send("notifications/initialized", notify=True)
         report = generate(client, args.app, output_dir, args.timing_seconds, args.startup_delay_ms,
-                          only=args.only, adapter_name=args.adapter_name)
+                          only=args.only, adapter_name=args.adapter_name, profile=args.profile)
     except Exception as error:
         report["errors"].append({"error": f"{type(error).__name__}: {error}"})
         print(f"Fixture generation failed: {error}", file=sys.stderr)

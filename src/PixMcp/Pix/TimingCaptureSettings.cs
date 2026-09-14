@@ -176,6 +176,27 @@ internal static class TimingCaptureOptions
             part.Id.MinimalInstrumentation = true;
             parts.Add(part);
         }
+        // PIXMCP_TIMING_EXPERIMENT_PARTS adds parts the arguments did not request (the GpuFrame experiment).
+        foreach (string name in ServerOptions.Current.TimingExperimentParts ?? [])
+        {
+            PartType type = Enum.Parse<PartType>("PIX_TIMING_CAPTURE_OPTION_PART_TYPE_" + name);
+            if (parts.Any(existing => existing.Type == type)) continue;
+            var part = Part(type);
+            switch (type)
+            {
+                case PartType.PIX_TIMING_CAPTURE_OPTION_PART_TYPE_VIDEO: part.Id.CaptureVideo = true; break;
+                case PartType.PIX_TIMING_CAPTURE_OPTION_PART_TYPE_INCLUDE_CAPTURE_ETL: part.Id.IncludeCaptureEtl = true; break;
+                case PartType.PIX_TIMING_CAPTURE_OPTION_PART_TYPE_CIRCULAR: part.Id.Circular = true; break;
+                case PartType.PIX_TIMING_CAPTURE_OPTION_PART_TYPE_PAGEFAULT: part.Id.CapturePageFaults = Collection.PIX_EVENT_COLLECTION_LEVEL_ENABLED; break;
+                case PartType.PIX_TIMING_CAPTURE_OPTION_PART_TYPE_CLRDATA: part.Id.CaptureClrData = true; break;
+                case PartType.PIX_TIMING_CAPTURE_OPTION_PART_TYPE_FORCE_COM_PATH: part.Id.ForceComPath = true; break;
+                case PartType.PIX_TIMING_CAPTURE_OPTION_PART_TYPE_GPU_ONLY_EVENTS: part.Id.GpuOnlyEvents = true; break;
+                case PartType.PIX_TIMING_CAPTURE_OPTION_PART_TYPE_MINIMAL_INSTRUMENTATION: part.Id.MinimalInstrumentation = true; break;
+                default: continue;
+            }
+            parts.Add(part);
+        }
+        parts.Sort((a, b) => a.Type.CompareTo(b.Type));
         return (options, parts.ToArray());
     }
 

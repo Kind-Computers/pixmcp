@@ -203,6 +203,7 @@ value prints `pixmcp: <variable> ...` and exits 1 before any protocol output, an
 | `PIXMCP_GPUSQL_MAX_BYTES` | 1073741824 (1 GiB) | Byte cap of each GPU capture's private SQL store (at least 1048576) |
 | `PIXMCP_TOOLSETS` | all | Toolsets to advertise, separated by commas: `gpu`, `timing`, `dump`, `device`, `csv`, `gpusql`, `drpix`, `shader` (`session` is always on). Disabled tools leave `tools/list`, fail with `tool_disabled` and hide the prompts that need them |
 | `PIXMCP_TEXT_CONTENT` | full | `summary` replaces the text block of each successful result with a summary of at most 512 bytes; `structuredContent` and errors stay complete |
+| `PIXMCP_TIMING_EXPERIMENT_PARTS` | none | Timing capture option parts appended to every timing capture, separated by commas: `VIDEO`, `INCLUDE_CAPTURE_ETL`, `CIRCULAR`, `PAGEFAULT`, `CAPTURE_SYSMON_COUNTERS`, `CLRDATA`, `FORCE_COM_PATH`, `GPU_ONLY_EVENTS`, `MINIMAL_INSTRUMENTATION`. For experiments such as `scripts/gpu_frame_experiment.py` |
 
 The store retains up to 50 transient snapshots and the latest 50 finished jobs.
 Storage pressure evicts transient results first, then finished jobs (after a 30 second
@@ -1078,7 +1079,7 @@ reading the preceding bytes because the native blob API only exposes prefix read
 | Area | Tools |
 |---|---|
 | Session/results | `pix_info`, `pix_handles`, `pix_close`, `pix_close_all`, `pix_jobs`, `pix_job_status`, `pix_job_wait`, `pix_job_cancel`, `pix_log`, `pix_result_read`, `pix_result_export` |
-| Investigation | `pix_gpu_overview`, `pix_gpu_inspect_event`, `pix_gpu_rollup`, `pix_gpu_pipelines`, `pix_gpu_queue_overlap`, `pix_gpu_bubbles`, `pix_gpu_compare`, `pix_gpu_compare_changes` |
+| Investigation | `pix_gpu_overview`, `pix_gpu_inspect_event`, `pix_gpu_bottleneck`, `pix_gpu_rollup`, `pix_gpu_pipelines`, `pix_gpu_queue_overlap`, `pix_gpu_bubbles`, `pix_gpu_compare`, `pix_gpu_compare_changes` |
 | GPU SQL | `pix_gpu_sql_populate`, `pix_gpu_sql`, `pix_gpu_sql_tables`, `pix_gpu_sql_export` |
 | GPU capture | `pix_gpu_open`, `pix_gpu_info`, `pix_gpu_queues`, `pix_gpu_events`, `pix_gpu_event`, `pix_gpu_api_objects`, `pix_gpu_screenshot` |
 | Analysis | `pix_gpu_analysis_start`, `pix_gpu_analysis_status`, `pix_gpu_analysis_adapters`, `pix_gpu_analysis_stop` |
@@ -1137,8 +1138,8 @@ Existing smoke scenarios have been migrated to the new contract.
 `dotnet test` runs unit, worker/job lifecycle, schema, and stdio protocol tests.
 Set `PIX_TEST_CAPTURE` to a capture path to enable capture integration tests;
 also set `PIX_TEST_ANALYSIS=1` for replay tests. Hosted CI runs the dependency-free
-Python harness tests. The manually dispatched self-hosted `pix` job builds the fixture,
-generates captures, and then runs native tests serially. Set `PIX_TEST_TIMING_CAPTURE`
+Python harness tests and gates. The self-hosted `pix` job runs on demand and on every push to main. It
+builds the fixture, generates captures, and then runs the native tests serially. Set `PIX_TEST_TIMING_CAPTURE`
 to the generated timing capture for named marker/counter/callstack validation.
 
 ```powershell
@@ -1155,11 +1156,54 @@ Use `--hidden` for unattended capture and `--duplicate-markers` to test ambiguit
 named, non-inlined functions. The build restores a pinned WinPixEventRuntime and
 keeps matching PDBs beside the executable.
 
-Generate baseline, candidate, and symbol-resolved timing captures together:
+Rich fixture flags compose; an unsupported feature prints `fixture: skipped <flag>: <reason>` and the
+app keeps rendering. `--depth` adds D32 depth and a depth-rejected triangle, `--placed-heap` a heap with
+placed resources, `--reserved` a 4096x4096 reserved texture with four mapped tiles, `--indirect`
+ExecuteIndirect draws, `--async-overlap` heavy compute with a graphics-queue wait on the compute fence,
+`--msaa N` a multisampled target with a resolve pass, `--mrt 2` a second float render target,
+`--bandwidth` a 2048x2048 float texture sampled eight times per pixel, `--hdr` a float swap chain,
+`--gpu-markers` WinPixEventRuntime command-list markers (which timing captures record), `--dxc` runtime
+DXC at shader model 6 with embedded debug information, `--mesh` a mesh-shader quad,
+`--programmatic-capture PATH` a `PIXGpuCaptureNextFrames` call at `--capture-at N` for
+`--capture-frames N`, and `--workload perf` a 1080p offscreen Shadow, GBuffer, Lighting and Post frame
+with a copy-queue upload whose candidate doubles the Lighting cost. `--report PATH` writes the effective
+flags, skips, adapter and DXC version as JSON.
+
+Generate baseline, candidate, and symbol-resolved timing captures together, or another fixture profile:
 
 ```powershell
 python scripts\capture_fixtures.py src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\PixMcp.exe
+python scripts\capture_fixtures.py src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\PixMcp.exe --profile rich
 ```
+
+`--profile rich` writes `rich.wpix` (three frames) and `rich-timing.wpix`, `perf` writes
+`perf-baseline.wpix` and `perf-candidate.wpix`, `sm6` writes `sm6.wpix` (`--dxc --mesh`),
+`programmatic` writes `programmatic.wpix`, and `all` writes every set. The report embeds each launch's
+`--report` sidecar and the repository commit. Timing fixtures (`timing`, `rich-timing`) and the GpuFrame
+experiment start the PIX timing recorder, which can raise a UAC prompt; approve it at the desktop, or the
+start fails with 0x800704C7 once the prompt times out. Native tests read the captures through
+`PIX_TEST_RICH_CAPTURE`, `PIX_TEST_RICH_TIMING_CAPTURE`, `PIX_TEST_PERF_BASELINE`,
+`PIX_TEST_PERF_CANDIDATE`, `PIX_TEST_SM6_CAPTURE` and `PIX_TEST_PROGRAMMATIC_CAPTURE`.
+`scripts\gpu_frame_experiment.py` records which timing capture option parts, applied through
+`PIXMCP_TIMING_EXPERIMENT_PARTS`, populate `GpuFrame`.
+
+PIX-free timing tests run on `tests\PixMcp.Tests\Fixtures\timing-synthetic.sqlite`, a committed
+PixStorage-shaped database: every table and index of the recorded 2606.18 schema with its real DDL, the eight
+pixstorage.dll virtual tables as plain stand-ins without hidden columns, and the rows of `timing-fixture.json`.
+`scripts\pixstorage_schema.py <timing.wpix>` records that schema (105 tables, 41 indexes, 8 virtual tables with
+their columns, `findstackid/2`) in `pixstorage-schema-2606.18.json`, and `--check` reports drift on a new PIX
+build. `scripts\make_timing_fixture.py` rebuilds the database; it refuses to change the logical hash (SHA-256
+over the sorted dump, stored in `timing-synthetic.sqlite.sha256`) unless `--update-hash` is passed, and
+`--check` verifies the committed file. With `PIX_TEST_TIMING_CAPTURE` set, `TimingNativeSchemaTests` compares
+the real capture with the recorded schema column by column. It also checks that writes are refused without
+touching the file, and that row caps and timeouts return exact continuations.
+With `PIX_TEST_CAPTURE` set, `GoldenCaptureTests` compares every event of `tests\artifacts\baseline.wpix` and
+`candidate.wpix` with `tests\PixMcp.Tests\Fixtures\golden\*.events.json`. A header records hashes of the
+capture, `main.cpp` and `build.cmd`, plus the PIX build, so a regenerated fixture fails with
+`golden_header_mismatch`. Set `PIXMCP_UPDATE_GOLDEN=1` to rewrite the goldens, and review the diff.
+`capture_fixtures.py` writes the same hashes into its report. `Fixtures\tool-names.txt` pins the registered
+tool set, and the README tool catalog must name every tool once. The `gpu-overview-golden` scenario asserts
+the baseline capture's golden queue and kind counts through the stdio transport.
 
 `scripts\smoke.py` runs scripted MCP scenarios:
 
@@ -1167,8 +1211,9 @@ python scripts\capture_fixtures.py src\PixMcp\bin\x64\Release\net10.0-windows10.
 python scripts\smoke.py src\PixMcp\bin\x64\Release\net10.0-windows10.0.26100.0\PixMcp.exe @scripts\scenarios\capture-and-inspect.json
 ```
 
-`take-capture` produces a capture. `open-capture`, `analysis-pending`, and
-`inspect-extras` accept `PIX_TEST_CAPTURE`. Tool/protocol errors, failed jobs,
+`take-capture` produces a capture. `open-capture`, `analysis-pending`, `inspect-extras`,
+`capture-format` and `gpu-overview-golden` accept `PIX_TEST_CAPTURE`. `device-inventory` lists local
+processes, packaged apps and counters, and `jobs-and-log` reads the session tables; neither needs a capture. Tool/protocol errors, failed jobs,
 unresolved references, and failed assertions fail the scenario.
 
 `timing-sql` accepts `PIX_TEST_TIMING_CAPTURE`. It checks the PixStorage schema census, one table detail, a
@@ -1197,8 +1242,31 @@ Reports survive individual failures so independent tasks can still run. Actual f
 return a failing exit status; `--strict` also fails on limited or skipped tasks.
 Both the benchmark and fixture generator fail on cleanup errors or an unsuccessful
 server shutdown, recording those diagnostics separately from the original results.
-The self-hosted workflow exposes this as `strict_benchmark`. Call counts and elapsed
-time remain advisory measurements.
+The self-hosted workflow exposes this as `strict_benchmark`. The report embeds the
+environment (`scripts\environment.py`: commit, server and PIX versions, GPU adapters, capture hashes and
+options). The `pix_jobs` inventory taken after each task counts as that task's `overhead`, not its calls.
+`scripts\benchmark-budgets.json` caps each task's calls and returned JSON bytes and the wire-to-JSON ratio
+per text mode, and `--enforce-budgets` fails a run more than 10 % over a budget. `--baseline previous.json`
+marks tasks whose calls or bytes grew more than 25 %. Elapsed time stays advisory.
+
+The harness gates run without PIX:
+
+```powershell
+python scripts\smoke.py --validate-scenarios scripts\scenarios
+python scripts\tool_coverage.py --fail-on-uncovered
+python scripts\check_docs.py
+python scripts\make_timing_fixture.py --check
+```
+
+`--validate-scenarios` checks each scenario's shape, tool names and step references. `smoke.py --all
+scripts\scenarios --skip-missing-env <PixMcp.exe>` runs every scenario on its own server, skipping the
+manual `provoke-hang` and naming any scenario whose `$env` variables are unset. `tool_coverage.py` requires
+every registered tool to be exercised by a C# test call, StdioTests, a script or a scenario, or listed with a
+reason in `scripts\tool-coverage-allowlist.txt`; stale entries fail. `check_docs.py` compares the tool catalog
+below and `docs\tools.md` with the registered tools. `PixMcp.exe --tool-reference docs\tools.md` regenerates
+that reference from the tool attributes; `--check` exits 2 when it is stale. The self-hosted CI job runs
+on demand and on every push to main. It runs all of these plus `dotnet test`, the smoke suite and the
+budgeted benchmark, and uploads only JSON, TRX and PNG artifacts.
 
 GPU hang generation is never part of the default tests or benchmark.
 The optional `provoke-hang` scenario deliberately resets the GPU and exists only

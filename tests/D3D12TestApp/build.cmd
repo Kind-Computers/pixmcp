@@ -17,8 +17,17 @@ if "%VSDIR%"=="" (
 )
 call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if not exist "%HERE%bin" mkdir "%HERE%bin"
-cl /nologo /EHsc /O2 /Zi /W3 /std:c++17 /DUNICODE /D_UNICODE /DUSE_PIX /I"%PIXEVENTS%Include\WinPixEventRuntime" /Fo"%HERE%bin\\" /Fd"%HERE%bin\D3D12TestApp.compile.pdb" /Fe"%HERE%bin\D3D12TestApp.exe" "%HERE%main.cpp" /link /SUBSYSTEM:CONSOLE /DEBUG /PDB:"%HERE%bin\D3D12TestApp.pdb" /LIBPATH:"%PIXEVENTS%bin\x64" WinPixEventRuntime.lib
+cl /nologo /EHsc /O2 /Zi /W3 /std:c++17 /DUNICODE /D_UNICODE /DUSE_PIX /I"%PIXEVENTS%Include\WinPixEventRuntime" /Fo"%HERE%bin\\" /Fd"%HERE%bin\D3D12TestApp.compile.pdb" /Fe"%HERE%bin\D3D12TestApp.exe" "%HERE%main.cpp" /link /SUBSYSTEM:CONSOLE /DEBUG /PDB:"%HERE%bin\D3D12TestApp.pdb" /LIBPATH:"%PIXEVENTS%bin\x64" WinPixEventRuntime.lib dxcompiler.lib delayimp.lib /DELAYLOAD:dxcompiler.dll
 if errorlevel 1 exit /b 1
 copy /y "%PIXEVENTS%bin\x64\WinPixEventRuntime.dll" "%HERE%bin\WinPixEventRuntime.dll" >nul
 if errorlevel 1 exit /b 1
+rem --dxc needs the Windows SDK's DXC compiler and validator beside the executable (dxcompiler.dll is delay-loaded).
+set DXCDIR=%WindowsSdkDir%Redist\D3D\x64\
+if not exist "%DXCDIR%dxcompiler.dll" set DXCDIR=%WindowsSdkBinPath%%WindowsSDKVersion%x64\
+if exist "%DXCDIR%dxcompiler.dll" (
+  copy /y "%DXCDIR%dxcompiler.dll" "%HERE%bin\dxcompiler.dll" >nul
+  copy /y "%DXCDIR%dxil.dll" "%HERE%bin\dxil.dll" >nul
+) else (
+  echo DXC was not found in the Windows SDK; --dxc and --mesh will fail to start.
+)
 echo Built %HERE%bin\D3D12TestApp.exe

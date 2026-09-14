@@ -1,0 +1,6 @@
+[
+ ["pix_capture_format", {"path": "$env.PIX_TEST_CAPTURE"}],
+ ["pix_gpu_open", {"path": "$env.PIX_TEST_CAPTURE"}],
+ ["pix_gpu_api_objects", {"handle": "$pix_gpu_open.handle", "limit": 10}],
+ ["pix_close_all", {}]
+]

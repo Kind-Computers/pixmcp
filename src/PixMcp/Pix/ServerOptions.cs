@@ -7,7 +7,7 @@ public sealed record ConfiguredValue(object? Value, string Source, string Variab
 
 public sealed record ServerOptionsSummary(ConfiguredValue InlineResultBytes, ConfiguredValue MaxResultBytes,
     ConfiguredValue ResultMemoryBytes, ConfiguredValue ResultDiskBytes, ConfiguredValue ResultDirectory, ConfiguredValue VerifyBulkReadback, ConfiguredValue? GpuSqlMaxBytes = null,
-    ConfiguredValue? Toolsets = null, ConfiguredValue? TextContent = null);
+    ConfiguredValue? Toolsets = null, ConfiguredValue? TextContent = null, ConfiguredValue? TimingExperimentParts = null);
 
 /// <summary>
 /// Server configuration, parsed once from the environment before any protocol output. Every consumer reads
@@ -24,7 +24,8 @@ public sealed record ServerOptions(
     bool VerifyBulkReadback = false, string VerifySource = ServerOptions.FromDefault,
     long GpuSqlMaxBytes = ServerOptions.DefaultGpuSqlMaxBytes, string GpuSqlSource = ServerOptions.FromDefault,
     IReadOnlySet<string>? Toolsets = null, string ToolsetsSource = ServerOptions.FromDefault,
-    string TextContent = ServerOptions.TextContentFull, string TextContentSource = ServerOptions.FromDefault)
+    string TextContent = ServerOptions.TextContentFull, string TextContentSource = ServerOptions.FromDefault,
+    IReadOnlyList<string>? TimingExperimentParts = null, string TimingExperimentPartsSource = ServerOptions.FromDefault)
 {
     public const string VerifyVariable = "PIXMCP_VERIFY_BULK_READBACK";
     public const string InlineVariable = "PIXMCP_INLINE_RESULT_BYTES";
@@ -38,6 +39,13 @@ public sealed record ServerOptions(
     /// <summary>full (default): text blocks repeat the JSON; summary: one short text block per successful result.</summary>
     public const string TextContentVariable = "PIXMCP_TEXT_CONTENT";
     public const string TextContentFull = "full", TextContentSummary = "summary";
+    /// <summary>
+    /// Timing capture option parts (PIX_TIMING_CAPTURE_OPTION_PART_TYPE suffixes) appended to every timing capture, for experiments such as
+    /// finding which part populates GpuFrame. VIDEO_SOURCEID is excluded because it needs a source.
+    /// </summary>
+    public const string TimingExperimentPartsVariable = "PIXMCP_TIMING_EXPERIMENT_PARTS";
+    public static IReadOnlyList<string> TimingExperimentPartNames =>
+        ["VIDEO", "INCLUDE_CAPTURE_ETL", "CIRCULAR", "PAGEFAULT", "CAPTURE_SYSMON_COUNTERS", "CLRDATA", "FORCE_COM_PATH", "GPU_ONLY_EVENTS", "MINIMAL_INSTRUMENTATION"];
     public const long DefaultGpuSqlMaxBytes = 1L << 30, MinGpuSqlMaxBytes = 1L << 20;
     public const int DefaultInlineResultBytes = 32 * 1024;
     public const int MinInlineResultBytes = 1024;
@@ -99,8 +107,23 @@ public sealed record ServerOptions(
                 default: problems.Add($"{TextContentVariable} must be full or summary; got '{textText}'."); break;
             }
         }
+        IReadOnlyList<string>? timingParts = null;
+        string timingPartsSource = FromDefault;
+        if (environment(TimingExperimentPartsVariable) is string partsText && !string.IsNullOrWhiteSpace(partsText))
+        {
+            string[] names = partsText.Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(name => name.ToUpperInvariant()).Distinct(StringComparer.Ordinal).ToArray();
+            string[] unknown = names.Where(name => !TimingExperimentPartNames.Contains(name)).ToArray();
+            if (unknown.Length > 0)
+                problems.Add($"{TimingExperimentPartsVariable} names unknown timing capture option parts: {string.Join(", ", unknown)}. Valid parts: {string.Join(", ", TimingExperimentPartNames)}.");
+            else
+            {
+                timingParts = names;
+                timingPartsSource = FromEnvironment;
+            }
+        }
         return new(inline, inlineSource, max, maxSource, memory, memorySource, disk, diskSource, directory, directorySource, problems, verify, verifySource, gpuSql, gpuSqlSource,
-            toolsets, toolsetsSource, textContent, textContentSource);
+            toolsets, toolsetsSource, textContent, textContentSource, timingParts, timingPartsSource);
     }
 
     private static (bool, string) ParseFlag(Func<string, string?> environment, string variable, List<string> problems)
@@ -143,7 +166,8 @@ public sealed record ServerOptions(
 
     /// <summary>A copy of the process configuration with some values replaced (for tests).</summary>
     public static ServerOptions With(int? inlineResultBytes = null, int? maxResultBytes = null, long? resultMemoryBytes = null, long? resultDiskBytes = null,
-        string? resultDirectory = null, bool? verifyBulkReadback = null, long? gpuSqlMaxBytes = null, string? textContent = null)
+        string? resultDirectory = null, bool? verifyBulkReadback = null, long? gpuSqlMaxBytes = null, string? textContent = null,
+        IReadOnlyList<string>? timingExperimentParts = null)
         => Global with
         {
             InlineResultBytes = inlineResultBytes ?? Global.InlineResultBytes,
@@ -154,6 +178,7 @@ public sealed record ServerOptions(
             VerifyBulkReadback = verifyBulkReadback ?? Global.VerifyBulkReadback,
             GpuSqlMaxBytes = gpuSqlMaxBytes ?? Global.GpuSqlMaxBytes,
             TextContent = textContent ?? Global.TextContent,
+            TimingExperimentParts = timingExperimentParts ?? Global.TimingExperimentParts,
         };
 
     public ServerOptionsSummary Describe() => new(
@@ -165,7 +190,8 @@ public sealed record ServerOptions(
         new(VerifyBulkReadback, VerifySource, VerifyVariable),
         new(GpuSqlMaxBytes, GpuSqlSource, GpuSqlMaxVariable),
         new(Toolsets is null ? "all" : string.Join(",", Toolsets.Order(StringComparer.Ordinal)), ToolsetsSource, ToolsetsVariable),
-        new(TextContent, TextContentSource, TextContentVariable));
+        new(TextContent, TextContentSource, TextContentVariable),
+        new(TimingExperimentParts is null ? "none" : string.Join(",", TimingExperimentParts), TimingExperimentPartsSource, TimingExperimentPartsVariable));
 
     private sealed class Restore(ServerOptions? previous) : IDisposable
     {

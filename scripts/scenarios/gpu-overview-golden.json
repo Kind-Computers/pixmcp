@@ -1,0 +1,7 @@
+[
+ ["pix_gpu_open", {"path": "$env.PIX_TEST_CAPTURE"}],
+ ["pix_gpu_overview", {"handle": "$pix_gpu_open.handle", "includeTiming": false}, {"capture.queueCount": 3, "capture.eventTotal": 79, "queues.0.eventCount": 29, "queues.0.kinds.draw": 3, "queues.0.kinds.clear": 1, "queues.0.kinds.present": 1, "queues.2.kinds.dispatch": 1}],
+ ["pix_gpu_events", {"handle": "$pix_gpu_open.handle", "queueIndex": 0, "kind": "draw", "limit": 5}, {"total": 3}],
+ ["pix_gpu_events", {"handle": "$pix_gpu_open.handle", "queueIndex": 2, "kind": "dispatch", "limit": 5}, {"total": 1}],
+ ["pix_close_all", {}]
+]

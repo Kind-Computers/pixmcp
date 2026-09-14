@@ -1,0 +1,6 @@
+[
+ ["pix_info", {"probe": true}, {"pix.apiLoaded": true}],
+ ["pix_handles", {}, {"total": 0}],
+ ["pix_jobs", {}],
+ ["pix_log", {"limit": 10}]
+]

@@ -1,4 +1,5 @@
 """Fixture orchestration tests; never launch an application or access a GPU."""
+import hashlib
 import json
 import io
 from pathlib import Path
@@ -6,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from capture_fixtures import generate, main
+from capture_fixtures import fixture_source_hashes, generate, main, source_sha256
 from smoke import SmokeError
 
 
@@ -207,6 +208,100 @@ class FixtureTests(unittest.TestCase):
             self.assertEqual(["failed", "passed", "passed"], [row["status"] for row in report["fixtures"]])
             self.assertEqual(1, len(report["errors"]))
             self.assertEqual(3, sum(row["tool"] == "pix_device_detach" for row in agent.calls))
+
+
+class ProfileInvestigator(FakeInvestigator):
+    """Also plays the fixture app: writes the --report sidecar and any --programmatic-capture file at launch."""
+
+    def query(self, tool, **arguments):
+        if tool == "pix_device_launch":
+            parts = arguments["arguments"].split()
+            if "--report" in parts:
+                Path(parts[parts.index("--report") + 1]).write_text(json.dumps(
+                    {"flags": [p for p in parts if p in ("--dxc", "--mesh", "--depth")], "skips": ["--reserved: tiled resources are not supported"],
+                     "dxcVersion": "1.8"}), encoding="utf-8")
+            if "--programmatic-capture" in parts:
+                Path(parts[parts.index("--programmatic-capture") + 1]).write_bytes(b"programmatic capture")
+        return super().query(tool, **arguments)
+
+
+class FixtureProfileTests(unittest.TestCase):
+    EXPECTED = {"default": ["baseline", "candidate", "timing"], "rich": ["rich", "rich-timing"],
+                "perf": ["perf-baseline", "perf-candidate"], "sm6": ["sm6"], "programmatic": ["programmatic"]}
+
+    def run_profile(self, profile, agent_type=ProfileInvestigator, **options):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        agent = agent_type(directory.name)
+        with patch("capture_fixtures.Investigator", return_value=agent):
+            report = generate(None, Path(directory.name) / "app.exe", Path(directory.name) / "out", sleep=lambda _: None,
+                              profile=profile, **options)
+        return agent, report, Path(directory.name) / "out"
+
+    def test_profiles_select_their_fixture_sets(self):
+        for profile, names in self.EXPECTED.items():
+            with self.subTest(profile=profile):
+                _, report, out = self.run_profile(profile)
+                self.assertEqual([], report["errors"])
+                self.assertEqual(names, [row["name"] for row in report["fixtures"]])
+                self.assertEqual(profile, report["profile"])
+                for name in names:
+                    self.assertTrue((out / f"{name}.wpix").is_file(), name)
+        _, report, _ = self.run_profile("all")
+        self.assertEqual(sum(self.EXPECTED.values(), []), [row["name"] for row in report["fixtures"]])
+
+    def test_launch_flags_frame_counts_and_sidecar_reports(self):
+        agent, report, _ = self.run_profile("all")
+        launches = {row["fixture"]: row["arguments"] for row in report["launches"]}
+        self.assertIn("--msaa 4 --mrt 2", launches["rich"])
+        self.assertIn("--gpu-markers", launches["rich-timing"])
+        self.assertIn("--workload perf --variant candidate", launches["perf-candidate"])
+        self.assertIn("--dxc --mesh", launches["sm6"])
+        self.assertIn("--programmatic-capture", launches["programmatic"])
+        self.assertTrue(all("--report" in arguments for arguments in launches.values()))
+        captures = [row["arguments"] for row in agent.calls if row["tool"] == "pix_device_take_gpu_capture"]
+        self.assertEqual([1, 1, 3, 1, 1, 1], [capture["frameCount"] for capture in captures])
+        fixtures = {row["name"]: row for row in report["fixtures"]}
+        self.assertEqual(["--reserved: tiled resources are not supported"], fixtures["rich"]["fixture"]["skips"])
+        self.assertEqual(["--dxc", "--mesh"], fixtures["sm6"]["fixture"]["flags"])
+        self.assertEqual(3, fixtures["programmatic"]["frameCount"])
+        self.assertIn("commit", report)
+        for row in report["fixtures"]:
+            self.assertEqual(hashlib.sha256(Path(row["path"]).read_bytes()).hexdigest(), row["sha256"], row["name"])
+
+    def test_missing_programmatic_capture_fails_after_its_wait_and_detaches(self):
+        ticks = iter(range(0, 10000, 50))
+        agent, report, _ = self.run_profile("programmatic", agent_type=FakeInvestigator, clock=lambda: next(ticks),
+                                            programmatic_wait_seconds=100)
+        self.assertEqual("failed", report["fixtures"][0]["status"])
+        self.assertIn("did not appear", report["fixtures"][0]["error"])
+        self.assertEqual(1, sum(row["tool"] == "pix_device_detach" for row in agent.calls))
+
+    def test_unknown_profile_is_rejected_before_any_mcp_work(self):
+        with patch("capture_fixtures.Investigator") as agent, self.assertRaises(ValueError):
+            generate(None, "unused.exe", "unused-output", profile="turbo")
+        agent.assert_not_called()
+
+
+class SourceHashTests(unittest.TestCase):
+    def test_source_hash_ignores_line_endings_and_bom(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lf, crlf = Path(directory) / "lf.cpp", Path(directory) / "crlf.cpp"
+            lf.write_bytes(b"int main()\n{\n}\n")
+            crlf.write_bytes(b"\xef\xbb\xbfint main()\r\n{\r\n}\r\n")
+            self.assertEqual(hashlib.sha256(b"int main()\n{\n}\n").hexdigest(), source_sha256(lf))
+            self.assertEqual(source_sha256(lf), source_sha256(crlf))
+            self.assertIsNone(source_sha256(Path(directory) / "missing.cpp"))
+
+    def test_fixture_sources_are_found_beside_or_above_the_app(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bin").mkdir()
+            (root / "main.cpp").write_text("x\n", encoding="utf-8")
+            hashes = fixture_source_hashes(root / "bin" / "app.exe")
+            self.assertEqual(source_sha256(root / "main.cpp"), hashes["main.cpp"])
+            self.assertIsNone(hashes["build.cmd"])
+            self.assertIsNone(fixture_source_hashes(root / "elsewhere" / "deeper" / "app.exe"))
 
 
 if __name__ == "__main__":

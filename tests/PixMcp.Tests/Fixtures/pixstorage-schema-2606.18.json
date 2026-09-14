@@ -1,0 +1,5516 @@
+{
+ "captureFacts": [
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14,
+  15,
+  16,
+  17,
+  18,
+  19,
+  20,
+  21,
+  22,
+  23,
+  24,
+  25,
+  26,
+  27,
+  28,
+  30,
+  31,
+  32,
+  33,
+  34,
+  35,
+  36,
+  37,
+  38,
+  39,
+  40,
+  41,
+  42,
+  43,
+  44,
+  45,
+  46,
+  47,
+  48,
+  49,
+  50,
+  51,
+  52,
+  57,
+  58,
+  59,
+  67,
+  68,
+  69,
+  71,
+  72,
+  73,
+  74,
+  75,
+  76,
+  77,
+  80,
+  81,
+  82
+ ],
+ "census": {
+  "functions": 1,
+  "indexes": 41,
+  "modules": 8,
+  "tables": 105
+ },
+ "functions": [
+  "findstackid/2"
+ ],
+ "indexes": {
+  "AllocationMigrationIdx1": {
+   "sql": "CREATE INDEX AllocationMigrationIdx1 on AllocationMigrations(StartTime asc)",
+   "table": "AllocationMigrations"
+  },
+  "Amd64ContextRegistersIdx1": {
+   "sql": "CREATE INDEX Amd64ContextRegistersIdx1 on Amd64ContextRegisters(StartTimestamp asc, EndTimestamp asc, Core)",
+   "table": "Amd64ContextRegisters"
+  },
+  "ApiObjectIdx": {
+   "sql": "CREATE INDEX ApiObjectIdx on ApiObjects(CreateTimestamp asc, FreeTimestamp)",
+   "table": "ApiObjects"
+  },
+  "ApiQueueApiExecutionIdx": {
+   "sql": "CREATE INDEX ApiQueueApiExecutionIdx on ApiQueueExecution (ApiCommandQueueId asc, BeginTimestamp asc) ",
+   "table": "ApiQueueExecution"
+  },
+  "ApiQueueCommandListIdx": {
+   "sql": "CREATE INDEX ApiQueueCommandListIdx on ApiQueueExecutionCommandList (BeginTimestamp asc, EndTimestamp asc, ApiQueueExecutionId asc) ",
+   "table": "ApiQueueExecutionCommandList"
+  },
+  "ContextSwitchRangeIdx": {
+   "sql": "CREATE INDEX ContextSwitchRangeIdx on ContextSwitchRange (BeginTimestamp asc, EndTimestamp asc, Core) ",
+   "table": "ContextSwitchRange"
+  },
+  "CpuGpuExecutionMapIdx1": {
+   "sql": "CREATE INDEX CpuGpuExecutionMapIdx1 on CpuGpuExecutionMap (CpuMarkerId) ",
+   "table": "CpuGpuExecutionMap"
+  },
+  "CustomExecutionIdx1": {
+   "sql": "CREATE INDEX CustomExecutionIdx1 on CustomExecution (ExecutionInfoId, BeginTimestamp asc , EndTimestamp asc) ",
+   "table": "CustomExecution"
+  },
+  "CustomExecutionInfoIdx1": {
+   "sql": "CREATE INDEX CustomExecutionInfoIdx1 on CustomExecutionInfo (DataTypeId) ",
+   "table": "CustomExecutionInfo"
+  },
+  "CustomMarkerIdx1": {
+   "sql": "CREATE INDEX CustomMarkerIdx1 on CustomMarker (MarkerInfoId, Timestamp asc) ",
+   "table": "CustomMarker"
+  },
+  "CustomMarkerInfoIdx1": {
+   "sql": "CREATE INDEX CustomMarkerInfoIdx1 on CustomMarkerInfo (DataTypeId) ",
+   "table": "CustomMarkerInfo"
+  },
+  "DemotedAllocationIdx1": {
+   "sql": "CREATE INDEX DemotedAllocationIdx1 on DemotedAllocations(Timestamp asc)",
+   "table": "DemotedAllocations"
+  },
+  "DsBatchIdx1": {
+   "sql": "CREATE INDEX DsBatchIdx1 on DsBatch (QueueId, FirstEnqueueTimestamp asc , SignalTimestamp asc) ",
+   "table": "DsBatch"
+  },
+  "DsRangeIdx1": {
+   "sql": "CREATE INDEX DsRangeIdx1 on DsRange (QueueId, BeginTimestamp asc , EndTimestamp asc) ",
+   "table": "DsRange"
+  },
+  "DsWorkBlockdx1": {
+   "sql": "CREATE INDEX DsWorkBlockdx1 on DsWorkBlock (BatchId) ",
+   "table": "DsWorkBlock"
+  },
+  "FunctionInformationIdx": {
+   "sql": "CREATE INDEX FunctionInformationIdx on FunctionInformation (ModuleId)",
+   "table": "FunctionInformation"
+  },
+  "GpuApiMarkerIdx": {
+   "sql": "CREATE INDEX GpuApiMarkerIdx on GpuApiMarkerRange (ThreadId, BeginTimestamp asc, EndTimestamp asc) ",
+   "table": "GpuApiMarkerRange"
+  },
+  "GpuFrameIdx": {
+   "sql": "CREATE INDEX GpuFrameIdx on GpuFrame(StartTimestamp asc, EndTimestamp asc)",
+   "table": "GpuFrame"
+  },
+  "InstructionTimelineDeltaMapAddressesIdx": {
+   "sql": "CREATE INDEX InstructionTimelineDeltaMapAddressesIdx on InstructionTimelineDeltaMap (MemoryAccessAddress, InstructionId) ",
+   "table": "InstructionTimelineDeltaMap"
+  },
+  "InstructionTimelineDeltaMapIdx": {
+   "sql": "CREATE INDEX InstructionTimelineDeltaMapIdx on InstructionTimelineDeltaMap (ThreadId, LastSequenceId) ",
+   "table": "InstructionTimelineDeltaMap"
+  },
+  "MemoryEventRangeIdx": {
+   "sql": "CREATE INDEX MemoryEventRangeIdx on MemoryEventRanges (OSProcessId, AllocatorId, StartTimestamp asc, EndTimestamp asc) ",
+   "table": "MemoryEventRanges"
+  },
+  "MemoryPairingDecommitIdx": {
+   "sql": "CREATE INDEX MemoryPairingDecommitIdx on MemoryPairing (DecommitEventId asc, Size) ",
+   "table": "MemoryPairing"
+  },
+  "MethodILToNativeMappingIdx": {
+   "sql": "CREATE INDEX MethodILToNativeMappingIdx on MethodILNativeMappings(OSProcessId, CLRInstanceId, MethodId, ReJITId)",
+   "table": "MethodILNativeMappings"
+  },
+  "ModuleTypesIdx": {
+   "sql": "CREATE INDEX ModuleTypesIdx on ModuleTypes(ModuleId asc)",
+   "table": "ModuleTypes"
+  },
+  "PageFaultIdx": {
+   "sql": "CREATE INDEX PageFaultIdx on PageFaults(ProcThreadId, Timestamp)",
+   "table": "PageFaults"
+  },
+  "PixCounterIdx": {
+   "sql": "CREATE INDEX PixCounterIdx on PixCounterRange (CounterId, BeginTimestamp asc, EndTimestamp asc) ",
+   "table": "PixCounterRange"
+  },
+  "PixCpuMarkerIdx": {
+   "sql": "CREATE INDEX PixCpuMarkerIdx on PixCpuMarkerRange (ThreadId, BeginTimestamp asc, EndTimestamp asc) ",
+   "table": "PixCpuMarkerRange"
+  },
+  "PixCpuSampleIdx": {
+   "sql": "CREATE INDEX PixCpuSampleIdx on CpuSample (ProcThreadId)",
+   "table": "CpuSample"
+  },
+  "PixExecutionRangeIdx": {
+   "sql": "CREATE INDEX PixExecutionRangeIdx on PixExecutionRange (ThreadRowId, Level, BeginTimestamp asc, EndTimestamp asc) ",
+   "table": "PixExecutionRange"
+  },
+  "PixGpuMarkerIdx1": {
+   "sql": "CREATE INDEX PixGpuMarkerIdx1 on PixGpuMarker (CpuMarkerId) ",
+   "table": "PixGpuMarker"
+  },
+  "PixGpuMarkerIdx2": {
+   "sql": "CREATE INDEX PixGpuMarkerIdx2 on PixGpuMarker (ApiCommandQueueId) ",
+   "table": "PixGpuMarker"
+  },
+  "RegisterSampleMemoryAccessIdx1": {
+   "sql": "CREATE INDEX RegisterSampleMemoryAccessIdx1 on RegisterSampleMemoryAccess(Timestamp asc)",
+   "table": "RegisterSampleMemoryAccess"
+  },
+  "ResidenceOperationIdx": {
+   "sql": "CREATE INDEX ResidenceOperationIdx on ResidenceOperations(Timestamp)",
+   "table": "ResidenceOperations"
+  },
+  "SourceLineIdx": {
+   "sql": "CREATE INDEX SourceLineIdx on SourceLine (ModuleId)",
+   "table": "SourceLine"
+  },
+  "StackEventsIdx1": {
+   "sql": "CREATE INDEX StackEventsIdx1 on StackEvents (OSThreadId, StartTimestamp asc, EndTimestamp asc) ",
+   "table": "StackEvents"
+  },
+  "ThreadsProcThreadIdIdx": {
+   "sql": "CREATE INDEX ThreadsProcThreadIdIdx on Threads (ProcThreadId) ",
+   "table": "Threads"
+  },
+  "TypeMembersIdx": {
+   "sql": "CREATE INDEX TypeMembersIdx on TypeMembers(OwningTypeId asc)",
+   "table": "TypeMembers"
+  },
+  "VirtualMemoryRangesAddressIdx": {
+   "sql": "CREATE INDEX VirtualMemoryRangesAddressIdx on VirtualMemoryRanges (EndAddress, BaseAddress, StartTime, EndTime) ",
+   "table": "VirtualMemoryRanges"
+  },
+  "sqlite_autoindex_CustomDataTypeInfo_1": {
+   "sql": null,
+   "table": "CustomDataTypeInfo"
+  },
+  "sqlite_autoindex_HeapFacts_1": {
+   "sql": null,
+   "table": "HeapFacts"
+  },
+  "sqlite_autoindex_SourceFile_1": {
+   "sql": null,
+   "table": "SourceFile"
+  }
+ },
+ "modules": [
+  "ContextSwitch",
+  "CpuMemoryEvent",
+  "FileEvents",
+  "PixCounters",
+  "PixCpuExecution",
+  "PixCpuExecutionTimes",
+  "PixCpuMarker",
+  "PixGpuExecution"
+ ],
+ "tables": {
+  "AllocationMigrations": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AllocationId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ObjectId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StartTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Direction",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Success",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE AllocationMigrations(   Id integer primary key asc,    AllocationId integer,    ObjectId integer,    StartTime integer,    EndTime integer,    Direction integer,    Success integer,    foreign key (ObjectId) references ApiObjects (Id) )"
+  },
+  "Amd64ContextRegisters": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Core",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StartTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ContextRegistersEventData",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    },
+    {
+     "hidden": 0,
+     "name": "EventCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE Amd64ContextRegisters(       Id integer primary key asc,        Core integer,        StartTimestamp integer,        EndTimestamp integer,        ContextRegistersEventData blob,        EventCount integer )"
+  },
+  "ApiCommandQueue": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "TypeId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ProcessId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "HardwareAdapterId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ExecutionCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "WorkCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MaxExecutionLevel",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MaxWorkLevel",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MarkerCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ApiExecutionCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CommandListCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 2,
+   "sql": "CREATE TABLE ApiCommandQueue(    Id integer primary key asc,    TypeId integer,    ProcessId integer,    HardwareAdapterId integer,    NameId integer,    BeginTimestamp integer,     EndTimestamp integer,     ExecutionCount integer,    WorkCount integer,    MaxExecutionLevel integer,    MaxWorkLevel integer,    MarkerCount integer,    ApiExecutionCount integer,    CommandListCount integer,    foreign key(TypeId) references Strings(Id),    foreign key(ProcessId) references Processes(Id),    foreign key(HardwareAdapterId) references HardwareAdapter(Id),    foreign key(NameId) references Strings(Id))"
+  },
+  "ApiMarkerGpuWorkMap": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "ApiMarkerId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "GpuWorkId",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE ApiMarkerGpuWorkMap (    ApiMarkerId integer,     GpuWorkId integer,     primary key (ApiMarkerId, GpuWorkId) ) without rowid"
+  },
+  "ApiObjectDevices": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CreateTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FreeTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FeatureLevel",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "KMAdapter",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "UMAdapter",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "UMAdapterVersion",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "KMDevice",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "UMDeviceVersion",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE ApiObjectDevices(    Id integer primary key asc,     CreateTimestamp integer,     FreeTimestamp integer,     FeatureLevel integer,     KMAdapter integer,     UMAdapter integer,     UMAdapterVersion integer,     KMDevice integer,     UMDeviceVersion integer )"
+  },
+  "ApiObjectNames": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ObjectType",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE ApiObjectNames(    Id integer,     ObjectType integer,     Timestamp integer,     NameId integer,     primary key (Id, Timestamp),     foreign key (Id) references ApiObjects (Id),     foreign key (NameId) references Strings (Id) ) without rowid"
+  },
+  "ApiObjects": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "UniqueIdWithinType",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ObjectType",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DeviceId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CreateTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AllocateTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OSProcessId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OSThreadId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FreeTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AllocationSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BaseAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Alignment",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Flags",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CpuPageProperty",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MemoryPoolPreference",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CreationNodeMask",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "VisibleNodeMask",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Type",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Dimension",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Width",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Height",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DepthOrArraySize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MipLevels",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Format",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "SampleDescCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "SampleDescQuality",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Layout",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ResourceType",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "XboxResourceFlags",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "XboxTargetType",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ColorSamplesAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ColorSamplesSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CMaskAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CMaskSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DCCAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DCCSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FragmentMaskAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FragmentMaskSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DepthSamplesAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DepthSamplesSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "HTileAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "HTileSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StencilSamplesAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StencilSamplesSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "HeapType",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "HeapFlags",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NumTilesForResource",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NumPackedMips",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NumTilesForPackedMips",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DescriptorCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NodeMask",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Guid",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE ApiObjects(   Id integer primary key asc,    UniqueIdWithinType integer,    ObjectType integer,    DeviceId integer,    CreateTimestamp integer,    AllocateTimestamp integer,    OSProcessId integer,    OSThreadId integer,    FreeTimestamp integer,    AllocationSize integer,    BaseAddress integer,    Alignment integer,    Flags integer,    CpuPageProperty integer,    MemoryPoolPreference integer,    CreationNodeMask integer,    VisibleNodeMask integer,    Type integer,    Dimension integer,    Width integer,    Height integer,    DepthOrArraySize integer,    MipLevels integer,    Format integer,    SampleDescCount integer,    SampleDescQuality integer,    Layout integer,    ResourceType integer,    XboxResourceFlags integer,    XboxTargetType integer,    ColorSamplesAddress integer,    ColorSamplesSize integer,    CMaskAddress integer,    CMaskSize integer,    DCCAddress integer,    DCCSize integer,    FragmentMaskAddress integer,    FragmentMaskSize integer,    DepthSamplesAddress integer,    DepthSamplesSize integer,    HTileAddress integer,    HTileSize integer,    StencilSamplesAddress integer,    StencilSamplesSize integer,    HeapType integer,    HeapFlags integer,    NumTilesForResource integer,    NumPackedMips integer,    NumTilesForPackedMips integer,    DescriptorCount integer,    NodeMask integer,    Guid blob,    foreign key (DeviceId) references ApiObjectDevices (Id))"
+  },
+  "ApiQueueExecution": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ApiCommandQueueId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ThreadId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "SubmitTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FrameToken",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 808,
+   "sql": "CREATE TABLE ApiQueueExecution(    Id integer primary key asc,    ApiCommandQueueId integer,    ThreadId integer,    SubmitTimestamp integer,    BeginTimestamp integer,    EndTimestamp integer,    FrameToken integer,    foreign key(FrameToken) references GpuFrame(Id),    foreign key(ThreadId) references Threads(Id),    foreign key(ApiCommandQueueId) references ApiCommandQueue(Id))"
+  },
+  "ApiQueueExecutionCommandList": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ApiQueueExecutionId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CommandLists",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 808,
+   "sql": "CREATE TABLE ApiQueueExecutionCommandList(    Id integer primary key asc,    ApiQueueExecutionId integer,    BeginTimestamp integer,    EndTimestamp integer,    Count integer,    CommandLists blob,     foreign key(ApiQueueExecutionId) references ApiQueueExecution(Id))"
+  },
+  "Bookmarks": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LocationEnum",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LocationId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StartTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StartViewportTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndViewportTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Author",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "TEXT"
+    },
+    {
+     "hidden": 0,
+     "name": "Comment",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "TEXT"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE Bookmarks (Id integer primary key asc, LocationEnum integer, LocationId integer, StartTimestamp integer, EndTimestamp integer, StartViewportTimestamp integer, EndViewportTimestamp integer, Author text, Comment text )"
+  },
+  "Budgets": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BudgetType",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BudgetSource",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 2,
+   "sql": "CREATE TABLE Budgets (   Id integer primary key,    BudgetType integer,    BudgetSource integer,    foreign key (Id) references PixCounterInfo (Id) )"
+  },
+  "CaptureData": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ValueId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 12,
+   "sql": "CREATE TABLE CaptureData (   Id integer primary key asc,    NameId integer,    ValueId integer,    foreign key (NameId) references Strings (Id),    foreign key (ValueId) references Strings (Id) )"
+  },
+  "CaptureFacts": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Value",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 67,
+   "sql": "CREATE TABLE CaptureFacts (Id integer primary key asc, Value integer )"
+  },
+  "CaptureStats": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EventCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ByteCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LostEtwEventCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LostEtwBufferCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 13,
+   "sql": "CREATE TABLE CaptureStats (Id integer primary key asc, Timestamp integer, EventCount integer, ByteCount integer, LostEtwEventCount integer, LostEtwBufferCount integer )"
+  },
+  "ContextSwitchRange": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Core",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ContextSwitches",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 143,
+   "sql": "CREATE TABLE ContextSwitchRange (Id integer primary key asc, Core integer, BeginTimestamp integer, EndTimestamp integer, ContextSwitches blob )"
+  },
+  "ContextSwitchRangeThread": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "ContextSwitchRangeId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ThreadId",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 33154,
+   "sql": "CREATE TABLE ContextSwitchRangeThread (ContextSwitchRangeId integer, ThreadId integer, Count integer, primary key (ContextSwitchRangeId, ThreadId), foreign key (ContextSwitchRangeId) references ContextSwitchRange (Id), foreign key (ThreadId) references Threads (Id) ) without rowid"
+  },
+  "Cores": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StartingThreadId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ContextSwitchCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MaxPixEventLevel",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "SampleCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PhysicalCoreId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 32,
+   "sql": "CREATE TABLE Cores (Id integer primary key asc, StartingThreadId integer, ContextSwitchCount integer, MaxPixEventLevel integer, SampleCount integer, PhysicalCoreId integer, foreign key (StartingThreadId) references Threads (Id), foreign key (PhysicalCoreId) references PhysicalCores(Id) )"
+  },
+  "CpuGpuExecutionMap": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "CpuMarkerId",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "GpuEventId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE CpuGpuExecutionMap (    CpuMarkerId integer,     GpuEventId integer,     primary key (GpuEventId, CpuMarkerId) ) without rowid"
+  },
+  "CpuMarkerRangeInfoMap": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "MarkerId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "RangeId",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 1,
+   "sql": "CREATE TABLE CpuMarkerRangeInfoMap (MarkerId integer, RangeId integer, Count integer, primary key (MarkerId, RangeId), foreign key (MarkerId) references PixMarkerInfo (Id), foreign key (RangeId) references PixCpuMarkerRange (Id) ) without rowid"
+  },
+  "CpuSample": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Core",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ProcThreadId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 51868,
+   "sql": "CREATE TABLE CpuSample (Core integer, Timestamp integer, ProcThreadId integer, primary key (Timestamp, Core)) without rowid "
+  },
+  "CustomCounter": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "DataTypeId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CounterId",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Color",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "RangeMode",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LineStyle",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE CustomCounter (    DataTypeId integer,     CounterId integer,     Color integer,     RangeMode integer,     LineStyle integer,     primary key (DataTypeId, CounterId),     foreign key(DataTypeId) references CustomDataTypeInfo(Id),     foreign key(CounterId) references PixCounterInfo(Id) ) without rowid"
+  },
+  "CustomDataTypeInfo": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "SubNameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "TypeDefinitionId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EventCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MarkerCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 2,
+   "sql": "CREATE TABLE CustomDataTypeInfo (    Id integer primary key asc,     NameId integer,     SubNameId integer,     TypeDefinitionId integer,     EventCount integer,     MarkerCount integer,     unique (NameId, SubNameId),     foreign key(NameId) references Strings(Id),     foreign key(SubNameId) references Strings(Id)     foreign key(TypeDefinitionId) references Strings(Id) )"
+  },
+  "CustomExecution": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ExecutionInfoId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Color",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE CustomExecution (    Id integer primary key asc,     ExecutionInfoId integer,     Color integer,     BeginTimestamp integer,     EndTimestamp integer,     foreign key(ExecutionInfoId) references CustomExecutionInfo(Id) )"
+  },
+  "CustomExecutionInfo": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DataTypeId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE CustomExecutionInfo (    Id integer primary key asc,     DataTypeId integer,     NameId integer,     Count integer,     foreign key(NameId) references Strings(Id),     foreign key(DataTypeId) references CustomDataTypeInfo(Id) )"
+  },
+  "CustomMarker": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MarkerInfoId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Color",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 604,
+   "sql": "CREATE TABLE CustomMarker (    Id integer primary key asc,     MarkerInfoId integer,     Color integer,     Timestamp integer,     foreign key(MarkerInfoId) references CustomMarkerInfo(Id) )"
+  },
+  "CustomMarkerInfo": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DataTypeId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 2,
+   "sql": "CREATE TABLE CustomMarkerInfo (    Id integer primary key asc,     DataTypeId integer,     NameId integer,     Count integer,     foreign key(NameId) references Strings(Id),     foreign key(DataTypeId) references CustomDataTypeInfo(Id) )"
+  },
+  "DemotedAllocations": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AllocationId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ObjectId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE DemotedAllocations(   Id integer primary key asc,    AllocationId integer,    ObjectId integer,    Timestamp integer,    foreign key (ObjectId) references ApiObjects (Id) )"
+  },
+  "DroppedData": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LaneId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Type",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 8603,
+   "sql": "CREATE TABLE DroppedData (    Id integer primary key asc,     LaneId integer,     Type integer,     Count integer,     BeginTimestamp integer,     EndTimestamp integer )"
+  },
+  "DsBatch": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "QueueId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FirstEnqueueTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LastEnqueueTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "WorkStartTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "SignalTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OpCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INT"
+    },
+    {
+     "hidden": 0,
+     "name": "WorkCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "TotalBytes",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ExecutionTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE DsBatch (    Id integer primary key asc,     QueueId integer,     FirstEnqueueTimestamp integer,     LastEnqueueTimestamp integer,     WorkStartTimestamp integer,     SignalTimestamp integer,     OpCount int,     WorkCount integer,    TotalBytes integer,    ExecutionTime integer,    foreign key(QueueId) references DsQueue(Id) )"
+  },
+  "DsQueue": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INT"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OpCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INT"
+    },
+    {
+     "hidden": 0,
+     "name": "BatchCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "WorkCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE DsQueue (    Id integer primary key asc,     NameId int,     BeginTimestamp integer,     EndTimestamp integer,     OpCount int,     BatchCount integer,    WorkCount integer,    foreign key(NameId) references Strings(Id) )"
+  },
+  "DsRange": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "QueueId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Operations",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE DsRange (    Id integer primary key asc,     QueueId integer,     BeginTimestamp integer,     EndTimestamp integer,     Operations blob,     foreign key(QueueId) references DsQueue(Id) )"
+  },
+  "DsWorkBlock": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BatchId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE DsWorkBlock (    Id integer primary key asc,     BatchId integer,     BeginTimestamp integer,     EndTimestamp integer,     foreign key(BatchId) references DsBatch(Id) )"
+  },
+  "DynamicMethods": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "OSProcessId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ClrInstanceID",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DynamicModuleId",
+     "notNull": true,
+     "primaryKey": 3,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MethodId",
+     "notNull": true,
+     "primaryKey": 4,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ReJITId",
+     "notNull": true,
+     "primaryKey": 5,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MethodToken",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Address",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Size",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LoadTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "UnloadTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NamespaceId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE DynamicMethods (OSProcessId integer, ClrInstanceID integer, DynamicModuleId integer, MethodId integer, ReJITId integer, MethodToken integer, Address integer, Size integer, LoadTimestamp integer, UnloadTimestamp integer, NamespaceId integer, NameId integer, foreign key (NamespaceId) references Strings (Id), foreign key (NameId) references Strings (Id), primary key (OSProcessId, ClrInstanceID, DynamicModuleId, MethodId, ReJITId)) without rowid"
+  },
+  "DynamicModules": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "OSProcessId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ClrInstanceID",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DynamicModuleId",
+     "notNull": true,
+     "primaryKey": 3,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ManagedPdbPathId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ManagedPdbGuid",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    },
+    {
+     "hidden": 0,
+     "name": "ManagedPdbAge",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "age"
+    },
+    {
+     "hidden": 0,
+     "name": "ManagedILPathId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LoadTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "UnloadTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE DynamicModules (OSProcessId integer, ClrInstanceID integer, DynamicModuleId integer, ManagedPdbPathId integer, ManagedPdbGuid blob, ManagedPdbAge age, ManagedILPathId integer, LoadTimestamp integer, UnloadTimestamp integer, foreign key (ManagedPdbPathId) references Strings (Id), foreign key (ManagedILPathId) references Strings (Id), primary key (OSProcessId, ClrInstanceID, DynamicModuleId)) without rowid"
+  },
+  "FileDescription": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FileInfoId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Offset",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Length",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DescriptionId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE FileDescription (Id integer primary key asc, FileInfoId integer, Offset integer, Length integer, DescriptionId integer, foreign key (FileInfoId) references FileInfo(Id), foreign key (DescriptionId) references FileDescriptionStrings(Id) )"
+  },
+  "FileDescriptionStrings": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Value",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "TEXT"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE FileDescriptionStrings (Id integer primary key asc, Value text )"
+  },
+  "FileIORange": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DeviceId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OverlapLevel",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Operations",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    },
+    {
+     "hidden": 0,
+     "name": "Errors",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE FileIORange (    Id integer primary key asc,     DeviceId integer,     OverlapLevel integer,     BeginTimestamp integer,     EndTimestamp integer,     Count integer,     Operations blob,     Errors blob,     foreign key(DeviceId) references Win32Device(Id) )"
+  },
+  "FileInfo": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INT"
+    },
+    {
+     "hidden": 0,
+     "name": "DeviceId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE FileInfo (    Id integer primary key asc,     NameId int,     DeviceId integer,     foreign key(NameId) references Strings(Id),     foreign key(DeviceId) references Win32Device(Id) )"
+  },
+  "FunctionInformation": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ModuleId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Offset",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Size",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DecoratedNameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MethodToken",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 3600,
+   "sql": "CREATE TABLE FunctionInformation (   Id integer primary key asc,    ModuleId integer,    Offset integer,    Size integer,    DecoratedNameId integer,    MethodToken integer,    foreign key (ModuleId) references Modules (Id),    foreign key (DecoratedNameId) references SymbolStrings (Id))"
+  },
+  "GpuApiMarkerRange": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ThreadId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ApiMarkers",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 2,
+   "sql": "CREATE TABLE GpuApiMarkerRange(    Id integer primary key asc,    ThreadId integer,    BeginTimestamp integer,    EndTimestamp integer,    Count integer,    ApiMarkers blob,     foreign key(ThreadId) references Threads(Id))"
+  },
+  "GpuExecutionRange": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ApiCommandQueueId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Level",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "GpuExecutions",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE GpuExecutionRange (    Id integer primary key asc,     ApiCommandQueueId integer,     Level integer,     BeginTimestamp integer,     EndTimestamp integer,     GpuExecutions blob,     foreign key (ApiCommandQueueId) references ApiCommandQueue (Id) )"
+  },
+  "GpuFrame": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ProxyId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "WaitCallTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "SignalTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "WaitReturnTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OriginTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AvailableTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "QueryTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PresentCallTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PresentQueueTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PresentReturnTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "GPUProcessTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "GPUWriteCompleteTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "VSyncTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FlipTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BlockOnFenceStart",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BlockOnFenceEnd",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "WaitOnSwapChainSurfaceStart",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "WaitOnSwapChainSurfaceEnd",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StartTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "IntervalLengthInMicroseconds",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PeriodInIntervals",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "IntervalOffsetInMicroseconds",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PlaneIndex",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PlaneCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "GPUBusyDuration",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DisplayPercentScanned",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "REAL"
+    },
+    {
+     "hidden": 0,
+     "name": "GPUBusyDurationPowerScaled",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PowerScaleFactor",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "REAL"
+    }
+   ],
+   "rows": 1,
+   "sql": "CREATE TABLE GpuFrame (    Id integer primary key asc,     ProxyId integer,     WaitCallTime integer,     SignalTime integer,     WaitReturnTime integer,     OriginTime integer,     AvailableTime integer,     QueryTime integer,     PresentCallTime integer,     PresentQueueTime integer,     PresentReturnTime integer,     GPUProcessTime integer,     GPUWriteCompleteTime integer,     VSyncTime integer,     FlipTime integer,     BlockOnFenceStart integer,     BlockOnFenceEnd integer,     WaitOnSwapChainSurfaceStart integer,     WaitOnSwapChainSurfaceEnd integer,     StartTimestamp integer,     EndTimestamp integer,     IntervalLengthInMicroseconds integer,     PeriodInIntervals integer,     IntervalOffsetInMicroseconds integer,     PlaneIndex integer,     PlaneCount integer,     GPUBusyDuration integer,     DisplayPercentScanned real,     GPUBusyDurationPowerScaled integer,     PowerScaleFactor real )"
+  },
+  "GpuRangeEventMap": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "EventId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "RangeId",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE GpuRangeEventMap (    EventId integer,     RangeId integer,     Count integer,     primary key (EventId, RangeId),     foreign key (RangeId) references GpuExecutionRange (Id),     foreign key (EventId) references PixEventInfo (Id) ) without rowid"
+  },
+  "GpuWorkRange": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "HardwareQueueId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ApiCommandQueueId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OverlapLevel",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Work",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 15,
+   "sql": "CREATE TABLE GpuWorkRange(    Id integer primary key asc,    HardwareQueueId integer,    ApiCommandQueueId integer,    BeginTimestamp integer,    EndTimestamp integer,    OverlapLevel integer,    Work blob,     foreign key(HardwareQueueId) references HardwareCommandQueue(Id),     foreign key(ApiCommandQueueId) references ApiCommandQueue(Id) )"
+  },
+  "HardwareAdapter": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 3,
+   "sql": "CREATE TABLE HardwareAdapter(    Id integer primary key asc,    NameId integer,    foreign key(NameId) references Strings(Id))"
+  },
+  "HardwareCommandQueue": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AdapterId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 59,
+   "sql": "CREATE TABLE HardwareCommandQueue(    Id integer primary key asc,    AdapterId integer,    NameId integer,    foreign key(AdapterId) references HardwareAdapter(Id)    foreign key(NameId) references Strings(Id))"
+  },
+  "HeapFacts": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "HeapHandle",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FactId",
+     "notNull": false,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FactValue",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE HeapFacts (    HeapHandle integer,     FactId integer,     FactValue integer,     primary key(HeapHandle, FactId))"
+  },
+  "Images": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OSProcessId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PELoadAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LoadSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LoadTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "UnloadTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FilePathId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ModuleId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "XMemFlags",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 340,
+   "sql": "CREATE TABLE Images (Id integer primary key asc, OSProcessId integer, PELoadAddress integer, LoadSize integer, LoadTimestamp integer, UnloadTimestamp integer, FilePathId integer, ModuleId integer, XMemFlags integer, foreign key (FilePathId) references Strings (Id), foreign key (ModuleId) references Modules (Id) )"
+  },
+  "InputDevice": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DliCapable",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MarkerCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DeviceId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE InputDevice (    Id integer primary key asc,     NameId integer,     DliCapable integer,     BeginTimestamp integer,     EndTimestamp integer,     MarkerCount integer,     DeviceId blob,     foreign key(NameId) references Strings (Id) )"
+  },
+  "InputDeviceStateChanged": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DeviceId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DeviceStateType",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DeviceStateValue",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE InputDeviceStateChanged (    Id integer primary key asc,     DeviceId integer,     DeviceStateType integer,     DeviceStateValue integer,     Timestamp integer,     foreign key(DeviceId) references InputDevice(Id) )"
+  },
+  "InputMarkerRange": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DeviceId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Markers",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE InputMarkerRange (    Id integer primary key asc,     DeviceId integer,     BeginTimestamp integer,     EndTimestamp integer,     Markers blob,     foreign key(DeviceId) references InputDevice(Id) )"
+  },
+  "InstructionDetail": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Address",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "InstructionSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MemoryAccessSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BranchTargetAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Load",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Store",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Branch",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Call",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OpCode",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE InstructionDetail (    Id integer primary key asc,    Address integer,    InstructionSize integer,    MemoryAccessSize integer,    BranchTargetAddress integer,    Load integer,    Store integer,    Branch integer,    Call integer,    OpCode integer,    Count integer)"
+  },
+  "InstructionTimeline": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ThreadId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "RunData",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE InstructionTimeline (    Id integer primary key,     ThreadId integer,     RunData blob )"
+  },
+  "InstructionTimelineDeltaMap": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "InstructionId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FirstSequenceId",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LastSequenceId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "IncludedCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CoreId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ThreadId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DMissLevel",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "IMissLevel",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MemoryAccessAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ReadFromWriteCombinedMemory",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE InstructionTimelineDeltaMap (    InstructionId integer,    FirstSequenceId integer,    LastSequenceId integer,    IncludedCount integer,    CoreId integer,    ThreadId integer,    DMissLevel integer,     IMissLevel integer,     MemoryAccessAddress integer,    ReadFromWriteCombinedMemory integer,    primary key(InstructionId, FirstSequenceId),    foreign key(InstructionId) references InstructionDetail(Id)) without rowid "
+  },
+  "MemoryAllocatorInfo": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "OSProcessId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AllocatorId",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CommitCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DecommitCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MaxLeakSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE MemoryAllocatorInfo (    OSProcessId integer,     AllocatorId integer,     CommitCount integer,     DecommitCount integer,     MaxLeakSize integer,     primary key (OSProcessId, AllocatorId)) without rowid"
+  },
+  "MemoryEventRanges": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OSProcessId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AllocatorId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StartTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StartingCommitSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CommitData",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE MemoryEventRanges (    Id integer primary key asc,     OSProcessId integer,     AllocatorId integer,     StartTimestamp integer,     EndTimestamp integer,     StartingCommitSize integer,     CommitData blob )"
+  },
+  "MemoryEventRedundantRanges": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "EventId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BaseAddress",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Size",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Ranges",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE MemoryEventRedundantRanges (    EventId integer,     BaseAddress integer,     Size integer,     Ranges blob,     primary key (EventId, BaseAddress)) without rowid "
+  },
+  "MemoryPairing": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "CommitEventId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DecommitEventId",
+     "notNull": true,
+     "primaryKey": 3,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BaseAddress",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Size",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE MemoryPairing (    CommitEventId integer,     DecommitEventId integer,     BaseAddress integer,     Size integer,     primary key (CommitEventId, BaseAddress, DecommitEventId)) without rowid "
+  },
+  "MemorySnapshots": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Data",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "TEXT"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE MemorySnapshots (    Id integer primary key asc,     Timestamp integer,     Data text )"
+  },
+  "MemoryUsageSamples": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "GameUsed",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PhysicalPageUsed",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE MemoryUsageSamples (    Id integer primary key asc,     Timestamp integer,     GameUsed integer,     PhysicalPageUsed integer )"
+  },
+  "Messages": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MessageId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE Messages (Id integer primary key asc, Timestamp integer, MessageId integer, foreign key (MessageId) references Strings (Id) )"
+  },
+  "MethodILNativeMappings": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OSProcessId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ClrInstanceID",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MethodId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ReJITId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ILOffsets",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    },
+    {
+     "hidden": 0,
+     "name": "NativeOffsets",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE MethodILNativeMappings (Id integer primary key asc, OSProcessId integer, ClrInstanceID integer, MethodId integer, ReJITId integer, ILOffsets blob, NativeOffsets blob )"
+  },
+  "ModuleSymbols": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "ModuleId",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Symbols",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE ModuleSymbols (ModuleId integer primary key asc, Symbols blob, foreign key (ModuleId) references Modules (Id) )"
+  },
+  "ModuleTypes": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ModuleId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Flags",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Size",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE ModuleTypes (Id integer primary key asc, ModuleId integer, NameId integer, Flags integer, Size integer, foreign key (ModuleId) references Modules (Id), foreign key (NameId) references SymbolStrings (Id) )"
+  },
+  "Modules": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PEPathId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PETimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PESize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PDBPathId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PDBGuid",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    },
+    {
+     "hidden": 0,
+     "name": "PDBAge",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 73,
+   "sql": "CREATE TABLE Modules (Id integer primary key asc, PEPathId integer, PETimestamp integer, PESize integer, PDBPathId integer, PDBGuid blob, PDBAge integer, foreign key (PEPathId) references Strings (Id), foreign key (PDBPathId) references Strings (Id) )"
+  },
+  "PEFiles": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "ImageId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Data",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE PEFiles (ImageId integer primary key asc, Data blob, foreign key (ImageId) references Images (Id) ) without rowid"
+  },
+  "PageFaults": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ProcThreadId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FaultType",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FaultingAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FaultedPageAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE PageFaults(   Id integer primary key asc,    ProcThreadId integer,    FaultType integer,    Timestamp integer,    FaultingAddress integer,    FaultedPageAddress integer)"
+  },
+  "PerformanceContext": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PerformanceClassFlags",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DimensionCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DimensionStringIdList",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE PerformanceContext(   Id integer primary key asc,    Timestamp integer,    PerformanceClassFlags integer,    DimensionCount integer,    DimensionStringIdList blob )"
+  },
+  "PhysicalCores": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EfficiencyClass",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 32,
+   "sql": "CREATE TABLE PhysicalCores (Id integer primary key asc, EfficiencyClass integer )"
+  },
+  "PixCounterBudget": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "CounterId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BudgetId",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 2,
+   "sql": "CREATE TABLE PixCounterBudget (   CounterId integer,    BudgetId integer,    primary key (CounterId, BudgetId),    foreign key (CounterId) references PixCounterInfo (Id),    foreign key (BudgetId) references Budgets (Id) ) without rowid"
+  },
+  "PixCounterGroup": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ParentGroupId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DescriptionId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DefinitionId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 4,
+   "sql": "CREATE TABLE PixCounterGroup (Id integer primary key asc, ParentGroupId integer check(ParentGroupId != Id), NameId integer, DescriptionId integer, DefinitionId integer, foreign key (ParentGroupId) references PixCounterGroup (Id), foreign key (NameId) references Strings (Id), foreign key (DescriptionId) references Strings (Id), foreign key (DefinitionId) references Strings (Id) )"
+  },
+  "PixCounterInfo": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "GroupId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ProcessId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DescriptionId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DefinitionId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "UnitsId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Flags",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MinValue",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "REAL"
+    },
+    {
+     "hidden": 0,
+     "name": "MaxValue",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "REAL"
+    }
+   ],
+   "rows": 7,
+   "sql": "CREATE TABLE PixCounterInfo (Id integer primary key asc, GroupId integer, ProcessId integer, NameId integer, DescriptionId integer, DefinitionId integer, UnitsId integer, Flags integer, MinValue real,MaxValue real,foreign key (GroupId) references PixCounterGroup (Id), foreign key (ProcessId) references Processes (Id), foreign key (NameId) references Strings (Id), foreign key (DescriptionId) references Strings (Id), foreign key (DefinitionId) references Strings (Id), foreign key (UnitsId) references Strings (Id) )"
+  },
+  "PixCounterRange": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CounterId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Counters",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 7,
+   "sql": "CREATE TABLE PixCounterRange (   Id integer primary key asc,    CounterId integer,    BeginTimestamp integer,    EndTimestamp integer,    Count integer,    Counters blob,    foreign key (CounterId) references PixCounterInfo (Id) )"
+  },
+  "PixCpuMarkerRange": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ThreadId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Markers",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 1,
+   "sql": "CREATE TABLE PixCpuMarkerRange (Id integer primary key asc, ThreadId integer, Count integer, BeginTimestamp integer, EndTimestamp integer, Markers blob, foreign key (ThreadId) references Threads (Id) )"
+  },
+  "PixEventInfo": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "GpuCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MinCpuLevel",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MinGpuLevel",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 2,
+   "sql": "CREATE TABLE PixEventInfo (Id integer primary key asc, NameId integer, Count integer, GpuCount integer, MinCpuLevel integer, MinGpuLevel integer, foreign key (NameId) references Strings (Id) )"
+  },
+  "PixEventInfoApiQueueMap": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "EventId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ApiQueueId",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE PixEventInfoApiQueueMap (   EventId integer,    ApiQueueId integer,    Count integer,    primary key (EventId, ApiQueueId),    foreign key (EventId) references PixEventInfo (Id),    foreign key (ApiQueueId) references ApiCommandQueue (Id) ) without rowid"
+  },
+  "PixEventInfoThreadMap": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "EventId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ThreadId",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 2,
+   "sql": "CREATE TABLE PixEventInfoThreadMap (   EventId integer,    ThreadId integer,    Count integer,    primary key (EventId, ThreadId),    foreign key (EventId) references PixEventInfo (Id),    foreign key (ThreadId) references Threads (Id) ) without rowid"
+  },
+  "PixExecutionRange": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ThreadRowId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Level",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PixExecutions",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 2,
+   "sql": "CREATE TABLE PixExecutionRange (Id integer primary key asc, ThreadRowId integer, Level integer, BeginTimestamp integer, EndTimestamp integer, PixExecutions blob, foreign key (ThreadRowId) references Threads (Id) )"
+  },
+  "PixGpuMarker": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MarkerInfoId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CpuMarkerId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ApiCommandQueueId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE PixGpuMarker (    Id integer primary key asc,     MarkerInfoId integer,     CpuMarkerId integer,     ApiCommandQueueId integer,     Timestamp integer,     foreign key (MarkerInfoId) references PixMarkerInfo(Id),     foreign key (ApiCommandQueueId) references ApiCommandQueue(Id) )"
+  },
+  "PixMarkerInfo": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "CpuCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "GpuCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 1,
+   "sql": "CREATE TABLE PixMarkerInfo (Id integer primary key asc, NameId integer, CpuCount integer, GpuCount integer, foreign key (NameId) references Strings (Id) )"
+  },
+  "PmcProfile": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Source",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ProcThreadId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Core",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE PmcProfile (Id integer primary key asc, Source integer, Timestamp integer, ProcThreadId integer, Core integer )"
+  },
+  "Processes": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ProcessId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ImageNameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StartTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 398,
+   "sql": "CREATE TABLE Processes (Id integer primary key asc, ProcessId integer, ImageNameId integer, StartTimestamp integer, EndTimestamp integer, foreign key (ImageNameId) references Strings (Id) )"
+  },
+  "ProfileSourceConfig": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Source",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OldInterval",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NewInterval",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "DescriptionId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 1,
+   "sql": "CREATE TABLE ProfileSourceConfig (    Source integer,     Timestamp integer,     OldInterval integer,     NewInterval integer,     DescriptionId integer,     primary key (Timestamp, Source),     foreign key (DescriptionId) references Strings (Id) ) without rowid "
+  },
+  "RangeEventMap": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "RangeId",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EventId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 2,
+   "sql": "CREATE TABLE RangeEventMap (RangeId integer, EventId integer, Count integer, primary key (EventId, RangeId), foreign key (RangeId) references PixExecutionRange (Id), foreign key (EventId) references PixEventInfo (Id) ) without rowid"
+  },
+  "ReadyThread": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Core",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ReadyingThreadRowId",
+     "notNull": true,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AdjustReason",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AdjustIncrement",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 385243,
+   "sql": "CREATE TABLE ReadyThread (Id integer primary key asc, Timestamp integer, Core integer, ReadyingThreadRowId integer not NULL, AdjustReason integer, AdjustIncrement integer, foreign key (ReadyingThreadRowId) references Threads (Id) )"
+  },
+  "RegisterSampleMemoryAccess": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "RegisterSampleId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ModuleId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "InstructionAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AccessAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AccessSize",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "IsRead",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE RegisterSampleMemoryAccess(       Id integer primary key asc,        RegisterSampleId integer,        ModuleId integer,        Timestamp integer,        InstructionAddress integer,        AccessAddress integer,        AccessSize integer,        IsRead integer,        foreign key (ModuleId) references Modules (Id))"
+  },
+  "ResidenceOperations": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ObjectId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ResidencyCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OperationType",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ObjectType",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE ResidenceOperations(   Id integer primary key asc,    ObjectId integer,    Timestamp integer,    ResidencyCount integer,    OperationType integer,    ObjectType integer,    foreign key (ObjectId) references ApiObjects (Id))"
+  },
+  "SourceFile": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "SourceFileNameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ChecksumType",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Checksum",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 269,
+   "sql": "CREATE TABLE SourceFile (   Id integer primary key,    SourceFileNameId integer,    ChecksumType integer,    Checksum blob,    unique(SourceFileNameId),    foreign key (SourceFileNameId) references SymbolStrings (Id))"
+  },
+  "SourceLine": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ModuleId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "SourceFileId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Offset",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Length",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LineStart",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "LineEnd",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ColumnStart",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ColumnEnd",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 28496,
+   "sql": "CREATE TABLE SourceLine (   Id integer primary key asc,    ModuleId integer,    SourceFileId integer,    Offset integer,    Length integer,    LineStart integer,    LineEnd integer,    ColumnStart integer,    ColumnEnd integer,    foreign key (ModuleId) references Modules (Id),    foreign key (SourceFileId) references SourceFile (Id) )"
+  },
+  "StackEvents": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OSThreadId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StartTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StackEventData",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    },
+    {
+     "hidden": 0,
+     "name": "EventCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 16,
+   "sql": "CREATE TABLE StackEvents (Id integer primary key asc, OSThreadId integer, StartTimestamp integer, EndTimestamp integer, StackEventData blob, EventCount integer )"
+  },
+  "Stacks": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NumFrames",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Addresses",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 1719,
+   "sql": "CREATE TABLE Stacks (Id integer primary key asc, NumFrames integer, Addresses blob)"
+  },
+  "Strings": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Value",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "TEXT"
+    }
+   ],
+   "rows": 1287,
+   "sql": "CREATE TABLE Strings (Id integer primary key asc, Value text )"
+  },
+  "SymbolStrings": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Value",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "TEXT"
+    }
+   ],
+   "rows": 3743,
+   "sql": "CREATE TABLE SymbolStrings (Id integer primary key asc, Value text )"
+  },
+  "ThreadAffinities": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ThreadRowId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AffinityMask",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "AffinityGroup",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 10694,
+   "sql": "CREATE TABLE ThreadAffinities (Id integer primary key asc,ThreadRowId integer, Timestamp integer, AffinityMask integer, AffinityGroup integer, foreign key (ThreadRowId) references Threads (Id) )"
+  },
+  "ThreadApiObjectEvent": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ThreadRowId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ApiObjectId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BeginTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Color",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE ThreadApiObjectEvent (Id integer primary key asc, ThreadRowId integer, ApiObjectId integer, BeginTimestamp integer, EndTimestamp integer, Color integer, NameId integer, foreign key (ThreadRowId) references Threads (Id), foreign key (ApiObjectId) references ApiObjects (Id), foreign key (NameId) references Strings (Id) )"
+  },
+  "ThreadPriorities": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ThreadRowId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BasePriority",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 10694,
+   "sql": "CREATE TABLE ThreadPriorities (Id integer primary key asc,ThreadRowId integer, Timestamp integer, BasePriority integer, foreign key (ThreadRowId) references Threads (Id) )"
+  },
+  "ThreadStackDetail": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OSThreadId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StackLowAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StackHighAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE ThreadStackDetail (    Id integer primary key asc,     OSThreadId integer,     StackLowAddress integer,     StackHighAddress integer )"
+  },
+  "Threads": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ProcThreadId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ThreadNameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MaxPixEventLevel",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StartTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTimestamp",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "PixEventCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ContextSwitchCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ProcessRowId",
+     "notNull": true,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "SampleCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MarkerCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ApiMarkerCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "ApiObjectEventCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 10694,
+   "sql": "CREATE TABLE Threads (Id integer primary key asc, ProcThreadId integer, ThreadNameId integer, MaxPixEventLevel integer, StartTimestamp integer, EndTimestamp integer, PixEventCount integer, ContextSwitchCount integer, ProcessRowId integer not NULL, SampleCount integer, MarkerCount integer, ApiMarkerCount integer, ApiObjectEventCount integer, foreign key (ProcessRowId) references Processes (Id), foreign key (ThreadNameId) references Strings (Id) )"
+  },
+  "TruncatedData": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Count",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 2,
+   "sql": "CREATE TABLE TruncatedData (    Id integer primary key asc,     Count integer )"
+  },
+  "TypeAccessSites": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "InstructionId",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "TypeId",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Offset",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE TypeAccessSites (InstructionId integer, TypeId integer, Offset integer, primary key (InstructionId, TypeId), foreign key (InstructionId) references InstructionDetail (Id), foreign key (TypeId) references ModuleTypes (Id) ) without rowid"
+  },
+  "TypeAllocSites": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "TypeId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "RelativeVirtualAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE TypeAllocSites (Id integer primary key asc, TypeId integer, RelativeVirtualAddress integer, foreign key (TypeId) references ModuleTypes (Id) )"
+  },
+  "TypeMembers": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OwningTypeId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "TypeId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Offset",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE TypeMembers (Id integer primary key asc, OwningTypeId integer, TypeId integer, NameId integer, Offset integer, foreign key (OwningTypeId) references ModuleTypes (Id), foreign key (TypeId) references ModuleTypes (Id), foreign key (NameId) references SymbolStrings (Id) )"
+  },
+  "VideoFrames": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "StreamType",
+     "notNull": true,
+     "primaryKey": 2,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Timestamp",
+     "notNull": true,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "IsKeyFrame",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "FrameData",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "BLOB"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE VideoFrames (StreamType integer, Timestamp integer, IsKeyFrame integer, FrameData blob, primary key (Timestamp, StreamType)) without rowid "
+  },
+  "VirtualMemoryRanges": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "OSProcessId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "BaseAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndAddress",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "StartTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "EndTime",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "Partition",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "XMemFlags",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE VirtualMemoryRanges (    Id integer primary key asc,     OSProcessId integer,     BaseAddress integer,     EndAddress integer,     StartTime integer,     EndTime integer,     Partition integer,     XMemFlags integer )"
+  },
+  "Win32Device": {
+   "columns": [
+    {
+     "hidden": 0,
+     "name": "Id",
+     "notNull": false,
+     "primaryKey": 1,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "NameId",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INT"
+    },
+    {
+     "hidden": 0,
+     "name": "IOCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "TitleIOCount",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    },
+    {
+     "hidden": 0,
+     "name": "MaxFileIOLevel",
+     "notNull": false,
+     "primaryKey": 0,
+     "type": "INTEGER"
+    }
+   ],
+   "rows": 0,
+   "sql": "CREATE TABLE Win32Device (    Id integer primary key asc,     NameId int,     IOCount integer,     TitleIOCount integer,     MaxFileIOLevel integer,     foreign key(NameId) references Strings(Id) )"
+  }
+ },
+ "virtualTables": {
+  "ContextSwitch": [
+   {
+    "hidden": 0,
+    "name": "Core",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Timestamp",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "FromProcThreadId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "ToProcThreadId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "ReadyThreadId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "FromThreadPriority",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "ToThreadPriority",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "FromThreadWaitReason",
+    "type": "INTEGER"
+   }
+  ],
+  "CpuMemoryEvent": [
+   {
+    "hidden": 0,
+    "name": "OSProcessId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "AllocatorId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Timestamp",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "BaseAddress",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Size",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Flags",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "OSThreadId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "IsFree",
+    "type": "INTEGER"
+   }
+  ],
+  "FileEvents": [
+   {
+    "hidden": 0,
+    "name": "BeginTimestamp",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "EndTimestamp",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "DeviceId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "FileId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "ProcThreadId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Offset",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Size",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "TypeId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Type",
+    "type": "TEXT"
+   },
+   {
+    "hidden": 0,
+    "name": "Flags0",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Flags1",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Status",
+    "type": "INTEGER"
+   }
+  ],
+  "PixCounters": [
+   {
+    "hidden": 0,
+    "name": "CounterId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Timestamp",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Value",
+    "type": "REAL"
+   }
+  ],
+  "PixCpuExecution": [
+   {
+    "hidden": 0,
+    "name": "BeginTimestamp",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "EndTimestamp",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Level",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "ThreadRowId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "EventId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Color",
+    "type": "INTEGER"
+   }
+  ],
+  "PixCpuExecutionTimes": [
+   {
+    "hidden": 0,
+    "name": "Duration",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Execution",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Stall",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "EventId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "BeginTimestamp",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "EndTimestamp",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 1,
+    "name": "CpuExecutionRowId",
+    "type": "integer"
+   }
+  ],
+  "PixCpuMarker": [
+   {
+    "hidden": 0,
+    "name": "InfoId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Timestamp",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "ThreadId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Color",
+    "type": "INTEGER"
+   }
+  ],
+  "PixGpuExecution": [
+   {
+    "hidden": 0,
+    "name": "BeginTimestamp",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "EndTimestamp",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Level",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "ApiCommandQueueId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "EventId",
+    "type": "INTEGER"
+   },
+   {
+    "hidden": 0,
+    "name": "Color",
+    "type": "INTEGER"
+   }
+  ]
+ }
+}

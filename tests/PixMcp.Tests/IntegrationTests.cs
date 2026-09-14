@@ -250,6 +250,73 @@ public class IntegrationTests : IDisposable
         await SessionTools.Close(_session, handle);
     }
 
+    private async Task<long> CountEvents(string handle, string? nameContains = null, string? kind = null)
+        => Parse(await GpuCaptureTools.Events(_session, handle, nameContains: nameContains, kind: kind, mode: "count")).GetProperty("total").GetInt64();
+
+    private async Task<long> CountResources(string handle, string? name = null, string? type = null)
+        => Parse(await ResourceTools.Resources(_session, _jobs, handle, name: name, type: type, includeTotals: false)).GetProperty("total").GetInt64();
+
+    [SkippableFact]
+    public async Task RichFixtureCaptureHasEveryFeaturePassAndResource()
+    {
+        Skip.IfNot(TestArtifacts.PixInstalled && TestArtifacts.RichCapture is not null, "Set PIX_TEST_RICH_CAPTURE to rich.wpix from capture_fixtures.py --profile rich");
+        string handle = Parse(await GpuCaptureTools.Open(_session, TestArtifacts.RichCapture!)).GetProperty("handle").GetString()!;
+        foreach (string pass in new[] { "Triangle pass", "Indirect pass", "Placed pass", "Reserved pass", "Bandwidth pass", "Consume compute", "Depth pass", "Resolve pass" })
+            Assert.True(await CountEvents(handle, pass, "marker") == 3, $"{pass} should appear once in each of the three captured frames");
+        Assert.Equal(3, await CountEvents(handle, kind: "executeIndirect"));
+        Assert.Equal(3, await CountEvents(handle, kind: "resolve"));
+        Assert.True(await CountEvents(handle, kind: "present") >= 3);
+        foreach (string resource in new[] { "Placed Buffer", "Placed Texture", "Reserved Texture", "Depth Buffer", "Scene Color MSAA", "Scene Extra MRT1", "Bandwidth Texture" })
+            Assert.True(await CountResources(handle, name: resource) == 1, resource);
+        Assert.True(await CountResources(handle, type: "PLACED") >= 2);
+        Assert.True(await CountResources(handle, type: "RESERVED") >= 1);
+        await SessionTools.Close(_session, handle);
+    }
+
+    [SkippableFact]
+    public async Task PerfFixtureLightingDominatesAndTheCandidateRoughlyDoublesIt()
+    {
+        Skip.IfNot(TestArtifacts.PixInstalled && TestArtifacts.AnalysisEnabled && TestArtifacts.PerfBaseline is not null && TestArtifacts.PerfCandidate is not null,
+            "Set PIX_TEST_PERF_BASELINE, PIX_TEST_PERF_CANDIDATE (capture_fixtures.py --profile perf) and PIX_TEST_ANALYSIS=1");
+        async Task<(string TopKey, long LightingNs)> Lighting(string path)
+        {
+            string handle = Parse(await GpuCaptureTools.Open(_session, path)).GetProperty("handle").GetString()!;
+            JsonElement rollup = Parse(await RollupTools.Rollup(_session, _jobs, handle, groupBy: "markerPath", limit: 20, waitSeconds: 600));
+            JsonElement[] items = rollup.GetProperty("items").EnumerateArray().ToArray();
+            Assert.NotEmpty(items);
+            long lighting = items.First(item => item.GetProperty("key").GetString() == "Frame/Lighting").GetProperty("sum").GetProperty("ns").GetInt64();
+            string top = items[0].GetProperty("key").GetString()!;
+            await SessionTools.Close(_session, handle);
+            return (top, lighting);
+        }
+        var baseline = await Lighting(TestArtifacts.PerfBaseline!);
+        var candidate = await Lighting(TestArtifacts.PerfCandidate!);
+        Assert.Equal(("Frame/Lighting", "Frame/Lighting"), (baseline.TopKey, candidate.TopKey));
+        // Ranks and ratios only: the candidate doubles the Lighting shader loop, so its cost should roughly double.
+        Assert.InRange((double)candidate.LightingNs / baseline.LightingNs, 1.5, 3.0);
+    }
+
+    [SkippableFact]
+    public async Task Sm6AndProgrammaticFixtureCapturesOpenWithTheirPasses()
+    {
+        Skip.IfNot(TestArtifacts.PixInstalled && (TestArtifacts.Sm6Capture is not null || TestArtifacts.ProgrammaticCapture is not null),
+            "Set PIX_TEST_SM6_CAPTURE or PIX_TEST_PROGRAMMATIC_CAPTURE to captures from capture_fixtures.py");
+        if (TestArtifacts.Sm6Capture is string sm6)
+        {
+            string handle = Parse(await GpuCaptureTools.Open(_session, sm6)).GetProperty("handle").GetString()!;
+            Assert.Equal(1, await CountEvents(handle, "Mesh pass", "marker"));
+            Assert.True(await CountEvents(handle, "DispatchMesh") >= 1);
+            await SessionTools.Close(_session, handle);
+        }
+        if (TestArtifacts.ProgrammaticCapture is string programmatic)
+        {
+            string handle = Parse(await GpuCaptureTools.Open(_session, programmatic)).GetProperty("handle").GetString()!;
+            Assert.True(await CountEvents(handle, "Triangle pass", "marker") >= 3);
+            Assert.True(await CountEvents(handle, kind: "present") >= 3);
+            await SessionTools.Close(_session, handle);
+        }
+    }
+
     [SkippableFact]
     public async Task PixtoolPreviewsExactEventsAndCutsASubcapture()
     {
