@@ -261,6 +261,7 @@ transient condition to retry after following `nextCalls`.
 |---|---|---|
 | `ambiguous_marker` |  | markerName must identify exactly one PIX marker across all queues. |
 | `analysis_active` | yes | The call cannot proceed while analysis runs on this handle (retryable); nextCalls stop it. |
+| `analysis_incompatible` |  | PIX declined to replay the capture on the chosen adapter (0x8ABC006B, e.g. a capture taken on another GPU vendor); nextCalls retry with `IGNORE_INCOMPATIBILITIES`. |
 | `analysis_required` |  | The call needs GPU analysis that is not started for this handle; nextCalls start it. |
 | `analysis_settings_conflict` |  | Analysis is queued, running or started with different adapter, power state or flags; nextCalls stop it. |
 | `artifact_expired` |  | The preview artifact is unknown, evicted or its capture closed; run the preview again. |
@@ -404,9 +405,10 @@ the call; the top level of such a partial answer is never `pending`.
   `many_barriers`, each with evidence, implication and follow-up calls that name only registered
   tools and parameters (`includeInsights = false` skips them).
 
-`frameIndex` restricts passes, work events and the histogram to one frame. `brief = true` keeps
-every ranked row but drops execution durations, call text, capability reasons and notes,
-denominators and zero kind counts.
+`frameIndex` restricts passes, work events and the histogram to one frame. Capabilities carry
+states and reasons; their compatibility-registry notes are in `pix_gpu_info`. `brief = true` keeps
+every ranked row but drops execution durations, call text, capability reasons, denominators and
+zero kind counts.
 
 Input schemas carry `examples` for reference-shaped parameters (`handle`, `eventRef`, `scope`,
 `shaderRef`, `resourceRef`, `markerPathPrefix`, `format`, `kind`), so the wire shape of an
@@ -430,11 +432,24 @@ no unit field, so this is vocabulary-based and stated as such. `pix_gpu_counters
 `perStageAlu`, `occupancy`, `stalls`, `cache`, `memoryBandwidth`, `fixedFunction`,
 `pipelineStatistics`, `depthOcclusion`) resolved for the capture's vendor; `pix_gpu_counters_list`
 reports every preset's matches in `extra.presets` with a confidence (`verified` on this
-server's hardware, `transcribed` from vendor plugin strings, `unverified`). On the NVIDIA RTX
-4070 Ti used to verify this release PIX exposes only the 22 D3D counters, so only
-`pipelineStatistics` and `depthOcclusion` resolve there; the Intel vocabulary comes from the
-2601.15 plugin strings and is unverified on hardware (contributor checklist: run
-`pix_gpu_counters_list` on an Arc/Xe2 machine and replace `tests/PixMcp.Tests/Fixtures/counter-catalogs/intel-xe2.json`).
+server's hardware, `transcribed` from vendor plugin strings, `unverified`). Vendor blocks never
+match the D3D runtime counters; only `pipelineStatistics` and `depthOcclusion` do.
+
+The presets were checked on one machine with three GPUs (PIX 2606.18-preview), and the real
+catalogs live in `tests/PixMcp.Tests/Fixtures/counter-catalogs/`:
+
+| Adapter | Counters | Presets that resolve |
+|---|---|---|
+| NVIDIA GeForce RTX 4070 Ti | 22 D3D | `pipelineStatistics`, `depthOcclusion` |
+| Intel Arc B580 (32.0.101.8991) | 22 D3D + 259 `INTEL:` in 16 groups | every preset (`verified`) |
+| AMD Radeon iGPU (32.0.21018.14) | 22 D3D | `pipelineStatistics`, `depthOcclusion` |
+
+Intel counter names carry no unit; the descriptions do (`INTEL: Percentage of time ...`,
+`INTEL: Number of ...`), which is where `unit` comes from. `GPU Busy` and `Command Parser Render
+Engine Busy` read about 100 on every replayed event; per-stage `XVE Inst Executed ALU0 * Utilization`,
+`XVE Threads Occupancy All` and the `XVE Stall *` counters carry the signal. On a new PIX build
+or vendor, `PIXMCP_VENDOR_PROBE_OUT=<dir>` with `PIX_TEST_CAPTURE` and `PIX_TEST_ANALYSIS=1` makes
+`VendorProbeTests` replay the fixtures on every adapter and write each tool answer to that directory.
 
 Vendor identity is reported everywhere replayed numbers appear: queues carry `vendor`, `pix_gpu_info`
 carries the capture's `vendor` and `pix_gpu_overview` its `capture.adapter` (from the capture file's vendor id or device
@@ -586,13 +601,19 @@ compare as sets and ignore descriptor-heap indices unless `includeDescriptorHeap
 `pix_gpu_bottleneck` classifies what limits one scope (`scope` or `markerPathPrefix`, required)
 as a job. Evidence comes in stages: `timing` (always; idle time in the scope window, work pending
 before execution, small dispatches), `counters` (the `preset`, default `utilization`, plus D3D
-pipeline statistics and depth occlusion over the scope's work events, with derived ratios),
-`occupancy` and `hf` over the scope's replay window, `drpix` (up to `maxDrPixRuns` experiments,
-each a replay) and `shaderProfile` (a pointer, not scored). Rules in the embedded
+pipeline statistics and depth occlusion over the scope's work events, with derived ratios and
+per-cache hit rates; for a vendor with a `counters` list in `bottleneck-rules.json`, currently
+Intel, also the XVE utilization, occupancy, stall, memory, depth-latency and cache counters its rules
+read), `occupancy` and `hf` over the scope's replay window, `drpix` (up to `maxDrPixRuns`
+experiments, each a replay) and `shaderProfile` (a pointer, not scored). Rules in the embedded
 `bottleneck-rules.json` score the limiters `pixelShading`, `vertexOrGeometry`, `rasterOrDepth`,
 `memoryBandwidth`, `cacheMiss`, `occupancyLatency`, `launchOverhead` and `syncIdle`. The result
-carries a `verdict` with `confidence` (high needs two evidence sources, a clear margin, every
-requested stage and a vendor block validated on hardware, which none is yet), `alternatives`, the
+carries a `verdict` with `confidence`. High confidence needs two evidence sources, a clear margin,
+every requested stage the PIX build and GPU support, and a vendor block validated on hardware.
+Only `intel` is validated so far: on an Arc B580 the perf fixture's full-screen Lighting pass reads
+XVE ALU0 PS utilization 58 % next to a 97 % 1x1-viewport saving. Occupancy and HF counters return
+E_NOTIMPL on every GPU with 2606.18, and those `unsupported` stages do not lower confidence.
+The result also carries `alternatives`, the
 `evidence` table, `ruleResults`, `recommendations` with calls, `coverage` per stage and a
 `detailRef` with every row. Results are cached per scope and evidence until analysis stops.
 
@@ -822,6 +843,14 @@ unknown name fails with `invalid_arguments` and a retry that keeps the recognise
 `pix_gpu_analysis_status` and replay provenance report `flagsDecoded` (names and meanings) and
 `flagsSource`: `explicit` when flags were passed, `pixDefault` when PIX chose, in which case the
 effective flags are not observable.
+
+`pix_gpu_analysis_start` also takes `adapterName`: an exact adapter name, a unique part of one
+(`"Arc B580"`) or a vendor (`intel`, `amd`, `nvidia`, `warp`); unknown or ambiguous names fail with
+`invalid_arguments` listing the adapters. Adapter ids derive from the adapter LUID and change
+between boots. PIX declines to replay a capture taken on another vendor's GPU unless
+`IGNORE_INCOMPATIBILITIES` is set (observed: an NVIDIA capture on an Intel Arc B580 fails with
+0x8ABC006B). The server reports that as `analysis_incompatible` with a retry that adds the flag;
+replay provenance then shows `vendorMismatch`.
 
 ### Live and recorded timing captures
 

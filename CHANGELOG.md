@@ -398,6 +398,44 @@ add to this section until the release is tagged.
   - The staged `PixMcp.Core` split and the hosted Core test project did not ship. As the roadmap's
     fallback allows, C# validation stays on the self-hosted PIX job, which now also runs on push to
     main.
+- Intel and AMD live validation (after the roadmap, on an Intel Arc B580 and an AMD Radeon iGPU
+  next to the RTX 4070 Ti):
+  - `pix_gpu_analysis_start adapterName` picks the replay adapter by exact name, a unique part of
+    one or a vendor; unknown or ambiguous names fail with `invalid_arguments` listing the adapters.
+    Adapter ids derive from the LUID and change between boots.
+  - New code `analysis_incompatible`: PIX declines (0x8ABC006B) to replay a capture taken on
+    another vendor's GPU without `IGNORE_INCOMPATIBILITIES`; nextCalls retry with the flag added.
+  - Real counter catalogs `intel-arc-b580.json` (22 D3D + 259 `INTEL:` counters) and
+    `amd-radeon-igpu.json` (22 D3D) replace the synthetic `intel-xe2.json`.
+  - Every Intel preset was rewritten from the real names and is `verified`. The transcribed names
+    (`XVE_INST_EXECUTED_*`, `... Utilization (%)`, `Xe GPU Utilization`) did not exist.
+  - Vendor preset blocks no longer match D3D runtime counters. NVIDIA's `fixedFunction` used to
+    pick up the D3D primitive counters.
+  - `CounterUnits` reads "percentage of" in a description as a high-confidence percent before the
+    name vocabulary; that is how the Intel plugin states units.
+  - Bottleneck rules v2:
+    - Intel rules read the real counters, with a PS/VS ALU0 utilization threshold of 40 %; the
+      calibration Lighting pass reads 58 %.
+    - The counters stage also collects the vendor counters listed under `counters` in the rule file.
+    - Per-cache hit rates are derived as `counters.cacheHitPercent.<cache>`.
+    - The `intel` block is validated on the perf fixture.
+    - Stages the PIX build and GPU cannot provide no longer cap confidence.
+  - Compatibility notes from the three GPUs:
+    - cross-vendor replay needs `IGNORE_INCOMPATIBILITIES`;
+    - occupancy and HF counters return E_NOTIMPL on NVIDIA, Intel and AMD with 2606.18;
+    - live shader profiling is declined on NVIDIA (0x8ABC0007) and AMD (0x8ABC0006) and fails on
+      Intel (0x80004005);
+    - the Bandwidth Dr. PIX experiment works only through the Intel plugin;
+    - the Intel analysis power states;
+    - the AMD iGPU exposes only D3D counters.
+  - `pix_gpu_shader_profile` returns an uncached `failed` marker, pointing to static profiling, for
+    Intel's E_FAIL.
+  - `VendorProbeTests` (`PIXMCP_VENDOR_PROBE_OUT=<dir>`) replays the fixtures on every adapter and
+    writes each tool answer, so the next PIX build or vendor can be re-checked in one run.
+  - `pix_gpu_analysis_adapters.notes` carries the adapter notes: cross-vendor replay and the Intel
+    power states. Analysis status `flagNotes` stays about flags.
+  - `pix_gpu_overview` capabilities keep states and reasons but no longer carry registry notes.
+    They are in `pix_gpu_info`, and the overview stays within its 12 KB budget as the registry grows.
 
 ### Changed
 

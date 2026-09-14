@@ -95,8 +95,11 @@ public static class BottleneckTools
         {
             List<CounterInfo> counters = CountersTools.LoadCounters(h, job);
             GpuVendor vendor = h.EffectiveVendor().Vendor;
+            IReadOnlyList<string> ruleCounters = BottleneckRules.Default.CountersFor(vendor);
             uint[] ids = new[] { request.Preset, "pipelineStatistics", "depthOcclusion" }.Distinct()
-                .SelectMany(name => CounterPresets.Resolve(vendor, name, counters)?.Ids ?? []).Distinct().Order().ToArray();
+                .SelectMany(name => CounterPresets.Resolve(vendor, name, counters)?.Ids ?? [])
+                .Concat(counters.Where(c => ruleCounters.Contains(c.Name, StringComparer.Ordinal)).Select(c => c.Id))
+                .Distinct().Order().ToArray();
             if (ids.Length == 0)
             {
                 missing = true;
@@ -113,7 +116,7 @@ public static class BottleneckTools
             if (!preparation.IsReady(h)) preparation.Prepare(h, job);
             if (h.OptionalUnavailable.TryGetValue("occupancy", out object? unavailable))
             {
-                missing = true;
+                // Unsupported by this PIX build and GPU (E_NOTIMPL on every vendor in 2606.18): no evidence could exist, so it does not cap confidence.
                 coverage.Add(new("occupancy", "unsupported", Reason(unavailable), []));
                 return;
             }
@@ -147,7 +150,7 @@ public static class BottleneckTools
             if (!preparation.IsReady(h)) preparation.Prepare(h, job);
             if (h.OptionalUnavailable.TryGetValue("hf:0", out object? unavailable))
             {
-                missing = true;
+                // Like occupancy: a stage this PIX build and GPU cannot provide does not cap confidence.
                 coverage.Add(new("hf", "unsupported", Reason(unavailable), []));
                 return;
             }
@@ -207,7 +210,9 @@ public static class BottleneckTools
         string detailRef = session.Results.Store(new { evidence, ruleResults = classification.Results }, jobId: job.Id);
         var notes = new List<string>
         {
-            "Heuristic classification from the embedded bottleneck-rules.json; no vendor block is validated on hardware yet, so confidence stays below high.",
+            BottleneckRules.Default.IsValidated(vendorIdentity.Vendor)
+                ? $"Heuristic classification from the embedded bottleneck-rules.json; the {GpuVendors.Name(vendorIdentity.Vendor)} block was checked on hardware against a known limiter, so two agreeing sources can reach high confidence."
+                : $"Heuristic classification from the embedded bottleneck-rules.json; the {GpuVendors.Name(vendorIdentity.Vendor)} block is not validated on hardware, so confidence stays below high.",
             "Counters are aggregated over the scope's work events (percent units EOP-weighted, others summed); PIX marker rounds are reported separately and never summed.",
             "Timing is replay timing on this machine, not application frame latency.",
         };
@@ -361,5 +366,13 @@ public static class BottleneckTools
             evidence.Add(new("counters", "counters.psInvocationsPerPrimitive", Math.Round(invocations / primitives, 3), "ratio", "high", "derived", "PS Invocations over IA Primitives."));
         if (Get("Clipper Primitives In") is double clipIn && clipIn > 0 && Get("Clipper Primitives Out") is double clipOut)
             evidence.Add(new("counters", "counters.clippedPercent", Math.Round(100 * (1 - clipOut / clipIn), 2), "percent", "high", "derived", "Primitives removed by clipping."));
+        // Intel reports cache hits and misses as counts ("L3 Hit", "L3 Miss"); a hit rate per cache makes them comparable.
+        foreach ((string name, double hits) in totals)
+        {
+            if (!name.EndsWith(" Hit", StringComparison.OrdinalIgnoreCase)) continue;
+            string cacheName = name[..^4];
+            if (Get(cacheName + " Miss") is double misses && hits + misses > 0)
+                evidence.Add(new("counters", $"counters.cacheHitPercent.{cacheName}", Math.Round(100 * hits / (hits + misses), 2), "percent", "high", "derived", $"{cacheName} Hit over Hit plus Miss."));
+        }
     }
 }

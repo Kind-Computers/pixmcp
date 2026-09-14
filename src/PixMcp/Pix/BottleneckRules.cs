@@ -16,7 +16,7 @@ public sealed record BottleneckRuleResultDto(string Id, string Limiter, double W
 
 public sealed record BottleneckVerdictDto(
     [property: Description("pixelShading, vertexOrGeometry, rasterOrDepth, memoryBandwidth, cacheMiss, occupancyLatency, launchOverhead, syncIdle or unknown.")] string Limiter,
-    [property: Description("high needs a score of 0.6, a 0.2 margin over the next limiter, two evidence sources, every requested stage and a vendor block validated on hardware; medium needs 0.4; else low.")] string Confidence,
+    [property: Description("high needs a score of 0.6, a 0.2 margin over the next limiter, two evidence sources, every requested stage this PIX build and GPU support, and a vendor block validated on hardware; medium needs 0.4; else low.")] string Confidence,
     [property: Description("1 - product(1 - weight) over the limiter's satisfied rules.")] double Score);
 
 public sealed record BottleneckAlternativeDto(string Limiter, double Score, IReadOnlyList<string> RuleIds);
@@ -49,7 +49,15 @@ internal sealed record BottleneckCondition(string Source, string Metric, string 
 internal sealed record BottleneckRule(string Id, string Vendor, string Source, string Metric, string Op, double Threshold, BottleneckCondition? Secondary, string Limiter,
     double Weight, string Note);
 
-internal sealed record BottleneckRuleSet(int Version, IReadOnlyDictionary<string, bool> Validated, IReadOnlyList<BottleneckRule> Rules);
+internal sealed record BottleneckRuleSet(int Version, IReadOnlyDictionary<string, bool> Validated, IReadOnlyList<BottleneckRule> Rules,
+    IReadOnlyDictionary<string, string[]>? Counters = null)
+{
+    /// <summary>Exact names of the vendor counters the counters stage collects so this vendor's rules have evidence; empty for vendors without a list.</summary>
+    public IReadOnlyList<string> CountersFor(GpuVendor vendor)
+        => Counters is not null && Counters.TryGetValue(GpuVendors.Name(vendor), out string[]? names) ? names : [];
+
+    public bool IsValidated(GpuVendor vendor) => Validated.TryGetValue(GpuVendors.Name(vendor), out bool validated) && validated;
+}
 
 internal sealed record BottleneckClassification(BottleneckVerdictDto Verdict, IReadOnlyList<BottleneckAlternativeDto> Alternatives, IReadOnlyList<BottleneckRuleResultDto> Results,
     IReadOnlyList<string> SatisfiedIds, bool VendorValidated);
@@ -88,7 +96,10 @@ internal static class BottleneckRules
                 r.GetProperty("op").GetString()!, r.GetProperty("threshold").GetDouble(), secondary, r.GetProperty("limiter").GetString()!, r.GetProperty("weight").GetDouble(),
                 r.GetProperty("note").GetString()!));
         }
-        return new(root.GetProperty("version").GetInt32(), validated, rules);
+        Dictionary<string, string[]>? counters = root.TryGetProperty("counters", out JsonElement lists)
+            ? lists.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.EnumerateArray().Select(n => n.GetString()!).ToArray(), StringComparer.OrdinalIgnoreCase)
+            : null;
+        return new(root.GetProperty("version").GetInt32(), validated, rules, counters);
     }
 
     public static BottleneckClassification Classify(IReadOnlyList<BottleneckEvidenceDto> evidence, GpuVendor vendor, bool requestedEvidenceMissing, BottleneckRuleSet? rules = null)

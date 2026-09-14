@@ -81,7 +81,9 @@ public static partial class InvestigationTools
             queues.Add(new(queue.Index, queue.Name, Json.EnumName(queue.Type), queue.EventCount, events, children,
                 timing && events is not null ? h.TimingTreeFor(queue.Index) : null, timing ? h.TimingRowsByQueue.GetValueOrDefault(queue.Index, []) : null));
         }
-        return OverviewBuilder.Build(new OverviewInputs(h.Id, h.Path, h.CachedCaptureVendor, queues, h.CapabilitiesSnapshot(), timing ? h.Provenance() : null, timing,
+        // Registry notes stay in pix_gpu_info: they grow with every observed vendor behaviour and would crowd the Level 0 answer.
+        IReadOnlyDictionary<string, CapabilityDto> capabilities = h.CapabilitiesSnapshot().ToDictionary(c => c.Key, c => c.Value with { Notes = null });
+        return OverviewBuilder.Build(new OverviewInputs(h.Id, h.Path, h.CachedCaptureVendor, queues, capabilities, timing ? h.Provenance() : null, timing,
             (q, i) => scope.Contains(h, q, i), scope.DescribeOrNull(h), h.Experiments is not null), new OverviewOptions(limit, frameIndex, includeInsights));
     }
 }

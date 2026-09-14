@@ -297,13 +297,20 @@ public sealed partial class GpuCaptureHandle : PixHandle
                 Flags = SelectedFlags ?? PIX_ANALYSIS_FLAGS.PIX_ANALYSIS_FLAG_NONE,
             };
         }
-        InvokeStartAnalysis(parameters, job, (p, notifications, cancellation) =>
+        try
         {
-            if (p is PIX_ANALYSIS_PARAMS explicitParameters)
-                analysis.StartAnalysis(&explicitParameters, notifications!, cancellation!);
-            else
-                analysis.StartAnalysis(null, notifications!, cancellation!);
-        });
+            InvokeStartAnalysis(parameters, job, (p, notifications, cancellation) =>
+            {
+                if (p is PIX_ANALYSIS_PARAMS explicitParameters)
+                    analysis.StartAnalysis(&explicitParameters, notifications!, cancellation!);
+                else
+                    analysis.StartAnalysis(null, notifications!, cancellation!);
+            });
+        }
+        catch (Exception ex) when (AdapterSelection.IncompatibleStart(ex, Id, parameters?.Adapter, SelectedPowerState, SelectedFlags, Adapters, CaptureVendor()) is { } incompatible)
+        {
+            throw incompatible;
+        }
 
         if (parameters is PIX_ANALYSIS_PARAMS effective)
         {

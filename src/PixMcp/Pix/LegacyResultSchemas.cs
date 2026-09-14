@@ -82,7 +82,7 @@ internal static class LegacyResultSchemas
         IReadOnlyList<Adapter>? Adapters, ulong? SelectedAdapter, uint? SelectedPowerState, string? Flags,
         AnalysisFlagsDto? FlagsDecoded, string FlagsSource, IReadOnlyList<string> FlagNotes,
         bool TimingCollected, IReadOnlyList<string> CountersCollected, VendorIdentity ReplayVendor, VendorIdentity CaptureVendor);
-    private sealed record AnalysisAdapters(IReadOnlyList<AdapterPowerStates> Adapters, ulong? SelectedAdapter, uint? SelectedPowerState);
+    private sealed record AnalysisAdapters(IReadOnlyList<AdapterPowerStates> Adapters, ulong? SelectedAdapter, uint? SelectedPowerState, IReadOnlyList<string> Notes);
     private sealed record AnalysisStopped(bool Stopped, IReadOnlyList<string>? Warnings, Analysis Analysis);
     private sealed record GpuCaptureInfo(string Handle, string Path, object? FileInfo, object? Application,
         IReadOnlyList<Queue> Queues, long TotalEvents, VendorIdentity Vendor, Analysis Analysis, IReadOnlyDictionary<string, CapabilityDto> Capabilities,

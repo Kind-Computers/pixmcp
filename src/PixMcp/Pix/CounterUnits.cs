@@ -29,9 +29,10 @@ public static class CounterUnits
     private static readonly Regex CountWords = new(@"\bcounts?\b|\bnumber of\b|\binvocations?\b|\bprimitives?\b|\bvertices\b|\bsamples?\b|\bthreads?\b|\bwaves?\b|\bwarps?\b|\bmessages?\b|\binstructions?\b|\bexecuted\b|\brequests?\b|\bhits?\b|\bmisses\b", Options);
 
     /// <summary>
-    /// Ordered rules: format (bool, hex/bitmask); "(%)" in the name; bytes-per-second; bytes and cycles (both = ratio);
-    /// utilization/occupancy/busy/starved/stall vocabulary in the name unless it is an explicit count; "percentage of"
-    /// in the description; time words in the name; count words. Underscores in vendor names count as word separators.
+    /// Ordered rules: format (bool, hex/bitmask); "(%)" in the name; "percentage of" in the description (how the Intel
+    /// plugin states units: "INTEL: Percentage of time ..."); bytes-per-second; bytes and cycles (both = ratio);
+    /// utilization/occupancy/busy/starved/stall vocabulary in the name unless it is an explicit count; time words in the
+    /// name; count words. Underscores in vendor names count as word separators.
     /// </summary>
     public static UnitGuess Infer(string? name, string? description, string? dataType)
     {
@@ -40,6 +41,7 @@ public static class CounterUnits
         if (format.Contains("HEX", StringComparison.Ordinal) || format.Contains("BINARY", StringComparison.Ordinal) || format.Contains("BITMASK", StringComparison.Ordinal))
             return new(Bitmask, "format", "high", null, null, "none");
         if (PercentInName.IsMatch(n)) return new(Percent, "name", "high", 0, 100, "avg");
+        if (PercentDescription.IsMatch(d)) return new(Percent, "description", "high", 0, 100, "avg");
         if (BytesPerSecondPattern.IsMatch(n)) return new(BytesPerSecond, "name", "medium", 0, null, "avg");
         if (BytesPerSecondPattern.IsMatch(d)) return new(BytesPerSecond, "description", "medium", 0, null, "avg");
         bool bytes = BytesWord.IsMatch(n) || BytesWord.IsMatch(d), cycles = CyclesWord.IsMatch(n) || CyclesWord.IsMatch(d);

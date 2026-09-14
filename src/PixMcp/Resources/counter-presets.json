@@ -1,10 +1,10 @@
 {
-  "$comment": "Named counter groups. Patterns are case-insensitive globs over counter names. confidence: verified (seen on hardware through this server), transcribed (from vendor plugin strings or docs, not run here), unverified (best guess). Intel names come from the PPI-imdp.dll 2601.15+ plugin strings; NVIDIA D3D pipeline statistics were verified on an RTX 4070 Ti (PIX 2606.18-preview exposes only the D3D counters there); AMD names are GPA-style guesses.",
+  "$comment": "Named counter groups. Patterns are case-insensitive globs over counter names. confidence: verified (names seen on hardware through this server), transcribed (from vendor plugin strings or docs, not run here), unverified (best guess). Vendor blocks never match D3D counters (groups 'D3D: ...'); only 'any' blocks do. Intel names were listed by pix_gpu_counters_list on an Intel Arc B580 (driver 32.0.101.8991, PIX 2606.18-preview, 2026-09-14): 259 INTEL counters whose units live in descriptions ('Percentage of time', 'Number of'). NVIDIA (RTX 4070 Ti) and AMD (Radeon iGPU 32.0.21018.14) expose only the 22 D3D counters on this machine, so their vendor blocks stay guesses.",
   "presets": {
     "utilization": {
       "description": "Top-level busy/utilization lanes: which unit is saturated.",
       "vendors": {
-        "intel": { "confidence": "transcribed", "patterns": ["Xe GPU Utilization", "XVE Utilization (%)", "Sampler Utilization (%)", "Rasterizer Utilization (%)", "Z Utilization (%)", "Color Utilization (%)", "GPU Memory Utilization (%)", "Level 3 Cache Utilization (%)", "Thread Dispatcher Utilization (%)", "Vertex Fetch Utilization (%)", "Clipper Utilization (%)", "Render Command Streamer Utilization (%)", "Compute Command Streamer Utilization (%)"] },
+        "intel": { "confidence": "verified", "patterns": ["GPU Busy", "Command Parser Render Engine Busy", "Command Parser Compute Engine Busy", "Command Parser Copy Engine Busy", "XVE Active", "XVE Multiple Pipe Active", "Sampler Active", "GPU Memory Active", "L3 Busy"] },
         "nvidia": { "confidence": "unverified", "patterns": ["GPU Busy*", "SM Active*", "ALU Pipe Activity*", "*Utilization*"] },
         "amd": { "confidence": "unverified", "patterns": ["GPUBusy*", "GPU Busy*", "*Utilization*", "*Busy*"] }
       }
@@ -12,15 +12,15 @@
     "aluUtilization": {
       "description": "ALU issue utilization across all shader stages.",
       "vendors": {
-        "intel": { "confidence": "transcribed", "patterns": ["XVE Utilization (%)", "XVE_INST_EXECUTED_ALU0_*_UTILIZATION", "XVE_INST_EXECUTED_ALU1_*_UTILIZATION", "XVE_INST_EXECUTED_ALU2_ALL", "XVE_PIPE_ALU0_AND_ALU1_ACTIVE"] },
+        "intel": { "confidence": "verified", "patterns": ["XVE Inst Executed ALU0 All Utilization", "XVE Inst Executed ALU1 All Utilization", "XVE Inst Executed ALU2 All Utilization", "XVE Pipe ALU0 And ALU1 Active", "XVE Pipe ALU0 And ALU2 Active", "XVE Multiple Pipe Active"] },
         "nvidia": { "confidence": "unverified", "patterns": ["ALU Pipe Activity*", "FMA Pipe*", "*ALU*"] },
         "amd": { "confidence": "unverified", "patterns": ["VALUBusy*", "SALUBusy*", "VALUUtilization*"] }
       }
     },
     "perStageAlu": {
-      "description": "ALU utilization per shader stage (VS, HS, DS, GS, PS, CS, MS, TS, RT).",
+      "description": "ALU utilization per shader stage (VS, PS, CS, async CS, MS, TS, RT).",
       "vendors": {
-        "intel": { "confidence": "transcribed", "patterns": ["XVE_INST_EXECUTED_ALU0_VS_UTILIZATION", "XVE_INST_EXECUTED_ALU0_PS_UTILIZATION", "XVE_INST_EXECUTED_ALU0_CS_UTILIZATION", "XVE_INST_EXECUTED_ALU0_ASYNC_CS_UTILIZATION", "XVE_INST_EXECUTED_ALU0_HS_UTILIZATION", "XVE_INST_EXECUTED_ALU0_DS_UTILIZATION", "XVE_INST_EXECUTED_ALU0_GS_UTILIZATION", "XVE_INST_EXECUTED_ALU0_MS_UTILIZATION", "XVE_INST_EXECUTED_ALU0_TS_UTILIZATION", "XVE_INST_EXECUTED_ALU0_RT_*_UTILIZATION"] },
+        "intel": { "confidence": "verified", "patterns": ["XVE Inst Executed ALU0 VS Utilization", "XVE Inst Executed ALU0 PS Utilization", "XVE Inst Executed ALU0 CS Utilization", "XVE Inst Executed ALU0 Async CS Utilization", "XVE Inst Executed ALU0 MS Utilization", "XVE Inst Executed ALU0 TS Utilization", "XVE Inst Executed ALU1 VS Utilization", "XVE Inst Executed ALU1 PS Utilization", "XVE Inst Executed ALU1 CS Utilization", "XVE Inst Executed ALU1 Async CS Utilization", "XVE Inst Executed ALU1 MS Utilization", "XVE Inst Executed ALU1 TS Utilization", "XVE Inst Executed ALU0 RT * Utilization", "XVE Inst Executed ALU1 RT * Utilization"] },
         "nvidia": { "confidence": "unverified", "patterns": ["*VS*Active*", "*PS*Active*", "*CS*Active*"] },
         "amd": { "confidence": "unverified", "patterns": ["VSBusy*", "PSBusy*", "CSBusy*", "HSBusy*", "DSBusy*", "GSBusy*"] }
       }
@@ -28,23 +28,23 @@
     "occupancy": {
       "description": "Thread/warp occupancy and unused slots.",
       "vendors": {
-        "intel": { "confidence": "transcribed", "patterns": ["XVE_THREADS_OCCUPANCY_ALL", "Thread Dispatcher Starved", "Xe Core Thread Dispatcher Starved", "Thread Dispatcher Utilization (%)"] },
+        "intel": { "confidence": "verified", "patterns": ["XVE Threads Occupancy All", "Thread Dispatch PS Active", "Thread Dispatch Queue0 Active", "Thread Dispatch Queue1 Active", "Thread Dispatch Input Available"] },
         "nvidia": { "confidence": "unverified", "patterns": ["Active SM Unused Warp Slots*", "*Occupancy*", "*Warp*"] },
         "amd": { "confidence": "unverified", "patterns": ["*Occupancy*", "*Waves*"] }
       }
     },
     "stalls": {
-      "description": "Why shader threads wait: dependencies, sends, barriers, instruction fetch.",
+      "description": "Why shader threads wait: dependencies, sends, barriers, instruction fetch, dispatch queues and memory latency.",
       "vendors": {
-        "intel": { "confidence": "transcribed", "patterns": ["XVE_STALL", "XVE_STALL_ALUWR", "XVE_STALL_BARRIER", "XVE_STALL_CONTROL", "XVE_STALL_INSTFETCH", "XVE_STALL_OTHER", "XVE_STALL_PIPESTALL", "XVE_STALL_PS_DEPENDENCY", "XVE_STALL_SBID", "XVE_STALL_SENDWR"] },
+        "intel": { "confidence": "verified", "patterns": ["XVE Stall", "XVE Stall Aluwr", "XVE Stall Barrier", "XVE Stall Control", "XVE Stall Instfetch", "XVE Stall Other", "XVE Stall PS Dependency", "XVE Stall Pipestall", "XVE Stall Sbid", "XVE Stall Sendwr", "XVE Shared Function Access Hold", "Thread Dispatch Queue0 Stall", "Thread Dispatch Queue1 Stall", "Sampler Memory Latency Stall", "L3 Stall", "Copy Engine Request Stall", "Color Pipe Cache Latency* Stall", "Threadgroup Dispatch Queue* Resource Stall"] },
         "nvidia": { "confidence": "unverified", "patterns": ["*Stall*", "*Warp Stall*"] },
         "amd": { "confidence": "unverified", "patterns": ["*Stall*", "*Wait*"] }
       }
     },
     "cache": {
-      "description": "Cache hit rates and utilization (L1/L2/L3, load-store cache).",
+      "description": "Cache hits and misses (instruction, device L3, render, load-store, sampler texture, AMFS caches and TLB).",
       "vendors": {
-        "intel": { "confidence": "transcribed", "patterns": ["Level 3 Cache Utilization (%)", "Load Store Cache Utilization (%)", "XVE_LOAD_STORE_CACHE_*_MESSAGE_COUNT", "XVE_LOAD_STORE_CACHE_REGISTER_RESPONSE_COUNT"] },
+        "intel": { "confidence": "verified", "patterns": ["ICache Hit", "ICache Miss", "L3 Hit", "L3 Miss", "Render Cache Hit", "Load Store Cache Hit", "Load Store Cache Access", "Sampler Texture Cache Access", "Sampler Texture Cache Miss", "AMFS Cache Hit", "AMFS Cache Miss", "TLB Miss", "RT BVH Cache Miss"] },
         "nvidia": { "confidence": "unverified", "patterns": ["L1*Hit*", "L2*Hit*", "*Cache*Hit*", "*Cache*"] },
         "amd": { "confidence": "unverified", "patterns": ["L0Cache*", "L1Cache*", "L2Cache*", "*CacheHit*"] }
       }
@@ -52,16 +52,16 @@
     "memoryBandwidth": {
       "description": "Memory traffic and bandwidth utilization.",
       "vendors": {
-        "intel": { "confidence": "transcribed", "patterns": ["GPU Memory Utilization (%)", "XVE_SLM_*_MESSAGE_COUNT", "XVE_LOAD_STORE_CACHE_READ_MESSAGE_COUNT", "XVE_LOAD_STORE_CACHE_WRITE_MESSAGE_COUNT"] },
+        "intel": { "confidence": "verified", "patterns": ["GPU Memory Active", "GPU Memory Byte Read Rate", "GPU Memory Byte Write Rate", "GPU Memory Byte Read", "GPU Memory Byte Write", "GPU Memory Request Queue Full", "Host To GpuMem Transaction Read", "Host To GpuMem Transaction Write", "SysMem Transaction Read", "SysMem Transaction Write", "Load Store Cache Byte Read", "Load Store Cache Byte Write", "SLM Byte Read", "SLM Byte Write"] },
         "nvidia": { "confidence": "unverified", "patterns": ["DRAM*", "*Memory*Bandwidth*", "*Memory*Throughput*", "VRAM*"] },
         "amd": { "confidence": "unverified", "patterns": ["FetchSize*", "WriteSize*", "*MemUnitBusy*", "*Bandwidth*"] }
       }
     },
     "fixedFunction": {
-      "description": "Rasterizer, depth, colour and vertex-fetch units.",
+      "description": "Vertex fetch, clipper, rasterizer, depth and colour pipeline units: input available, output ready and latency-structure-full shares.",
       "vendors": {
-        "intel": { "confidence": "transcribed", "patterns": ["Rasterizer Utilization (%)", "Z Utilization (%)", "Color Utilization (%)", "Vertex Fetch Utilization (%)", "Clipper Utilization (%)", "EarlyDepthBottleneck"] },
-        "nvidia": { "confidence": "unverified", "patterns": ["*Raster*", "*ROP*", "*ZROP*", "*CROP*", "*Primitive*"] },
+        "intel": { "confidence": "verified", "patterns": ["Vertex Fetch Input Available", "Vertex Fetch Output Ready", "Clipper Input Available", "Clipper Output Ready", "Stripsfan Output Ready", "Rasterizer Input Available", "Rasterizer Output Ready", "IZ Output Ready", "HiZ Subspan Latency Fifofull", "IZ Subspan Latency Fifofull", "Pixel Post Process Input Available", "Pixel Post Process Output Ready", "Render Cache Input Available", "Render Cache Output Ready"] },
+        "nvidia": { "confidence": "unverified", "patterns": ["*Raster*", "*ROP*", "*ZROP*", "*CROP*"] },
         "amd": { "confidence": "unverified", "patterns": ["*PrimitiveAssembly*", "*DepthStencil*", "*ColorBuffer*", "*Rasterizer*"] }
       }
     },

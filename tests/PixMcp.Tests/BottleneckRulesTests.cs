@@ -19,10 +19,14 @@ public sealed class BottleneckRulesTests
         Assert.Equal(("pixelShading", "medium", 0.88), Tuple(Verdict(GpuVendor.Nvidia, E("drpix", "drpix.1x1 Viewport.savedPercent", 70))));
         Assert.Equal(("vertexOrGeometry", "medium", 0.4), Tuple(Verdict(GpuVendor.Nvidia, E("counters", "counters.psInvocationsPerPrimitive", 1.2, "ratio"))));
         Assert.Equal(("memoryBandwidth", "medium", 0.7),
-            Tuple(Verdict(GpuVendor.Intel, E("counters", "GPU Memory Utilization (%)", 85), E("counters", "XVE Utilization (%)", 30))));
+            Tuple(Verdict(GpuVendor.Intel, E("counters", "GPU Memory Active", 85), E("counters", "XVE Active", 30))));
         Assert.Equal(("occupancyLatency", "low", 0.3), Tuple(Verdict(GpuVendor.Amd, E("occupancy", "occupancy.averagePercent", 20))));
-        Assert.Equal(("occupancyLatency", "medium", 0.79),
-            Tuple(Verdict(GpuVendor.Intel, E("occupancy", "occupancy.averagePercent", 20), E("counters", "XVE_STALL", 60))));
+        Assert.Equal(("occupancyLatency", "medium", 0.7),
+            Tuple(Verdict(GpuVendor.Intel, E("counters", "XVE Threads Occupancy All", 20), E("counters", "XVE Stall", 60))));
+        Assert.Equal(("cacheMiss", "medium", 0.5), Tuple(Verdict(GpuVendor.Intel, E("counters", "counters.cacheHitPercent.ICache", 35))));
+        // The Arc B580 calibration pass: full-screen lighting with a 1x1 viewport saving of 97 % and PS ALU0 utilization of 58 %.
+        Assert.Equal(("pixelShading", "high", 0.94), Tuple(Verdict(GpuVendor.Intel, E("drpix", "drpix.1x1 Viewport.savedPercent", 97.12),
+            E("counters", "XVE Inst Executed ALU0 PS Utilization", 58), E("counters", "XVE Inst Executed ALU0 VS Utilization", 0), E("timing", "timing.eopShareOfExecPercent", 24.32))));
         Assert.Equal(("launchOverhead", "medium", 0.6),
             Tuple(Verdict(GpuVendor.Nvidia, E("timing", "timing.smallDispatchEopPercent", 90), E("timing", "timing.smallDispatchExecToEop", 3, "ratio"))));
         Assert.Equal(("syncIdle", "medium", 0.7), Tuple(Verdict(GpuVendor.Nvidia, E("timing", "timing.idlePercent", 45))));

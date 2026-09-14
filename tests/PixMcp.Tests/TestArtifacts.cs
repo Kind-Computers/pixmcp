@@ -12,6 +12,8 @@ internal static class TestArtifacts
     public static string? Root { get; } = FindRoot();
     public static bool PixInstalled => PixDiscovery.InstallDir is not null;
     public static bool AnalysisEnabled => Environment.GetEnvironmentVariable("PIX_TEST_ANALYSIS") == "1";
+    /// <summary>PIX_TEST_VENDOR_VALIDATION=1 replays the NVIDIA-captured fixtures on every Intel, AMD and NVIDIA adapter present.</summary>
+    public static bool VendorValidation => Environment.GetEnvironmentVariable("PIX_TEST_VENDOR_VALIDATION") == "1";
     public static string? Capture => Resolve("PIX_TEST_CAPTURE");
     public static string? TimingCapture => Resolve("PIX_TEST_TIMING_CAPTURE");
     // Fixture profiles from scripts/capture_fixtures.py --profile rich|perf|sm6|programmatic.

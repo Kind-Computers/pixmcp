@@ -619,7 +619,7 @@ Lists the GPU adapters (and their power states) available for analysing this cap
 |---|---|---|---|
 | `handle` | string | required | GPU capture handle |
 
-Output: `adapters`, `selectedAdapter`, `selectedPowerState` | or | `deferred`, `resultRef`, `totalBytes`, `nextCalls` | or | `code`, `message`, `hresult`, `retryable`, `nextCalls`
+Output: `adapters`, `selectedAdapter`, `selectedPowerState`, `notes` | or | `deferred`, `resultRef`, `totalBytes`, `nextCalls` | or | `code`, `message`, `hresult`, `retryable`, `nextCalls`
 
 ### pix_gpu_analysis_start
 
@@ -630,10 +630,11 @@ Connects the capture to the local GPU and starts analysis (replay). Required for
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `handle` | string | required | GPU capture handle |
-| `adapterId` | integer | `null` | Adapter id from pix_gpu_analysis_adapters (default: chosen by PIX). |
+| `adapterId` | integer | `null` | Adapter id from pix_gpu_analysis_adapters (default: chosen by PIX). Ids derive from the adapter LUID and change between boots; prefer adapterName. With flags or powerStateId but no adapter, the first enumerated adapter is used. |
 | `powerStateId` | integer | `null` | Power state id from pix_gpu_analysis_adapters (default: chosen by PIX). |
 | `flags` | string[] | `null` | Replay flags (default: PIX's own choice). IGNORE_INCOMPATIBILITIES, USE_REPLAY_ARGUMENT_BUFFERS, USE_SINGLE_COMMAND_QUEUE, ENABLE_DEBUG_LAYER, ENABLE_RECREATE_AT_GPUVA, ENABLE_APPLICATION_SPECIFIC_DRIVER_STATE, DISABLE_GPU_PLUGINS, FORCE_SET_APPLICATION_SPECIFIC_DRIVER_STATE, or NONE; the PIX_ANALYSIS_FLAG_/PIX_ANALYSIS_ prefixes are optional. pix_gpu_analysis_status decodes the selected flags. One of `NONE`, `IGNORE_INCOMPATIBILITIES`, `USE_REPLAY_ARGUMENT_BUFFERS`, `USE_SINGLE_COMMAND_QUEUE`, `ENABLE_DEBUG_LAYER`, `ENABLE_RECREATE_AT_GPUVA`, `ENABLE_APPLICATION_SPECIFIC_DRIVER_STATE`, `DISABLE_GPU_PLUGINS`, `FORCE_SET_APPLICATION_SPECIFIC_DRIVER_STATE`. |
 | `waitSeconds` | number | `0` | Seconds to wait inline for the job to finish before returning (default 0 = return the job immediately; poll pix_job_status or block with pix_job_wait). Range 0..3600. |
+| `adapterName` | string | `null` | Adapter to replay on, by name: an exact adapter name, a unique part of one ("Arc B580") or a vendor ("intel", "amd", "nvidia"). Exclusive with adapterId. A capture taken on another vendor's GPU usually also needs the IGNORE_INCOMPATIBILITIES flag. |
 
 Output: `jobId`, `kind`, `description`, `status`, `progress`, `createdAt`, `startedAt`, `finishedAt`, `elapsedSeconds`, `messages`, `error`, `resultRef`, `cancellationRequested`, `nextCalls`, `resultState`, `resultError`, `origin`, `partialResultRef` | or | `deferred`, `resultRef`, `totalBytes`, `nextCalls` | or | `code`, `message`, `hresult`, `retryable`, `nextCalls`
 
@@ -2156,6 +2157,7 @@ Errors carry `code`, `message`, `retryable` and executable `nextCalls`.
 |---|---|
 | `ambiguous_marker` | no |
 | `analysis_active` | yes |
+| `analysis_incompatible` | no |
 | `analysis_required` | no |
 | `analysis_settings_conflict` | no |
 | `artifact_expired` | no |

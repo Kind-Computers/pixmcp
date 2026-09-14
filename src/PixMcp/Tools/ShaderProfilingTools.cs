@@ -97,6 +97,11 @@ public static class ShaderProfilingTools
             // A declined call does not prove the driver lacks support, so the handle keeps no marker; identical calls still share this job.
             return Unavailable("declined", ex);
         }
+        catch (Exception ex) when (vendor == "intel" && PixErrors.HResultOf(ex) == unchecked((int)0x80004005))
+        {
+            // Observed on an Arc B580 for every range of NVIDIA-captured fixtures; reported (uncached) with the static profiling route.
+            return Unavailable("failed", ex);
+        }
 
         ShaderProfileUnavailableDto Unavailable(string state, Exception ex) => new(true, "shaderProfiling", state, PixErrors.Describe(ex), PixErrors.ToDto(ex), vendor,
             CompatibilityNotes.Texts("liveShaderProfiling", GpuVendors.FromVendorName(vendor), PixDiscovery.Version),

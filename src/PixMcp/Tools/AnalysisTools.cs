@@ -14,17 +14,27 @@ public static class AnalysisTools
         PixSession session,
         JobManager jobs,
         [Description("GPU capture handle")] string handle,
-        [Description("Adapter id from pix_gpu_analysis_adapters (default: chosen by PIX).")] ulong? adapterId = null,
+        [Description("Adapter id from pix_gpu_analysis_adapters (default: chosen by PIX). Ids derive from the adapter LUID and change between boots; prefer adapterName. With flags or powerStateId but no adapter, the first enumerated adapter is used.")] ulong? adapterId = null,
         [Description("Power state id from pix_gpu_analysis_adapters (default: chosen by PIX).")] uint? powerStateId = null,
         [Description(AnalysisFlags.Description)] string[]? flags = null,
         [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
+        [Description("Adapter to replay on, by name: an exact adapter name, a unique part of one (\"Arc B580\") or a vendor (\"intel\", \"amd\", \"nvidia\"). Exclusive with adapterId. A capture taken on another vendor's GPU usually also needs the IGNORE_INCOMPATIBILITIES flag.")] string? adapterName = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
             PIX_ANALYSIS_FLAGS? requestedFlags = AnalysisFlags.Parse(flags, handle);
-            var options = new AnalysisOptions(adapterId, powerStateId, requestedFlags);
             GpuCaptureHandle h = session.Get<GpuCaptureHandle>(handle);
+            if (adapterName is not null)
+            {
+                if (adapterId.HasValue)
+                    throw PixErrors.InvalidArguments("Pass adapterId or adapterName, not both.", [new ToolCallDto("pix_gpu_analysis_adapters", new { handle }, CostHints.Query)]);
+                IReadOnlyList<(ulong Id, string Name)> adapters = (IReadOnlyList<(ulong Id, string Name)>?)h.Adapters
+                    ?? await session.Worker.Run(() => { h.EnsureConnected(null); return (IReadOnlyList<(ulong Id, string Name)>)(h.Adapters ?? new()); },
+                        cancellationToken, "pix_gpu_analysis_start adapters").ConfigureAwait(false);
+                adapterId = AdapterSelection.Resolve(adapters, adapterName, handle);
+            }
+            var options = new AnalysisOptions(adapterId, powerStateId, requestedFlags);
             bool alreadyStarted = false;
             Preparation<GpuCaptureHandle> preparation = GpuCaptureHandle.AnalysisPreparation(handle) with
             {
@@ -79,7 +89,8 @@ public static class AnalysisTools
                 catch (Exception ex) { powerStates = PixErrors.Unavailable("powerStates", ex); }
                 adapters.Add(new { id, name, vendor = GpuVendors.Name(GpuVendors.FromAdapterName(name)), powerStates });
             }
-            return new { adapters, selectedAdapter = h.SelectedAdapter, selectedPowerState = h.SelectedPowerState };
+            return new { adapters, selectedAdapter = h.SelectedAdapter, selectedPowerState = h.SelectedPowerState,
+                notes = CompatibilityNotes.Texts("analysisAdapters", GpuVendor.Unknown, PixDiscovery.Version) };
         }, cancellationToken);
 
     [McpServerTool(Name = "pix_gpu_analysis_stop", Title = "Stop GPU analysis", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false), Description("Stops analysis and disconnects from the GPU, discarding collected timing/counter data. The capture stays open. Required before pix_gpu_analysis_start can use a different adapter, power state or flags.")]

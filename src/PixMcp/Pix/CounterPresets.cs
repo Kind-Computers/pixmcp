@@ -62,12 +62,13 @@ public static class CounterPresets
             : definition.Vendors.Where(b => b.Vendor.Equals(vendorName, StringComparison.OrdinalIgnoreCase) || b.Vendor == "any").ToArray();
         string confidence = vendor == GpuVendor.Unknown ? "unverified" : blocks.Length == 0 ? "none" : blocks.Min(b => Rank(b.Confidence)) switch { 0 => "verified", 1 => "transcribed", _ => "unverified" };
         var matches = new List<PresetMatch>(); var unmatched = new List<string>(); var seen = new HashSet<uint>();
+        CounterInfo[] vendorCounters = counters.Where(c => !IsD3dCounter(c)).ToArray();
         foreach (VendorBlock block in blocks)
             foreach (string pattern in block.Patterns)
             {
                 var regex = new Regex("^" + Regex.Escape(pattern).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
                 bool any = false;
-                foreach (CounterInfo counter in counters)
+                foreach (CounterInfo counter in block.Vendor == "any" ? counters : vendorCounters)
                     if (regex.IsMatch(counter.Name) && seen.Add(counter.Id)) { matches.Add(new(counter.Id, counter.Name, pattern)); any = true; }
                 if (!any) unmatched.Add(pattern);
             }
@@ -77,4 +78,8 @@ public static class CounterPresets
     }
 
     private static int Rank(string confidence) => confidence switch { "verified" => 0, "transcribed" => 1, _ => 2 };
+
+    /// <summary>A D3D runtime counter (every group is "D3D: ..."): only vendor-neutral "any" blocks may match it, so vendor globs such as *Primitive* never pick up pipeline statistics.</summary>
+    private static bool IsD3dCounter(CounterInfo counter)
+        => counter.Groups.Length > 0 && counter.Groups.All(g => g.StartsWith("D3D:", StringComparison.Ordinal));
 }

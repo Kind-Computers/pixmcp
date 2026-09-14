@@ -38,6 +38,7 @@ public static class PixErrors
         public const string AnalysisRequired = "analysis_required";
         public const string AnalysisActive = "analysis_active";
         public const string AnalysisSettingsConflict = "analysis_settings_conflict";
+        public const string AnalysisIncompatible = "analysis_incompatible";
         public const string PreparationFailed = "preparation_failed";
         public const string PreparationUnavailable = "preparation_unavailable";
         public const string DeveloperModeRequired = "developer_mode_required";
@@ -231,6 +232,8 @@ public static class PixErrors
 
     public const int E_PIX_DEVELOPER_MODE_NOT_ENABLED = unchecked((int)0x8ABC0000);
     public const int E_PIX_FEATURE_REQUIRES_DEVELOPER_MODE = unchecked((int)0x8ABC0001);
+    /// <summary>PIX declined to start analysis on the chosen adapter; observed for an NVIDIA capture on an Intel Arc without IGNORE_INCOMPATIBILITIES.</summary>
+    public const int E_PIX_ANALYSIS_INCOMPATIBLE = unchecked((int)0x8ABC006B);
     public const int E_NOT_VALID_STATE = unchecked((int)0x8007139F);
     /// <summary>E_ABORT: PIX reports an operation interrupted by its cancellation token this way.</summary>
     public const int E_ABORT = unchecked((int)0x80004004);
