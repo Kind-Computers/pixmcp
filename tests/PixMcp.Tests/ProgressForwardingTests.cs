@@ -30,6 +30,29 @@ public sealed class ProgressForwardingTests
     }
 
     [Fact]
+    public async Task CancellationProgressAllowsAnotherThreadToReadJobStatus()
+    {
+        var job = new Job("job-cancel", "test", "Cancel replay");
+        job.Begin();
+        Task<JobDto>? snapshot = null;
+        bool readableDuringNotification = false;
+        job.Progressed += changed =>
+        {
+            snapshot = Task.Factory.StartNew(changed.ToDto, CancellationToken.None,
+                TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            readableDuringNotification = snapshot.Wait(TimeSpan.FromSeconds(5));
+        };
+
+        job.RequestCancellation();
+
+        Assert.NotNull(snapshot);
+        await snapshot.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(readableDuringNotification, "Progress callbacks must not hold the job lock while another progress reporter reads its status.");
+        Assert.True(job.CancellationRequested);
+        Assert.Equal("Cancellation requested.", job.LastMessage);
+    }
+
+    [Fact]
     public async Task WaitingOnAJobForwardsProgressOnlyInsideAProgressScope()
     {
         var job = new Job("job-1", "test", "Collect timing");

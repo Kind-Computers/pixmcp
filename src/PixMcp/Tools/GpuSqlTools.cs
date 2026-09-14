@@ -466,30 +466,48 @@ internal static class GpuSqlSnapshot
             {
                 job.ThrowIfCancellationRequested();
                 if (!Tools.MatchesKind(e, "work")) continue;
-                EventResourcesDto page;
-                try { page = ResourceTools.QueryEventResources(h, new EventRef(h.Id, queue.Index, e.Index), null, 0, 1, 0, Paging.MaxLimit); }
+                var eventRef = new EventRef(h.Id, queue.Index, e.Index);
+                try
+                {
+                    uses.AddRange(ReadEventResourceUses(eventRef,
+                        offset => ResourceTools.QueryEventResources(h, eventRef, null, 0, 1, offset, Paging.MaxLimit), job.Cancellation.Token));
+                }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
                     job.AddMessage($"Resource views of queue {queue.Index} event {e.Index} are unavailable: {PixErrors.Describe(ex)}");
                     continue;
                 }
-                foreach (ResourceGroupDto group in page.Resources)
-                {
-                    var resource = group.Resource as ResourceDetailsDto;
-                    foreach (object view in group.Views) Add(queue.Index, e.Index, view, resource?.ApiObjectId, resource?.Name);
-                }
-                foreach (object view in page.OtherViews) Add(queue.Index, e.Index, view, null, null);
             }
         return GpuSqlPopulate.ResourceUses(uses);
+    }
 
-        void Add(int queueIndex, uint eventIndex, object view, string? apiObjectId, string? name)
+    /// <summary>Detaches every page of an event's resource views; the caller supplies the worker-bound page reader.</summary>
+    internal static IReadOnlyList<GpuSqlResourceUse> ReadEventResourceUses(EventRef eventRef, Func<int, EventResourcesDto> readPage, CancellationToken cancellationToken)
+    {
+        var uses = new List<GpuSqlResourceUse>();
+        int? offset = 0;
+        while (offset is int current)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            EventResourcesDto page = readPage(current);
+            foreach (ResourceGroupDto group in page.Resources)
+            {
+                var resource = group.Resource as ResourceDetailsDto;
+                foreach (object view in group.Views) Add(view, resource?.ApiObjectId, resource?.Name);
+            }
+            foreach (object view in page.OtherViews) Add(view, null, null);
+            offset = page.NextViewOffset;
+        }
+        return uses;
+
+        void Add(object view, string? apiObjectId, string? name)
         {
             JsonElement json = JsonSerializer.SerializeToElement(view, Json.Options);
             if (json.ValueKind != JsonValueKind.Object || !json.TryGetProperty("index", out JsonElement index) || index.ValueKind != JsonValueKind.Number
                 || !index.TryGetUInt32(out uint viewIndex)) return;
             string? type = json.TryGetProperty("type", out JsonElement t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
-            uses.Add(new(queueIndex, eventIndex, viewIndex, apiObjectId, name, type));
+            uses.Add(new(eventRef.QueueIndex, eventRef.EventIndex, viewIndex, apiObjectId, name, type));
         }
     }
 

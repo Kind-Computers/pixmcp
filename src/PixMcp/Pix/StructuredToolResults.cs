@@ -648,7 +648,10 @@ internal static class StructuredToolResults
                 if (!double.IsFinite(number) || (min.HasValue && number < min.Value) || (max.HasValue && number > max.Value))
                     throw new PixToolException(PixErrors.Codes.InvalidArguments, $"{name} is outside its advertised bounds.");
             }
-            if (value.ValueKind == JsonValueKind.Object)
+            // SQL bindings are caller-named scalars, not nested tool parameters. Their values are
+            // validated by the SQL binder; names such as limit and kind have no tool-level meaning.
+            bool sqlParameters = name == "params" && tool is "pix_gpu_sql" or "pix_gpu_sql_export" or "pix_timing_sql";
+            if (value.ValueKind == JsonValueKind.Object && !sqlParameters)
                 ValidateArguments(tool, value.EnumerateObject().ToDictionary(p => p.Name, p => p.Value));
         }
     }

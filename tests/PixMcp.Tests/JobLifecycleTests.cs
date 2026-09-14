@@ -80,6 +80,47 @@ public sealed class JobLifecycleTests
     }
 
     [Fact]
+    public async Task ProfilingCacheRecomputesAfterItsJobIsPruned()
+    {
+        using var fixture = new Fixture();
+        var cache = new StaticProfileJobCache();
+        int starts = 0;
+        Job Start() => fixture.Jobs.Start("profile", "Cached profile", _ => new { generation = ++starts });
+        Job first = cache.StartOrJoin("shader", Start);
+        await first.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+        Assert.Same(first, cache.StartOrJoin("shader", Start));
+
+        for (int i = 0; i <= JobManager.MaxFinishedJobs; i++)
+        {
+            Job unrelated = fixture.Jobs.Start("other", "Unrelated job", _ => new { ok = true });
+            await unrelated.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+        }
+        Assert.Equal(PixErrors.Codes.UnknownJob, Assert.Throws<PixToolException>(() => fixture.Jobs.Get(first.Id)).Detail.Code);
+
+        Job repeated = cache.StartOrJoin("shader", Start);
+        await repeated.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+        Assert.NotSame(first, repeated);
+        Assert.Equal(2, starts);
+        Assert.NotNull(repeated.ToDto().ResultRef);
+        Assert.Same(repeated, cache.StartOrJoin("shader", Start));
+    }
+
+    [Fact]
+    public async Task ProfilingCacheReplacesAResultWhoseOwnerClosed()
+    {
+        using var fixture = new Fixture();
+        var cache = new StaticProfileJobCache();
+        Job first = cache.StartOrJoin("shader", () => fixture.Jobs.Start("profile", "First capture", _ => new { ok = true }, "gpu-1"));
+        await first.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+        fixture.Session.Results.InvalidateOwner("gpu-1");
+
+        Job repeated = cache.StartOrJoin("shader", () => fixture.Jobs.Start("profile", "Reopened capture", _ => new { ok = true }, "gpu-2"));
+        await repeated.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+        Assert.NotSame(first, repeated);
+        Assert.NotNull(repeated.ToDto().ResultRef);
+    }
+
+    [Fact]
     public async Task FiftyOriginCarryingJobsStayUnderTheInlineBudget()
     {
         using var fixture = new Fixture();

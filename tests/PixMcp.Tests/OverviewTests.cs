@@ -108,6 +108,33 @@ public sealed class OverviewTests
     }
 
     [Fact]
+    public void ScopedMetadataWaitsForRequiredCachesAndUsesSnapshotEventsWhenReady()
+    {
+        OverviewInputs inputs = Inputs(timing: false);
+        var selection = new ScopeSelection(inputs.Handle, null, null, "Frame/Triangle pass", ["Frame", "Triangle pass"]);
+        OverviewInputs cold = inputs with { Queues = inputs.Queues.Select(q => q with { Events = null, ChildCounts = null }).ToArray() };
+        Assert.Null(OverviewBuilder.BuildScoped(cold, new OverviewOptions(10), selection));
+
+        OverviewInputs partial = inputs with { Queues = [inputs.Queues[0], cold.Queues[1]] };
+        Assert.Null(OverviewBuilder.BuildScoped(partial, new OverviewOptions(10), selection));
+        var root = new ScopeSelection(inputs.Handle, null, new EventRef(inputs.Handle, 0, 1), null, null);
+        CaptureOverviewDto rootOnly = Assert.IsType<CaptureOverviewDto>(OverviewBuilder.BuildScoped(partial, new OverviewOptions(10), root));
+        Assert.Equal(root.Root, rootOnly.Scope!.Root);
+        Assert.Empty(rootOnly.Queues[1].Kinds);
+
+        CaptureOverviewDto ready = Assert.IsType<CaptureOverviewDto>(OverviewBuilder.BuildScoped(inputs, new OverviewOptions(10), selection));
+        Assert.Equal(new EventRef(inputs.Handle, 0, 1), Assert.Single(ready.Scope!.MatchedRoots));
+        Assert.Equal(1, ready.Scope.MatchedRootCount);
+        ToolCallDto next = Assert.Single(ready.NextCalls);
+        Assert.Equal(selection.MarkerPathPrefix, JsonSerializer.SerializeToElement(next.Arguments).GetProperty("markerPathPrefix").GetString());
+
+        var unrestricted = new ScopeSelection(inputs.Handle, null, null, null, null);
+        Assert.NotNull(OverviewBuilder.BuildScoped(cold, new OverviewOptions(10), unrestricted));
+        Assert.Null(OverviewBuilder.BuildScoped(partial, new OverviewOptions(10, 1), unrestricted));
+        Assert.Equal(PixErrors.Codes.InvalidArguments, Assert.Throws<PixToolException>(() => OverviewBuilder.BuildScoped(inputs, new OverviewOptions(10, 1), unrestricted)).Detail.Code);
+    }
+
+    [Fact]
     public void BriefDropsExplanationsButKeepsRankedRows()
     {
         CaptureOverviewDto overview = OverviewBuilder.Build(Inputs(), new OverviewOptions(10)) with

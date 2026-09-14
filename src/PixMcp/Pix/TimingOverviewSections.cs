@@ -45,7 +45,7 @@ internal sealed partial class TimingDatabase
 {
     public const int MaxInsights = 8;
 
-    internal TimingOverviewSectionsDto OverviewSections(string handle, string rangeMode, IReadOnlyDictionary<string, TimingCapabilityDto> capabilities, TimingRangeDto range)
+    internal TimingOverviewSectionsDto OverviewSections(string handle, uint? processId, string rangeMode, IReadOnlyDictionary<string, TimingCapabilityDto> capabilities, TimingRangeDto range)
     {
         TimingSqlBindings bindings = SqlBindings(null, null, rangeMode);
         var unavailable = new List<string>();
@@ -87,7 +87,7 @@ internal sealed partial class TimingDatabase
         }
 
         List<TimingGpuQueueSummaryDto>? gpu = null;
-        if (Library(handle, "gpu_busy_per_queue", bindings, unavailable) is SqlResultDto busy)
+        if (Library(handle, "gpu_busy_per_queue", bindings, unavailable, new { pid = processId }) is SqlResultDto busy)
         {
             gpu = [];
             for (int i = 0; i < busy.RowCount; i++)
@@ -115,7 +115,7 @@ internal sealed partial class TimingDatabase
         }
 
         TimingModulesSummaryDto? modules = null;
-        if (Library(handle, "module_symbols", bindings, unavailable, maxRows: 5000) is SqlResultDto moduleRows)
+        if (Library(handle, "module_symbols", bindings, unavailable, new { pid = processId }, maxRows: 5000) is SqlResultDto moduleRows)
         {
             int[] rows = Enumerable.Range(0, moduleRows.RowCount).ToArray();
             modules = new TimingModulesSummaryDto(moduleRows.RowCount, rows.Count(i => Cell(moduleRows, i, "symbolState") as string == "resolved"),
@@ -127,22 +127,23 @@ internal sealed partial class TimingDatabase
             vram = Enumerable.Range(0, vramRows.RowCount).Select(i => new TimingVramPoolDto(Cell(vramRows, i, "adapterGroup") as string ?? "", Cell(vramRows, i, "pool") as string ?? "",
                 Double(Cell(vramRows, i, "lastBudgetMb")), Double(Cell(vramRows, i, "peakUsageMb")), Double(Cell(vramRows, i, "lastUsageMb")), Double(Cell(vramRows, i, "peakPercentOfBudget")))).ToList();
 
-        var insights = Insights(handle, rangeMode, capabilities, range, quality, gpu, frames, cores, modules, vram);
+        var insights = Insights(handle, processId, rangeMode, capabilities, range, quality, gpu, frames, cores, modules, vram);
         return new TimingOverviewSectionsDto(capture, quality, gpu, frames, cores, modules, vram, insights, unavailable);
     }
 
-    private static List<TimingInsightDto> Insights(string handle, string rangeMode, IReadOnlyDictionary<string, TimingCapabilityDto> capabilities, TimingRangeDto range,
+    private static List<TimingInsightDto> Insights(string handle, uint? processId, string rangeMode, IReadOnlyDictionary<string, TimingCapabilityDto> capabilities, TimingRangeDto range,
         TimingDataQualityDto? quality, IReadOnlyList<TimingGpuQueueSummaryDto>? gpu, TimingFramesSummaryDto? frames, TimingCoresSummaryDto? cores,
         TimingModulesSummaryDto? modules, IReadOnlyList<TimingVramPoolDto>? vram)
     {
-        ToolCallDto Sql(string query) => new("pix_timing_sql", new { handle, query, rangeMode }, CostHints.Query);
+        ToolCallDto Sql(string query, bool processScoped = false)
+            => new("pix_timing_sql", new { handle, query, rangeMode, @params = processScoped && processId.HasValue ? new { pid = processId.Value } : null }, CostHints.Query);
         var insights = new List<TimingInsightDto>();
 
         if (rangeMode == RangeModeReliable && range.Coverage is { GpuSubmissions: { } submissions } && submissions.InRange < submissions.Total)
             insights.Add(new("window_truncates_data", "warning",
                 $"rangeMode=reliable excludes {submissions.Total - submissions.InRange} of {submissions.Total} GPU submissions recorded after the stop timestamp.",
                 new Dictionary<string, object?> { ["gpuSubmissionsInRange"] = submissions.InRange, ["gpuSubmissionsTotal"] = submissions.Total, ["reliableEndNs"] = range.ReliableEndNs, ["captureEndNs"] = range.CaptureEndNs },
-                "Totals and percentages cover only part of the recording.", [new ToolCallDto("pix_timing_overview", new { handle, rangeMode = RangeModeFull }, CostHints.Query)]));
+                "Totals and percentages cover only part of the recording.", [new ToolCallDto("pix_timing_overview", new { handle, processId, rangeMode = RangeModeFull }, CostHints.Query)]));
 
         if (quality is { State: "lossy" })
             insights.Add(new("dropped_data", quality.DroppedEvents + quality.LostEtwEvents > 1000 ? "warning" : "info",
@@ -165,13 +166,13 @@ internal sealed partial class TimingDatabase
                     $"The busiest GPU queue ({busiest.Name ?? busiest.QueueId}) executed work for only {percent} % of the window.",
                     new Dictionary<string, object?> { ["busyMs"] = busiest.BusyMs, ["busyPercentOfWindow"] = percent },
                     "The GPU mostly waited for work: the frame is likely CPU-bound, paced by presentation, or the capture includes idle time.",
-                    [Sql("submit_latency_per_thread"), new ToolCallDto("pix_timing_events", new { handle, domain = "gpuSubmissions", orderBy = "duration", rangeMode }, CostHints.Query)]));
+                    [Sql("submit_latency_per_thread", processScoped: true), new ToolCallDto("pix_timing_events", new { handle, processId, domain = "gpuSubmissions", orderBy = "duration", rangeMode }, CostHints.Query)]));
             TimingGpuQueueSummaryDto? waited = gpu.Where(q => q.MaxSubmitLatencyMs >= 1).OrderByDescending(q => q.MaxSubmitLatencyMs).FirstOrDefault();
             if (waited is not null)
                 insights.Add(new("submit_latency_high", "info",
                     $"Submitted GPU work on {waited.Name ?? waited.QueueId} waited up to {waited.MaxSubmitLatencyMs} ms before the GPU started it (average {waited.AvgSubmitLatencyMs} ms).",
                     new Dictionary<string, object?> { ["maxSubmitLatencyMs"] = waited.MaxSubmitLatencyMs, ["avgSubmitLatencyMs"] = waited.AvgSubmitLatencyMs },
-                    "Long waits mean the GPU was still executing earlier work (GPU-bound) or the driver held the submission.", [Sql("submit_latency_per_thread")]));
+                    "Long waits mean the GPU was still executing earlier work (GPU-bound) or the driver held the submission.", [Sql("submit_latency_per_thread", processScoped: true)]));
         }
 
         if (capabilities.TryGetValue("gpuMarkers", out TimingCapabilityDto? markers) && markers.State != "available"
@@ -179,11 +180,11 @@ internal sealed partial class TimingDatabase
             insights.Add(new("no_gpu_markers", "info", "No GPU-side PIX events were recorded; GPU work is visible only as queue submissions and hardware ranges.",
                 new Dictionary<string, object?> { ["gpuMarkers"] = markers.State, ["gpuSubmissions"] = submitted.Rows },
                 "Per-pass GPU timing needs PIXBeginEvent on command lists or a GPU capture (pix_gpu_open).",
-                [new ToolCallDto("pix_timing_events", new { handle, domain = "gpuSubmissions", rangeMode }, CostHints.Query)]));
+                [new ToolCallDto("pix_timing_events", new { handle, processId, domain = "gpuSubmissions", rangeMode }, CostHints.Query)]));
 
         if (frames is null && capabilities.ContainsKey("cpuEvents"))
             insights.Add(new("frames_unavailable", "info", "No VSync markers were recorded, so display refresh pacing cannot be derived.",
-                new Dictionary<string, object?>(), "Use PIX CPU events or GPU submission cadence to delimit frames.", [Sql("cpu_execution_rollup")]));
+                new Dictionary<string, object?>(), "Use PIX CPU events or GPU submission cadence to delimit frames.", [Sql("cpu_execution_rollup", processScoped: true)]));
 
         if (cores is { Heterogeneous: true })
             insights.Add(new("hybrid_cores_present", "info", $"The CPU has {cores.EfficiencyClasses.Count} core efficiency classes.",
@@ -191,9 +192,9 @@ internal sealed partial class TimingDatabase
                 "Threads scheduled on efficiency cores run slower; compare where the game's threads ran.", [Sql("core_efficiency")]));
 
         if (modules is { Modules: > 0, Resolved: 0 })
-            insights.Add(new("symbols_unresolved", "info", $"None of the {modules.Modules} modules of the target process have resolved symbols.",
+            insights.Add(new("symbols_unresolved", "info", $"None of the {modules.Modules} modules of the selected process have resolved symbols.",
                 new Dictionary<string, object?> { ["modules"] = modules.Modules, ["examples"] = modules.UnresolvedExamples },
-                "CPU hotspots and call trees show addresses instead of function names until pix_timing_resolve_symbols loads matching PDBs.", [Sql("module_symbols")]));
+                "CPU hotspots and call trees show addresses instead of function names until pix_timing_resolve_symbols loads matching PDBs.", [Sql("module_symbols", processScoped: true)]));
 
         return insights.OrderBy(i => i.Severity == "warning" ? 0 : 1).Take(MaxInsights).ToList();
     }

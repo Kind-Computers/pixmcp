@@ -121,6 +121,7 @@ internal sealed class StoredJson(Stream stream, CancellationToken cancellationTo
     /// <summary>
     /// Reads an array with server-side field selection and filtering. Every element is evaluated (elements above the
     /// hard budget are counted as unevaluated); projected items fill the page under the inline budget.
+    /// Without predicates, oversized rows retain their array positions as deferred children.
     /// </summary>
     internal ResultReadDto Project(Node node, string resultRef, string pointer, int offset, int limit,
         IReadOnlyList<string>? fields, IReadOnlyList<WhereClause>? where)
@@ -129,28 +130,43 @@ internal sealed class StoredJson(Stream stream, CancellationToken cancellationTo
         if (node.Kind != JsonValueKind.Array)
             throw PixErrors.InvalidArguments($"fields and where apply to array values; '{pointer}' is {KindName(node.Kind)}.",
                 [ResultStore.ReadCall(resultRef, pointer, mode: "outline")]);
+        bool filtered = where is { Count: > 0 };
         var items = new JsonArray(); int scanned = 0, matched = 0, unevaluated = 0, used = 0; bool full = false;
         foreach (var child in Children(node))
         {
             cancellationToken.ThrowIfCancellationRequested();
             scanned++;
-            if (child.Value.Bytes > ServerOptions.Current.MaxResultBytes) { unevaluated++; continue; }
             string childPointer = pointer + "/" + child.Key;
-            JsonElement element = Element(child.Value, ServerOptions.Current.MaxResultBytes, resultRef, childPointer);
-            if (where is not null && !ResultProjection.Matches(element, where)) continue;
+            bool oversized = child.Value.Bytes > ServerOptions.Current.MaxResultBytes;
+            JsonElement element = default;
+            if (oversized)
+            {
+                unevaluated++;
+                if (filtered) continue;
+            }
+            else
+            {
+                element = Element(child.Value, ServerOptions.Current.MaxResultBytes, resultRef, childPointer);
+                if (filtered && !ResultProjection.Matches(element, where!)) continue;
+            }
             matched++;
             if (matched <= offset || full) continue;
-            JsonNode projected = fields is null ? JsonNode.Parse(element.GetRawText())! : ResultProjection.Select(element, fields);
+            JsonNode projected = oversized
+                ? DeferredChild(child.Value, resultRef, childPointer)
+                : fields is null ? JsonNode.Parse(element.GetRawText())! : ResultProjection.Select(element, fields);
             int bytes = Encoding.UTF8.GetByteCount(projected.ToJsonString());
             if (items.Count >= limit || (items.Count > 0 && used + bytes > ResultStore.TargetBytes - 4096)) { full = true; continue; }
             items.Add(projected); used += bytes;
         }
-        int total = where is null ? node.Total : matched;
+        int total = filtered ? matched : node.Total;
         int? next = (long)offset + items.Count < total ? offset + items.Count : null;
         return new(resultRef, pointer, "array", total, offset, items.Count, next, items,
             next.HasValue ? [ResultStore.ReadCall(resultRef, pointer, next.Value, limit, null, fields, where)] : [])
         { Projection = new(fields, where, scanned, matched, unevaluated) };
     }
+    private static JsonNode DeferredChild(Node node, string resultRef, string pointer)
+        => JsonSerializer.SerializeToNode(new { deferred = true, pointer,
+            kind = KindName(node.Kind), nextCalls = new[] { ResultStore.ReadCall(resultRef, pointer) } }, Json.Options)!;
     private Node Scan()
     {
         White(); long start = Position; int first = Peek(); int total = 1;
@@ -260,8 +276,7 @@ internal sealed class StoredJson(Stream stream, CancellationToken cancellationTo
                 JsonNode? item;
                 if (bytes > ResultStore.TargetBytes / 2)
                 {
-                    item = JsonSerializer.SerializeToNode(new { deferred = true, pointer = childPointer,
-                        kind = child.Value.Kind.ToString().ToLowerInvariant(), nextCalls = new[] { ResultStore.ReadCall(reference, childPointer) } }, Json.Options);
+                    item = DeferredChild(child.Value, reference, childPointer);
                     bytes = Encoding.UTF8.GetByteCount(item!.ToJsonString()) + Encoding.UTF8.GetByteCount(child.Key) + 8;
                 }
                 else item = JsonNode.Parse(Element(child.Value, ResultStore.TargetBytes / 2, reference, childPointer).GetRawText());

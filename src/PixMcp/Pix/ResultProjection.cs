@@ -19,8 +19,8 @@ public static class ResultProjection
 {
     public const int MaxFields = 32, MaxClauses = 8;
     public static readonly string[] Ops = { "eq", "ne", "gt", "ge", "lt", "le", "in", "contains", "startsWith", "exists" };
-    public const string FieldsDescription = "Only these fields of each array element are returned (names or relative pointers such as eventRef/eventIndex; max 32). Applies to array values.";
-    public const string WhereDescription = "Filters array elements: [{ field, op, value }] with op eq, ne, gt, ge, lt, le, in (value is an array), contains, startsWith or exists; clauses are ANDed (max 8). total becomes the matched count; every element is evaluated (O(n)).";
+    public const string FieldsDescription = "Only these fields of each array element are returned (names or relative pointers such as eventRef/eventIndex; max 32). Applies to array values. Without predicates, oversized rows retain their original offsets as deferred reader calls.";
+    public const string WhereDescription = "Filters array elements: [{ field, op, value }] with op eq, ne, gt, ge, lt, le, in (value is an array), contains, startsWith or exists; clauses are ANDed (max 8). Nonempty filters scan every element (O(n)); total counts evaluated matches. An empty list applies no filter.";
 
     /// <summary>Rejects malformed projections before any result is opened.</summary>
     public static void Validate(IReadOnlyList<string>? fields, IReadOnlyList<WhereClause>? where)

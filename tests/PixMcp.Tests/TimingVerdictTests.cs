@@ -174,6 +174,32 @@ public sealed class TimingVerdictTests : IDisposable
     }
 
     [Fact]
+    public void VerdictUsesTrailingReadinessWithoutCountingFutureSwitches()
+    {
+        Execute("UPDATE ContextSwitch SET Timestamp=220 WHERE Timestamp=195;");
+        using TimingDatabase db = Open();
+        TimingVerdictDto verdict = Verdict(db, "vsync", maxFrames: 2);
+        TimingFrameVerdictDto last = verdict.PerFrame.Items[1];
+        Assert.Equal((0.0, 90.0, 10.0), (last.OnCpuPercent!.Value, last.BlockedPercent!.Value, last.ReadyPercent!.Value));
+        Assert.Equal((2L, 0L), (verdict.Coverage.SwitchEvents, verdict.Coverage.ReadyLinks));
+        Assert.Null(verdict.Summary.ReadyLatency);
+    }
+
+    [Theory]
+    [InlineData(null, 20, 0)]
+    [InlineData(70L, 10, 10)]
+    [InlineData(90L, 20, 0)]
+    public void TrailingReadinessOnlySplitsTheClosingWait(long? readyAt, long blocked, long ready)
+    {
+        RecordedThreadStates states = RecordedThreadStates.Build([new(0, true), new(60, false, 6)], 80, readyAt);
+        RecordedStateTotals totals = states.Integrate(0, 100);
+        Assert.Equal((60L, blocked, ready), (totals.OnCpuNs, totals.BlockedNs, totals.ReadyNs));
+        Assert.All(states.Segments, s => Assert.True(s.End <= 80));
+        RecordedStateTotals running = RecordedThreadStates.Build([new(0, true)], 80, readyAt).Integrate(0, 100);
+        Assert.Equal((80L, 0L, 0L), (running.OnCpuNs, running.BlockedNs, running.ReadyNs));
+    }
+
+    [Fact]
     public void ThreadStatesSplitWaitsAtTheReadyEvent()
     {
         RecordedThreadStates states = RecordedThreadStates.Build(

@@ -118,7 +118,7 @@ internal sealed partial class TimingDatabase
         calls.Add(new("pix_timing_schema", new { handle }));
         if (offset + limit < new[] { processTotal, threadTotal, queueTotal, hardwareTotal }.Max())
             calls.Add(new("pix_timing_overview", new { handle, processId, offset = offset + limit, limit, rangeMode }));
-        TimingOverviewSectionsDto sections = OverviewSections(handle, rangeMode, capabilities, range);
+        TimingOverviewSectionsDto sections = OverviewSections(handle, processId, rangeMode, capabilities, range);
         // A call an insight already offers is not repeated at the top level (arguments compared with nulls omitted).
         var offered = sections.Insights.SelectMany(i => i.NextCalls).Select(c => c.Tool + Json.Serialize(c.Arguments)).ToHashSet(StringComparer.Ordinal);
         calls.RemoveAll(c => offered.Contains(c.Tool + Json.Serialize(c.Arguments)));

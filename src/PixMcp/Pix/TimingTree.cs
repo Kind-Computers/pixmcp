@@ -164,17 +164,18 @@ public static class TimingTree
 
     /// <summary>Direct children of <paramref name="parentIndex"/> (top-level events when null) in the requested order.</summary>
     public static IEnumerable<TimingTreeNode> Children(TimingTreeNode[] nodes, uint? parentIndex, string sortBy = "inclusive")
-    {
-        IEnumerable<TimingTreeNode> siblings = nodes.Where(n => n.ParentIndex == parentIndex);
-        return (NormalizeSortBy(sortBy) ?? throw new ArgumentException($"Unknown sortBy '{sortBy}'.", nameof(sortBy))) switch
+        => Sort(nodes.Where(n => n.ParentIndex == parentIndex), sortBy);
+
+    /// <summary>Orders selected nodes without restricting their parents (prefix roots can be nested).</summary>
+    internal static IEnumerable<TimingTreeNode> Sort(IEnumerable<TimingTreeNode> nodes, string sortBy)
+        => (NormalizeSortBy(sortBy) ?? throw new ArgumentException($"Unknown sortBy '{sortBy}'.", nameof(sortBy))) switch
         {
-            "self" => siblings.OrderByDescending(n => n.SelfEopNs).ThenBy(n => n.Index),
-            "childCount" => siblings.OrderByDescending(n => n.ChildCount).ThenBy(n => n.Index),
-            "index" => siblings.OrderBy(n => n.Index),
-            "topStart" => siblings.OrderBy(n => n.TopStartNs ?? n.EopStartNs ?? ulong.MaxValue).ThenBy(n => n.Index),
-            _ => siblings.OrderByDescending(n => n.InclusiveEopNs).ThenBy(n => n.Index),
+            "self" => nodes.OrderByDescending(n => n.SelfEopNs).ThenBy(n => n.Index),
+            "childCount" => nodes.OrderByDescending(n => n.ChildCount).ThenBy(n => n.Index),
+            "index" => nodes.OrderBy(n => n.Index),
+            "topStart" => nodes.OrderBy(n => n.TopStartNs ?? n.EopStartNs ?? ulong.MaxValue).ThenBy(n => n.Index),
+            _ => nodes.OrderByDescending(n => n.InclusiveEopNs).ThenBy(n => n.Index),
         };
-    }
 
     /// <summary>Sum of the inclusive time of the top-level events (equals the queue span only when nothing overlaps).</summary>
     public static ulong Total(TimingTreeNode[] nodes)

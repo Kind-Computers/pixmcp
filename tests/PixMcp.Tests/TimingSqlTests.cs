@@ -257,6 +257,35 @@ public sealed class TimingSqlTests : IDisposable
     }
 
     [Fact]
+    public void SchemaRowCountTimeoutKeepsLaterObjectsAndConnectionUsable()
+    {
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path, Pooling = false }.ToString()))
+        {
+            connection.Open();
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE VIEW BudgetSlow AS
+                    WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM numbers)
+                    SELECT n FROM numbers;
+                CREATE TABLE BudgetFast(Value INTEGER);
+                INSERT INTO BudgetFast VALUES(7);
+                """;
+            command.ExecuteNonQuery();
+        }
+        using TimingDatabase db = Open();
+        TimingSchemaDto schema = db.Schema("timing-1", new TimingSchemaOptions(NameContains: "Budget", IncludeColumns: false, IncludeRowCounts: true, IncludeQueries: false),
+            db.SqlBindings(null, null, "full"), TimingQueryLibrary.All);
+        Assert.Equal(new[] { "BudgetSlow", "BudgetFast" }, schema.Tables.Items.Select(t => t.Name));
+        TimingSchemaTableDto slow = schema.Tables.Items[0];
+        Assert.Equal("timedOut", slow.RowCountState);
+        Assert.Null(slow.Rows);
+        TimingSchemaTableDto fast = schema.Tables.Items[1];
+        Assert.Equal(("exact", 1L), (fast.RowCountState, fast.Rows!.Value));
+        SqlResultDto next = SqlQuery.Execute(db, new SqlRequest("SELECT Value FROM BudgetFast"), "pixstorage", "timing-1");
+        Assert.Equal(7L, Assert.Single(next.Rows)[0]);
+    }
+
+    [Fact]
     public void DocumentationOverlayCoversVirtualTablesFactsAndFunctions()
     {
         foreach (string module in new[] { "ContextSwitch", "CpuMemoryEvent", "FileEvents", "PixCounters", "PixCpuExecution", "PixCpuExecutionTimes", "PixCpuMarker", "PixGpuExecution" })

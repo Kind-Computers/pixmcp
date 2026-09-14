@@ -1,6 +1,7 @@
 using Microsoft.PIX.Extension;
 using Microsoft.PIX.Extension.GpuCapture;
 using Microsoft.PIX;
+using System.Collections.Concurrent;
 
 namespace PixMcp.Pix.Handles;
 
@@ -22,7 +23,8 @@ public sealed partial class GpuCaptureHandle
     internal OccupancyCache? OccupancyData { get; set; }
     internal object? HighFrequencyCatalog { get; set; }
     internal Dictionary<string, object> OptionalUnavailable { get; } = new();
-    private readonly Dictionary<string, CapabilityDto> _capabilities = new();
+    // Partial responses read capability snapshots while the worker records preparation results.
+    private readonly ConcurrentDictionary<string, CapabilityDto> _capabilities = new();
     private VendorIdentity? _captureVendor;
 
     /// <summary>

@@ -107,9 +107,9 @@ public sealed class Job
             if (_cancellationRequested) return;
             _cancellationRequested = true;
             token = _pixToken;
-            AddMessage("Cancellation requested.");
         }
         // Never hold the status lock across callbacks or a native call.
+        AddMessage("Cancellation requested.");
         try { Cancellation.Cancel(); }
         catch (ObjectDisposedException) when (IsFinished) { /* Completion/pruning won the cancellation race. */ }
         CancelNative(token);

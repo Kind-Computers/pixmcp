@@ -49,8 +49,14 @@ internal sealed partial class TimingDatabase
         // The last switches before the window seed the thread's state at its start.
         switches.AddRange(Rows(switchOut + " AND Timestamp < $from ORDER BY Timestamp DESC LIMIT 1", Out, ("$packed", packed), ("$from", from)));
         switches.AddRange(Rows(switchIn + " AND c.Timestamp < $from ORDER BY c.Timestamp DESC LIMIT 1", In, ("$packed", packed), ("$from", from)));
+        // A thread can become ready inside the window but only switch in afterward. Use that ready time to close
+        // the final wait without adding a future switch to the interval, switch count or ready-latency samples.
+        long? trailingReadyTimestamp = readyLinks
+            ? Rows(switchIn + " AND c.Timestamp >= $to ORDER BY c.Timestamp LIMIT 1", In, ("$packed", packed), ("$to", to))
+                .Select(s => s.ReadyTimestamp).FirstOrDefault()
+            : null;
         long closeAt = threadEnd is long endOfThread && endOfThread > from ? Math.Min(to, endOfThread) : to;
-        return RecordedThreadStates.Build(switches, closeAt);
+        return RecordedThreadStates.Build(switches, closeAt, trailingReadyTimestamp);
     }
 
     private static int LowerBound(long[] sorted, long value)

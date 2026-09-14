@@ -168,6 +168,44 @@ public sealed class TimingQueryLibraryTests : IDisposable
         OutputSchemaTests.AssertMatches(JsonSerializer.SerializeToElement(overview, Json.Options), StructuredToolResults.SchemaFor("pix_timing_overview"));
     }
 
+    [Fact]
+    public void OverviewSectionsAndFollowupsPreserveTheSelectedProcess()
+    {
+        _fixture.Execute("""
+            INSERT INTO Strings VALUES(100, 'secondary.exe'), (101, 'Secondary Queue');
+            INSERT INTO Processes VALUES(2, 999, 100, 0, 10000);
+            INSERT INTO Threads(Id, ProcThreadId, ProcessRowId, SampleCount) VALUES(20, (999 << 32) | 9, 2, 0);
+            INSERT INTO ApiCommandQueue(Id, TypeId, ProcessId, NameId) VALUES(2, 5, 2, 101);
+            INSERT INTO ApiQueueExecution VALUES(5, 2, 20, 150, 200, 300, 0), (6, 2, 20, 6000, 6100, 6200, 0);
+            INSERT INTO Modules(Id, PEPathId) VALUES(3, 100);
+            INSERT INTO Images(Id, OSProcessId, ModuleId) VALUES(3, 999, 3);
+            """);
+        using TimingDatabase db = Open();
+        TimingOverviewDto overview = db.Overview("timing-1", 999, 0, 5, "reliable");
+        Assert.Equal("2", Assert.Single(overview.Queues.Items).QueueId);
+        TimingOverviewSectionsDto sections = overview.Sections!;
+        TimingGpuQueueSummaryDto queue = Assert.Single(sections.Gpu!);
+        Assert.Equal(("2", "Secondary Queue", 1L, 100L), (queue.QueueId, queue.Name, queue.Submissions, queue.BusyNs));
+        Assert.Equal((1L, 0L), (sections.Modules!.Modules, sections.Modules.Resolved));
+        Assert.Equal("secondary.exe", Assert.Single(sections.Modules.UnresolvedExamples));
+
+        ToolCallDto[] calls = sections.Insights.SelectMany(i => i.NextCalls).ToArray();
+        foreach (ToolCallDto call in calls.Where(c => c.Tool is "pix_timing_overview" or "pix_timing_events"))
+            Assert.Equal(999u, JsonSerializer.SerializeToElement(call.Arguments).GetProperty("processId").GetUInt32());
+        foreach (string query in new[] { "submit_latency_per_thread", "module_symbols" })
+        {
+            ToolCallDto call = Assert.Single(calls, c => c.Tool == "pix_timing_sql" && JsonSerializer.SerializeToElement(c.Arguments).GetProperty("query").GetString() == query);
+            Assert.Equal(999u, JsonSerializer.SerializeToElement(call.Arguments).GetProperty("params").GetProperty("pid").GetUInt32());
+        }
+        ToolCallDto captureWide = Assert.Single(calls, c => c.Tool == "pix_timing_sql" && JsonSerializer.SerializeToElement(c.Arguments).GetProperty("query").GetString() == "core_efficiency");
+        Assert.Equal(JsonValueKind.Null, JsonSerializer.SerializeToElement(captureWide.Arguments).GetProperty("params").ValueKind);
+
+        TimingOverviewDto absent = db.Overview("timing-1", 12345, 0, 5);
+        Assert.Empty(absent.Queues.Items);
+        Assert.Empty(absent.Sections!.Gpu!);
+        Assert.Equal(0L, absent.Sections.Modules!.Modules);
+    }
+
     [SkippableFact]
     public void NativeCaptureRunsEveryLibraryQuery()
     {

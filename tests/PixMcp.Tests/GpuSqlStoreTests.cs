@@ -173,6 +173,42 @@ public sealed class GpuSqlStoreTests : IDisposable
     }
 
     [Fact]
+    public void ResourceUsePopulationReadsEveryPageAndKeepsViewIdentity()
+    {
+        var eventRef = new EventRef("gpu-1", 0, 2);
+        var resource = new ResourceDetailsDto(new ResourceRef("gpu-1", "0x123"), "0x123", "Texture", "COMMITTED", "LEGACY", null, null, null, null, null, null, null);
+        var evt = new EventDto(0, 2, 1, 1, "DrawInstanced", null, 0, null);
+        object[] firstViews = Enumerable.Range(0, 1000).Select(i => (object)new { index = i, type = "SHADER_RESOURCE_VIEW" }).ToArray();
+        var first = new EventResourcesDto(eventRef, [], evt, 1001, 0, 1000, 1000, [new ResourceGroupDto(resource, firstViews)], []);
+        var last = new EventResourcesDto(eventRef, [], evt, 1001, 1000, 1, null, [], [new { index = 1000, type = "SAMPLER" }]);
+        var offsets = new List<int>();
+        IReadOnlyList<GpuSqlResourceUse> uses = GpuSqlSnapshot.ReadEventResourceUses(eventRef, offset =>
+        {
+            offsets.Add(offset);
+            return offset == 0 ? first : last;
+        }, default);
+        Assert.Equal(new[] { 0, 1000 }, offsets);
+        Assert.Equal(1001, uses.Count);
+        Assert.All(uses.Take(1000), u => Assert.Equal((0, 2u, "0x123", "Texture", "SHADER_RESOURCE_VIEW"),
+            (u.QueueIndex, u.EventIndex, u.ApiObjectId, u.ResourceName, u.ViewType)));
+        Assert.Equal((1000u, (string?)null, "SAMPLER"), (uses[^1].ViewIndex, uses[^1].ApiObjectId, uses[^1].ViewType));
+
+        using GpuSqlStore store = Store();
+        store.Write("resourceUses", GpuSqlPopulate.ResourceUses(uses), 0, null, default);
+        Assert.Equal(new object?[] { 1001L, 0L, 1000L }, Query(store, "SELECT COUNT(*), MIN(view_index), MAX(view_index) FROM resource_uses").Rows[0]);
+
+        using var cancellation = new CancellationTokenSource();
+        int reads = 0;
+        Assert.Throws<OperationCanceledException>(() => GpuSqlSnapshot.ReadEventResourceUses(eventRef, _ =>
+        {
+            reads++;
+            cancellation.Cancel();
+            return first;
+        }, cancellation.Token));
+        Assert.Equal(1, reads);
+    }
+
+    [Fact]
     public void FamiliesAndBuildersFollowTheSchema()
     {
         Assert.Equal(new[] { "core", "timing", "shaders", "resources" }, GpuSqlTools.Families(["all"]));

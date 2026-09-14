@@ -67,6 +67,35 @@ public sealed class PartialResultTests
     }
 
     [Fact]
+    public async Task MissingCachedMetadataReturnsWholePendingWithoutQueuingBehindPreparation()
+    {
+        using var fixture = new Fixture();
+        using var gate = new Gate();
+        FakeHandle handle = await fixture.Worker.Run(() => fixture.Session.Register(new FakeHandle { PrepareGate = gate }));
+        Job job = ToolHelpers.StartPreparation(fixture.Session, fixture.Jobs, handle.Id, Preparation(handle.Id));
+        await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        try
+        {
+            bool? metadataOnWorker = null;
+            Task<string> call = ToolHelpers.RunWhenReadyOrPartial(fixture.Session, fixture.Jobs, "pix_test", handle.Id, Preparation(handle.Id),
+                (_, onWorker) => { metadataOnWorker = onWorker; return null; },
+                _ => throw new InvalidOperationException("Preparation is not finished."),
+                (metadata, _) => metadata, 0, CancellationToken.None);
+            JsonElement pending = JsonSerializer.Deserialize<JsonElement>(await call.WaitAsync(TimeSpan.FromSeconds(1)));
+            Assert.True(pending.GetProperty("pending").GetBoolean());
+            Assert.Equal(job.Id, pending.GetProperty("jobId").GetString());
+            Assert.Equal(false, metadataOnWorker);
+            Assert.Equal(0, fixture.Worker.PendingCount);
+            Assert.Single(fixture.Jobs.All);
+        }
+        finally
+        {
+            gate.Release.Set();
+            await job.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task WithoutAMergeTheWholeResponseIsPending()
     {
         using var fixture = new Fixture();

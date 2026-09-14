@@ -1040,7 +1040,7 @@ Output: `handle`, `path`, `fileInfo`, `application`, `queues`, `totalEvents`, `v
 
 **GPU capture overview** · read-only · cost `replay`
 
-Replays the capture on the local GPU if analysis is not started. Start a GPU investigation here: capture facts (event total, adapter vendor, frames delimited by Present calls), per-queue event kinds and replay totals (busy, span, idle), ranked top passes (inclusive and self time, semantics, child overflow, work counts) and top work events (draw, dispatch, executeIndirect with EOP and execution time and captured call text), an EOP histogram of work events, per-frame busy time with percentiles on multi-frame captures, and targeted next calls. Queues, kinds and frames answer immediately while the timing replay runs (timing.pending).
+Replays the capture on the local GPU if analysis is not started. Start a GPU investigation here: capture facts (event total, adapter vendor, frames delimited by Present calls), per-queue event kinds and replay totals (busy, span, idle), ranked top passes (inclusive and self time, semantics, child overflow, work counts) and top work events (draw, dispatch, executeIndirect with EOP and execution time and captured call text), an EOP histogram of work events, per-frame busy time with percentiles on multi-frame captures, and targeted next calls. Queues, kinds and frames answer immediately while the timing replay runs (timing.pending). A scope or frame selection whose event caches are not ready returns the existing pending job.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -1714,8 +1714,8 @@ Reads a bounded window from an immutable result snapshot without using the PIX w
 | `offset` | integer | `0` | Zero-based item/property/character offset. Range 0... |
 | `limit` | integer | `25` | Maximum items/properties/characters (default 25, maximum 1000). Range 1..1000. |
 | `mode` | string | `"values"` | values (default) returns contents; outline returns each child's kind, count, bytes and key sample without contents. One of `values`, `outline`. |
-| `fields` | string[] | `null` | Only these fields of each array element are returned (names or relative pointers such as eventRef/eventIndex; max 32). Applies to array values. |
-| `where` | WhereClause[] | `null` | Filters array elements: [{ field, op, value }] with op eq, ne, gt, ge, lt, le, in (value is an array), contains, startsWith or exists; clauses are ANDed (max 8). total becomes the matched count; every element is evaluated (O(n)). |
+| `fields` | string[] | `null` | Only these fields of each array element are returned (names or relative pointers such as eventRef/eventIndex; max 32). Applies to array values. Without predicates, oversized rows retain their original offsets as deferred reader calls. |
+| `where` | WhereClause[] | `null` | Filters array elements: [{ field, op, value }] with op eq, ne, gt, ge, lt, le, in (value is an array), contains, startsWith or exists; clauses are ANDed (max 8). Nonempty filters scan every element (O(n)); total counts evaluated matches. An empty list applies no filter. |
 
 Output: `resultRef`, `pointer`, `kind`, `total`, `offset`, `count`, `nextOffset`, `value`, `nextCalls`, `projection` | or | `resultRef`, `pointer`, `kind`, `total`, `bytes`, `offset`, `count`, `nextOffset`, `entries`, `nextCalls` | or | `deferred`, `resultRef`, `totalBytes`, `nextCalls` | or | `code`, `message`, `hresult`, `retryable`, `nextCalls`
 

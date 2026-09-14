@@ -213,5 +213,45 @@ public sealed class TimingTreeTests
         Assert.Contains("eopStart", Json.Serialize(call.Arguments));
     }
 
+    [Fact]
+    public void PrefixRootsIncludeNestedRepeatedMarkersAndSortThemAcrossParents()
+    {
+        SyntheticQueue queue = new SyntheticGpuCapture().Queue()
+            .Marker("Frame", frame => frame
+                .Marker("Pass", pass => pass.Draw("DrawInstanced(3)", 10))
+                .Marker("Other", other => other.Dispatch("Dispatch(1,1,1)", 999))
+                .Marker("Pass", pass => pass.Draw("DrawInstanced(6)", 30)))
+            .Marker("Frame", frame => frame.Marker("Pass", pass => pass.Draw("DrawInstanced(9)", 20)));
+        EventRecord[] events = queue.Events;
+        TimingTreeResult tree = TimingTree.Build(events, queue.Rows);
+        var selection = new ScopeSelection("gpu-1", 0, null, "Frame/Pass", ["Frame", "Pass"]);
+        uint[] roots = selection.MatchedRoots(0, events);
+        Assert.Equal(new uint[] { 1, 5, 8 }, roots);
+
+        TimingTreeDto dto = CountersTools.BuildTimingTree("gpu-1", 0, tree, null, 0, 25, 2, 100, 0, 0, "inclusive", Provenance,
+            roots, selection.Describe(1, _ => events));
+        Assert.Equal(3, dto.ChildCount);
+        Assert.Equal(new uint[] { 5, 8, 1 }, dto.Children.Select(c => c.Index));
+        Assert.Equal(new uint[] { 6, 9, 2 }, dto.Children.Select(c => Assert.Single(c.Children).Index));
+
+        TimingTreeDto filtered = CountersTools.BuildTimingTree("gpu-1", 0, tree, null, 0, 25, 1, 100, 15, 0, "index", Provenance,
+            roots, selection.Describe(1, _ => events));
+        Assert.Equal(new uint[] { 5, 8 }, filtered.Children.Select(c => c.Index));
+
+        var scoped = new ScopeSelection("gpu-1", 0, new("gpu-1", 0, 0), "Frame/Pass", ["Frame", "Pass"]);
+        TimingTreeDto firstPage = CountersTools.BuildTimingTree("gpu-1", 0, tree, scoped.Root, 0, 1, 2, 2, 0, 0, "inclusive", Provenance,
+            scoped.MatchedRoots(0, events), scoped.Describe(1, _ => events));
+        Assert.Equal(5u, Assert.Single(firstPage.Children).Index);
+        Assert.Equal(2, firstPage.ChildCount);
+        Assert.Equal(1, firstPage.NextOffset);
+        using var continuation = System.Text.Json.JsonDocument.Parse(Json.Serialize(Assert.Single(firstPage.NextCalls).Arguments));
+        Assert.Equal("Frame/Pass", continuation.RootElement.GetProperty("markerPathPrefix").GetString());
+        Assert.Equal(0u, continuation.RootElement.GetProperty("scope").GetProperty("eventIndex").GetUInt32());
+        TimingTreeDto secondPage = CountersTools.BuildTimingTree("gpu-1", 0, tree, scoped.Root, firstPage.NextOffset!.Value, 1, 2, 2, 0, 0, "inclusive", Provenance,
+            scoped.MatchedRoots(0, events), scoped.Describe(1, _ => events));
+        Assert.Equal(1u, Assert.Single(secondPage.Children).Index);
+        Assert.Null(secondPage.NextOffset);
+    }
+
     private static EventTimingRow Row(EventRecord[] events, uint index, ulong eop) => new(0, index, index, events[index].Name, events[index].ApiCallData, 0, eop, 0, eop);
 }

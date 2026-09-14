@@ -8,6 +8,21 @@ deliberately; every break is listed under Changed or Removed so clients can migr
 The version is 2.0.0 from the Phase 0 (contract and correctness) commit on; later roadmap phases
 add to this section until the release is tagged.
 
+### Fixed
+
+- Cancellation progress notifications no longer run under the job lock, avoiding a
+  deadlock with concurrent progress readers. Static shader profiles recompute after
+  their retained result expires or is pruned.
+- Scoped cold overviews use cached event snapshots and return the existing pending job
+  until required metadata is ready. Timing trees retain nested prefix roots and exact
+  scope continuations; comparisons retain explicitly selected leaf and work events.
+- Fields-only result reads preserve oversized rows through deferred reader calls and
+  advance through the original array. SQL parameter names no longer collide with tool
+  option validation, and GPU SQL includes resource views beyond the first page.
+- Timing overviews consistently apply the requested process to GPU, module, and insight
+  sections. Thread-state windows include readiness before a later switch-in without
+  counting future switches. Schema row-count timeouts remain local to each table.
+
 ### Added
 
 - `DurationDto` (`ns`, `ms`, `percentOfQueueSpan`, `percentOfQueueSum`, `percentOfParent`, `rank`)

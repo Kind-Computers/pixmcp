@@ -308,28 +308,38 @@ public static partial class InvestigationTools
         foreach (RawQueue q in raw.Queues)
         {
             int queueIndex = q.Queue.Index;
-            bool Keep(uint i) => side.Selection.Contains(queueIndex, q.Events, i) && (side.Frame is not int f || raw.Frames.Contains(f, queueIndex, i))
-                && !(side.Root is EventRef root && root.QueueIndex == queueIndex && root.EventIndex == i);
-            string[]? rootPath = side.Root is EventRef r && r.QueueIndex == queueIndex && r.EventIndex < q.Events.Length
-                ? [.. EventNavigation.MarkerPath(q.Events, r.EventIndex), q.Events[r.EventIndex].Name] : null;
-            ComparisonEvent[] events = q.All.Where(e => Keep(e.EventRef.EventIndex))
-                .Select(e => rootPath is not null && e.MarkerPath.Length >= rootPath.Length && e.MarkerPath.Take(rootPath.Length).SequenceEqual(rootPath)
-                    ? e with { MarkerPath = e.MarkerPath[rootPath.Length..] } : e)
-                .ToArray();
-            if (events.Length == 0 && !side.Selection.IsUnrestricted) continue;
-            queues.Add(new ComparisonQueue(queueIndex, q.Queue.Name, Json.EnumName(q.Queue.Type), events) { BusyNs = Busy(q, Keep) });
+            ComparisonQueue? selected = FilterComparisonQueue(new ComparisonQueue(queueIndex, q.Queue.Name, Json.EnumName(q.Queue.Type), q.All),
+                q.Events, q.ChildCounts, q.Rows, side.Selection, i => side.Frame is not int f || raw.Frames.Contains(f, queueIndex, i));
+            if (selected is not null) queues.Add(selected);
         }
         return new ComparisonSnapshot(raw.Handle, queues.ToArray(), raw.Provenance, raw.Coverage) { HlslByHash = raw.Hlsl };
     }
 
-    private static ulong? Busy(RawQueue q, Func<uint, bool> keep)
+    /// <summary>Filters one managed queue snapshot, preserving scoped work and leaf events while omitting the enclosing marker container.</summary>
+    internal static ComparisonQueue? FilterComparisonQueue(ComparisonQueue queue, EventRecord[] records, int[] childCounts, EventTimingRow[] rows,
+        ScopeSelection selection, Func<uint, bool>? inFrame = null)
     {
-        if (q.Rows.Length == 0) return null;
+        EventRef? root = selection.Root is { } r && r.QueueIndex == queue.Index && r.EventIndex < records.Length ? r : null;
+        bool container = root is not null && childCounts[root.EventIndex] > 0 && Tools.IsMarker(records[root.EventIndex], true);
+        bool Keep(uint i) => selection.Contains(queue.Index, records, i) && (inFrame?.Invoke(i) ?? true) && !(container && i == root!.EventIndex);
+        string[]? rootPath = root is null ? null : [.. EventNavigation.MarkerPath(records, root.EventIndex), records[root.EventIndex].Name];
+        ComparisonEvent[] events = queue.Events.Where(e => Keep(e.EventRef.EventIndex))
+            .Select(e => e.EventRef == root ? e with { MarkerPath = [] }
+                : rootPath is not null && e.MarkerPath.Length >= rootPath.Length && e.MarkerPath.Take(rootPath.Length).SequenceEqual(rootPath)
+                    ? e with { MarkerPath = e.MarkerPath[rootPath.Length..] } : e)
+            .ToArray();
+        if (events.Length == 0 && !selection.IsUnrestricted) return null;
+        return queue with { Events = events, BusyNs = Busy(records, childCounts, rows, Keep) };
+    }
+
+    private static ulong? Busy(EventRecord[] events, int[] childCounts, EventTimingRow[] rows, Func<uint, bool> keep)
+    {
+        if (rows.Length == 0) return null;
         var windows = new List<(ulong Start, ulong End)>();
-        foreach (EventTimingRow row in q.Rows)
+        foreach (EventTimingRow row in rows)
         {
-            if (row.EopDuration == GpuCaptureHandle.TimingNone || row.EopStart == GpuCaptureHandle.TimingNone || row.Index >= q.Events.Length
-                || q.ChildCounts[row.Index] > 0 || !keep(row.Index)) continue;
+            if (row.EopDuration == GpuCaptureHandle.TimingNone || row.EopStart == GpuCaptureHandle.TimingNone || row.Index >= events.Length
+                || childCounts[row.Index] > 0 || !keep(row.Index)) continue;
             ulong end = row.EopStart + row.EopDuration;
             ulong start = row.TopStart != GpuCaptureHandle.TimingNone && row.TopStart <= end ? Math.Min(row.TopStart, row.EopStart) : row.EopStart;
             windows.Add((start, end));

@@ -313,7 +313,7 @@ internal sealed class StaticProfileJobCache(int capacity = 8)
                 if (node.Value.Key != key) continue;
                 Job existing = node.Value.Job;
                 _entries.Remove(node);
-                if (!existing.IsFinished || existing.ResultState == "available")
+                if (!existing.IsFinished || existing.ToDto().ResultRef is not null)
                 {
                     _entries.AddFirst(node);
                     return existing;

@@ -32,7 +32,8 @@ internal sealed class RecordedThreadStates
 
     /// <param name="switches">Switches in any order; a switch-out sorts before a switch-in at the same timestamp.</param>
     /// <param name="closeAt">Where the state after the last switch ends: the analysis end, or the thread's end when earlier.</param>
-    public static RecordedThreadStates Build(IEnumerable<RecordedSwitch> switches, long closeAt)
+    /// <param name="trailingReadyTimestamp">Ready time linked by the next switch-in beyond the window, used only to split the final wait.</param>
+    public static RecordedThreadStates Build(IEnumerable<RecordedSwitch> switches, long closeAt, long? trailingReadyTimestamp = null)
     {
         var segments = new List<RecordedStateSegment>();
         bool? running = null;
@@ -57,7 +58,7 @@ internal sealed class RecordedThreadStates
             }
         }
         if (running == true && closeAt > since) segments.Add(new(since, closeAt, RecordedThreadState.OnCpu, null));
-        else if (running == false) AddWait(segments, since, closeAt, reason, null);
+        else if (running == false) AddWait(segments, since, closeAt, reason, trailingReadyTimestamp);
         return new RecordedThreadStates(segments);
     }
 

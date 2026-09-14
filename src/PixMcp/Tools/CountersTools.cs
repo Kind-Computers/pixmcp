@@ -369,10 +369,10 @@ public static partial class CountersTools
         bool Keep(TimingTreeNode c) => c.InclusiveEopNs >= minInclusiveNs && c.SelfEopNs >= minSelfNs;
         TimingTreeNode[] Siblings(uint? parent) => TimingTree.Children(nodes, parent, sortBy).Where(Keep).ToArray();
         string? prefix = selection?.MarkerPathPrefix;
-        ToolCallDto Next(uint? parent, int next) => new("pix_gpu_timing_tree", new
+        ToolCallDto Next(uint? parent, int next, bool selectionPage = false) => new("pix_gpu_timing_tree", new
         {
             handle, queueIndex, scope = parent.HasValue ? new EventRef(handle, queueIndex, parent.Value) : null,
-            markerPathPrefix = parent.HasValue ? null : prefix,
+            markerPathPrefix = selectionPage ? prefix : null,
             offset = next, limit = take, depth = levels, maxNodes = initialBudget, minInclusiveNs, minSelfNs, sortBy,
         });
         TimingBranchDto Branch(TimingTreeNode n, int remainingLevels, int rank, ulong? parentInclusive)
@@ -399,8 +399,7 @@ public static partial class CountersTools
         }
         ulong? rootInclusive = rootIndex.HasValue ? nodes[rootIndex.Value].InclusiveEopNs : null;
         TimingTreeNode[] roots = firstLevel is null ? Siblings(rootIndex)
-            : TimingTree.Children(firstLevel.Where(i => i < nodes.Length).Select(i => nodes[i]).ToArray(), null, sortBy)
-                .Concat(TimingTree.Children(firstLevel.Where(i => i < nodes.Length).Select(i => nodes[i]).Where(n => n.ParentIndex is not null).ToArray(), null, sortBy))
+            : TimingTree.Sort(firstLevel.Where(i => i < nodes.Length).Select(i => nodes[i]), sortBy)
                 .Where(Keep).ToArray();
         var page = new List<TimingBranchDto>();
         foreach (TimingTreeNode child in roots.Skip(start).Take(take))
@@ -411,7 +410,7 @@ public static partial class CountersTools
         int? nextOffset = start + page.Count < roots.Length ? start + page.Count : null;
         return new(handle, queueIndex, scope, sortBy, totals, Metrics.Denominators, totals.TimedEvents, totals.UntimedEvents, tree.Repairs,
             start, roots.Length, page, nextOffset, nextOffset.HasValue, initialBudget - budget, budget == 0, provenance,
-            nextOffset.HasValue ? [Next(rootIndex, nextOffset.Value)] : []) { Selection = selection };
+            nextOffset.HasValue ? [Next(rootIndex, nextOffset.Value, selectionPage: true)] : []) { Selection = selection };
     }
 
     // ---- GPU hardware counters ----

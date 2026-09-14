@@ -27,6 +27,19 @@ internal static class OverviewBuilder
     public static bool IsPass(TimingTreeNode node, EventRecord record, bool hasChildren)
         => hasChildren && ToolKinds.Classify(record, hasChildren) == "marker" && node.IsTimed;
 
+    /// <summary>Resolves a selection against this snapshot only; null means required queue metadata is still pending.</summary>
+    public static CaptureOverviewDto? BuildScoped(OverviewInputs inputs, OverviewOptions options, ScopeSelection selection)
+    {
+        var events = inputs.Queues.ToDictionary(q => q.QueueIndex, q => q.Events);
+        if ((!selection.IsUnrestricted && selection.Queues(inputs.Queues.Count).Any(q => events[q] is null))
+            || (options.FrameIndex.HasValue && events.Values.Any(e => e is null))) return null;
+        return Build(inputs with
+        {
+            InScope = (q, i) => selection.Contains(q, events[q] ?? [], i),
+            Scope = selection.IsUnrestricted ? null : selection.Describe(inputs.Queues.Count, q => events[q]!),
+        }, options);
+    }
+
     public static CaptureOverviewDto Build(OverviewInputs inputs, OverviewOptions options)
     {
         List<OverviewQueueInput> cached = inputs.Queues.Where(q => q.Events is not null).ToList();

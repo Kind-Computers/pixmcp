@@ -177,9 +177,12 @@ with `kind`, `total`, `bytes`, whether a values read would defer it, and a sampl
 keys (for arrays, the keys of the first element), so a 2 MiB result is understood in one
 call. `fields` (names or relative pointers, max 32) and `where` (max 8 clauses, ANDed;
 ops `eq`, `ne`, `gt`, `ge`, `lt`, `le`, `in`, `contains`, `startsWith`, `exists`) apply
-to array values: every element is evaluated (O(n); prefer the outline plus pointers for
-huge arrays), `total` becomes the matched count, projected items fill the page under the
-inline budget, and `projection` reports rows scanned, matched and too large to evaluate.
+to array values. A nonempty `where` scans every element (O(n); prefer the outline plus
+pointers for huge arrays), and `total` becomes the count of evaluated matches. Without
+predicates (including `where: []`), offsets and `total` follow the original array;
+oversized rows appear as deferred pointers to their original contents. Projected items
+fill the page under the inline budget, and `projection` reports rows scanned, matched
+and too large to evaluate.
 The values reader returns `kind`, `value`, window counts, and continuation calls. JSON
 Pointer selects a nested field; escape `~` as `~0` and `/` as `~1`. Arrays, objects, and
 strings can all be paged. Oversized children are represented by deferred pointers with
@@ -382,7 +385,9 @@ On a cold capture `pix_gpu_overview` and `pix_gpu_inspect_event` answer immediat
 metadata that needs no replay (queues, kinds, capabilities; the event record and marker path)
 and put `{ pending: true, jobId, retry }` in the sections that wait for the preparation job
 (`timing`; `timing`, `pipeline`, `bindings` plus `preparation`). Wait for the job, then repeat
-the call; the top level of such a partial answer is never `pending`.
+the call; the top level of such a partial answer is never `pending`. If an overview joins
+an existing preparation before the event caches required by its scope or frame selection
+are ready, the whole response is `pending` with the same job and an exact retry call.
 
 `pix_gpu_overview` reports:
 

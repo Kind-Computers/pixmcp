@@ -116,4 +116,60 @@ public sealed class ResultProjectionTests
             Assert.Equal(1, JsonSerializer.SerializeToElement(capped.Value, Json.Options)[0].GetProperty("i").GetInt32());
         }
     }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, false)]
+    [InlineData(2, false)]
+    [InlineData(-1, false)]
+    [InlineData(0, true)]
+    [InlineData(1, true)]
+    [InlineData(2, true)]
+    [InlineData(-1, true)]
+    public void UnfilteredProjectionKeepsOversizedRowsAndTheirPhysicalContinuations(int oversizedIndex, bool emptyWhere)
+    {
+        using var options = ServerOptions.Override(ServerOptions.With(inlineResultBytes: 1024, maxResultBytes: 4096));
+        using var store = new ResultStore();
+        string reference = store.Store(new { items = Enumerable.Range(0, 3).Select(i => new
+        {
+            i, blob = oversizedIndex < 0 || i == oversizedIndex ? new string('x', 8192) : "small",
+        }).ToArray() });
+        IReadOnlyList<WhereClause>? where = emptyWhere ? [] : null;
+        int offset = 0;
+        for (int i = 0; i < 3; i++)
+        {
+            ResultReadDto page = Assert.IsType<ResultReadDto>(store.Query(reference, "/items", offset, 1, null, ["i"], where));
+            Assert.Equal(3, page.Total);
+            Assert.Equal(1, page.Count);
+            Assert.Equal(3, page.Projection!.Matched);
+            Assert.Equal(oversizedIndex < 0 ? 3 : 1, page.Projection.Unevaluated);
+            JsonElement row = Element(page.Value!)[0];
+            if (oversizedIndex < 0 || i == oversizedIndex)
+            {
+                Assert.True(row.GetProperty("deferred").GetBoolean());
+                Assert.Equal($"/items/{i}", row.GetProperty("pointer").GetString());
+                JsonElement read = row.GetProperty("nextCalls")[0];
+                Assert.Equal("pix_result_read", read.GetProperty("tool").GetString());
+                JsonElement arguments = read.GetProperty("arguments");
+                Assert.Equal(reference, arguments.GetProperty("resultRef").GetString());
+                ResultReadDto original = store.Read(reference, arguments.GetProperty("pointer").GetString()!,
+                    arguments.GetProperty("offset").GetInt32(), arguments.GetProperty("limit").GetInt32());
+                Assert.Equal(i, Element(original.Value!).GetProperty("i").GetInt32());
+            }
+            else Assert.Equal(i, row.GetProperty("i").GetInt32());
+
+            if (i < 2)
+            {
+                Assert.Equal(i + 1, page.NextOffset);
+                JsonElement continuation = Element(Assert.Single(page.NextCalls).Arguments);
+                offset = continuation.GetProperty("offset").GetInt32();
+                Assert.Equal("i", continuation.GetProperty("fields")[0].GetString());
+            }
+            else
+            {
+                Assert.Null(page.NextOffset);
+                Assert.Empty(page.NextCalls);
+            }
+        }
+    }
 }

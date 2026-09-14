@@ -91,6 +91,18 @@ public sealed class TimingCorrelationTests : IDisposable
         Assert.Equal(new[] { ("2", "typeAndName", "medium"), ("1", "typeAndName", "medium"), ((string?)null, "none", "none") }, map.Select(m => (m.RecordedQueueId, m.Method, m.Confidence)));
     }
 
+    [Theory]
+    [InlineData(65, 5, 0)]
+    [InlineData(75, 10, 5)]
+    [InlineData(80, 10, 10)]
+    public void CorrelationSplitsTheFinalWaitUsingTheNextSwitchIn(long end, long blocked, long ready)
+    {
+        using TimingDatabase db = Open();
+        CorrelationDto result = db.Correlate("timing-1", Snapshot(), null, 0, end, "full", 0, 25);
+        CorrelationRowDto lighting = Assert.Single(result.Matches.Items, m => m.RecordedPath == "Frame/Lighting");
+        Assert.Equal((blocked, ready), (lighting.BlockedNs!.Value, lighting.ReadyNs!.Value));
+    }
+
     [Fact]
     public void RecordedSideReportsOccurrencesSubmissionsWaitsAndUnmatchedPaths()
     {

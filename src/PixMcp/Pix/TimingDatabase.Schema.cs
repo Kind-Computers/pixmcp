@@ -132,7 +132,7 @@ internal sealed partial class TimingDatabase
         {
             try
             {
-                rows = WithBudget(RowCountBudgetSeconds, PixErrors.Codes.SqlTimeout, PixErrors.Codes.SqlInterrupted, "row count", () => Count(Quote(name)));
+                rows = WithBudget(RowCountBudgetSeconds, PixErrors.Codes.SqlTimeout, PixErrors.Codes.SqlInterrupted, "row count", () => Guard(() => Count(Quote(name))));
                 state = "exact";
             }
             catch (PixToolException ex) when (ex.Detail.Code == PixErrors.Codes.SqlTimeout) { state = "timedOut"; }

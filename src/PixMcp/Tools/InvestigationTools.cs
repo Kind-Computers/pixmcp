@@ -11,7 +11,7 @@ public enum ComparisonSection { timings, shaders, pipeline, resources }
 [McpServerToolType]
 public static partial class InvestigationTools
 {
-    [McpServerTool(Name = "pix_gpu_overview", Title = "GPU capture overview", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Start a GPU investigation here: capture facts (event total, adapter vendor, frames delimited by Present calls), per-queue event kinds and replay totals (busy, span, idle), ranked top passes (inclusive and self time, semantics, child overflow, work counts) and top work events (draw, dispatch, executeIndirect with EOP and execution time and captured call text), an EOP histogram of work events, per-frame busy time with percentiles on multi-frame captures, and targeted next calls. Queues, kinds and frames answer immediately while the timing replay runs (timing.pending).")]
+    [McpServerTool(Name = "pix_gpu_overview", Title = "GPU capture overview", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false), Description("Replays the capture on the local GPU if analysis is not started. Start a GPU investigation here: capture facts (event total, adapter vendor, frames delimited by Present calls), per-queue event kinds and replay totals (busy, span, idle), ranked top passes (inclusive and self time, semantics, child overflow, work counts) and top work events (draw, dispatch, executeIndirect with EOP and execution time and captured call text), an EOP histogram of work events, per-frame busy time with percentiles on multi-frame captures, and targeted next calls. Queues, kinds and frames answer immediately while the timing replay runs (timing.pending). A scope or frame selection whose event caches are not ready returns the existing pending job.")]
     public static Task<string> Overview(PixSession session, JobManager jobs, [Description("GPU capture handle (from pix_gpu_open).")] string handle,
         [Description("Collect replay timing for totals, passes, work events, the histogram and frames (default true); false answers from metadata only.")] bool includeTiming = true,
         [Description("Top passes and top work events to rank (default 10, max 1000).")] int limit = 10,
@@ -31,10 +31,10 @@ public static partial class InvestigationTools
         ScopeSelection selection = EventScope.Resolve(session, handle, null, scope, markerPathPrefix);
         ShapingOptions shaping = Shaping.Options(format, brief, null, maxStringLength, 0);
         if (!includeTiming)
-            return Tools.Run(session, "pix_gpu_overview", () => Present(QueryOverview(session.Get<GpuCaptureHandle>(handle), false, limit, selection, frameIndex: frameIndex), shaping), cancellationToken);
+            return Tools.Run(session, "pix_gpu_overview", () => Present(QueryOverview(session.Get<GpuCaptureHandle>(handle), false, limit, selection, frameIndex: frameIndex)!, shaping), cancellationToken);
         return Tools.RunWhenReadyOrPartial(session, jobs, "pix_gpu_overview", handle, CountersTools.TimingPreparation(handle),
             (h, onWorker) => QueryOverview(h, false, limit, selection, onWorker, frameIndex),
-            h => Present(QueryOverview(h, true, limit, selection, frameIndex: frameIndex, includeInsights: includeInsights), shaping),
+            h => Present(QueryOverview(h, true, limit, selection, frameIndex: frameIndex, includeInsights: includeInsights)!, shaping),
             (partial, section) => partial is CaptureOverviewDto metadata ? Present(metadata with { Timing = section, NextCalls = section.NextCalls }, shaping) : null,
             waitSeconds, cancellationToken);
     }
@@ -67,9 +67,9 @@ public static partial class InvestigationTools
 
     /// <summary>
     /// Gathers the overview inputs from the handle. With <paramref name="onWorker"/> false (a caller joining a running timing job)
-    /// only cached event arrays are read; a queue whose events are not cached yet reports empty kinds.
+    /// only cached event arrays are read; returns null when a scope or frame needs events that are not cached yet.
     /// </summary>
-    internal static CaptureOverviewDto QueryOverview(GpuCaptureHandle h, bool timing, int limit, ScopeSelection? selection = null, bool onWorker = true, int? frameIndex = null,
+    internal static CaptureOverviewDto? QueryOverview(GpuCaptureHandle h, bool timing, int limit, ScopeSelection? selection = null, bool onWorker = true, int? frameIndex = null,
         bool includeInsights = true)
     {
         ScopeSelection scope = selection ?? new ScopeSelection(h.Id, null, null, null, null);
@@ -83,7 +83,7 @@ public static partial class InvestigationTools
         }
         // Registry notes stay in pix_gpu_info: they grow with every observed vendor behaviour and would crowd the Level 0 answer.
         IReadOnlyDictionary<string, CapabilityDto> capabilities = h.CapabilitiesSnapshot().ToDictionary(c => c.Key, c => c.Value with { Notes = null });
-        return OverviewBuilder.Build(new OverviewInputs(h.Id, h.Path, h.CachedCaptureVendor, queues, capabilities, timing ? h.Provenance() : null, timing,
-            (q, i) => scope.Contains(h, q, i), scope.DescribeOrNull(h), h.Experiments is not null), new OverviewOptions(limit, frameIndex, includeInsights));
+        return OverviewBuilder.BuildScoped(new OverviewInputs(h.Id, h.Path, h.CachedCaptureVendor, queues, capabilities, timing ? h.Provenance() : null, timing,
+            (_, _) => true, null, h.Experiments is not null), new OverviewOptions(limit, frameIndex, includeInsights), scope);
     }
 }
