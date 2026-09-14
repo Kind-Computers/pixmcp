@@ -436,6 +436,14 @@ add to this section until the release is tagged.
     power states. Analysis status `flagNotes` stays about flags.
   - `pix_gpu_overview` capabilities keep states and reasons but no longer carry registry notes.
     They are in `pix_gpu_info`, and the overview stays within its 12 KB budget as the registry grows.
+  - Fixtures captured on the B580 and the Radeon iGPU (`capture_fixtures.py --adapter-name B580|Radeon
+    --output-dir tests/artifacts/intel|amd`) confirm none of the above is a cross-vendor replay artifact:
+    - captures replay on their own vendor without flags, and every one of the six cross-vendor
+      pairings needs `IGNORE_INCOMPATIBILITIES`;
+    - Intel live profiling fails on Intel's own captures too;
+    - the Lighting calibration reads the same 58 % whichever GPU took the capture.
+  - `PIX_TEST_INTEL_CAPTURE`, `PIX_TEST_AMD_CAPTURE` and their `_PERF_BASELINE` variants add those
+    fixtures to `VendorValidationTests`; `scripts/environment.py` records them.
 
 ### Changed
 

@@ -9,7 +9,9 @@ namespace PixMcp.Tests;
 
 /// <summary>
 /// Vendor behaviour observed on a machine with an RTX 4070 Ti, an Intel Arc B580 and an AMD Radeon iGPU (PIX 2606.18-preview),
-/// replaying the NVIDIA-captured fixtures. Gated by PIX_TEST_VENDOR_VALIDATION=1; a vendor without an adapter skips.
+/// replaying the fixtures captured on NVIDIA (PIX_TEST_CAPTURE, PIX_TEST_PERF_BASELINE) and, when set, on Intel and AMD
+/// (PIX_TEST_INTEL_CAPTURE, PIX_TEST_AMD_CAPTURE and their _PERF_BASELINE). Gated by PIX_TEST_VENDOR_VALIDATION=1; a vendor
+/// without an adapter or capture skips.
 /// </summary>
 [Collection(GpuReplayCollection.Name)]
 public sealed class VendorValidationTests : IDisposable
@@ -26,11 +28,18 @@ public sealed class VendorValidationTests : IDisposable
         _jobs = new JobManager(_worker, _session);
     }
 
+    private static void RequireVendorValidation()
+    {
+        TestArtifacts.SkipUnlessPix();
+        Skip.IfNot(TestArtifacts.AnalysisEnabled, "Set PIX_TEST_ANALYSIS=1 to replay on the GPU (Developer Mode required)");
+        Skip.IfNot(TestArtifacts.VendorValidation, "Set PIX_TEST_VENDOR_VALIDATION=1 to replay the fixtures on every GPU vendor present");
+    }
+
     private static string RequireCapture()
     {
-        string capture = TestArtifacts.RequireAnalysisCapture();
-        Skip.IfNot(TestArtifacts.VendorValidation, "Set PIX_TEST_VENDOR_VALIDATION=1 to replay the fixtures on every GPU vendor present");
-        return capture;
+        RequireVendorValidation();
+        Skip.If(TestArtifacts.Capture is null, "Set PIX_TEST_CAPTURE to the NVIDIA-captured baseline fixture");
+        return TestArtifacts.Capture!;
     }
 
     [SkippableTheory]
@@ -57,6 +66,30 @@ public sealed class VendorValidationTests : IDisposable
         ReplayProvenance provenance = _session.Get<GpuCaptureHandle>(handle).Provenance();
         Assert.Equal((vendor, adapterName, "nvidia", true), (provenance.Vendor, provenance.AdapterName, provenance.CaptureVendor, provenance.VendorMismatch));
         await SessionTools.Close(_session, handle);
+    }
+
+    [SkippableTheory]
+    [InlineData("intel")]
+    [InlineData("amd")]
+    public async Task NativeCapturesReplayOnTheirOwnVendorWithoutFlagsButNotOnNvidia(string vendor)
+    {
+        RequireVendorValidation();
+        string? capture = vendor == "intel" ? TestArtifacts.IntelCapture : TestArtifacts.AmdCapture;
+        Skip.If(capture is null, $"Set PIX_TEST_{vendor.ToUpperInvariant()}_CAPTURE to a baseline fixture captured on that GPU (capture_fixtures.py --adapter-name)");
+
+        string handle = await OpenOn(capture!, vendor, captureVendor: vendor);
+        ReplayProvenance provenance = _session.Get<GpuCaptureHandle>(handle).Provenance();
+        Assert.Equal((vendor, vendor, false), (provenance.Vendor, provenance.CaptureVendor, provenance.VendorMismatch));
+        JsonElement profile = await JobResult(await ShaderProfilingTools.Profile(_session, _jobs, handle, markerPathPrefix: TrianglePass, waitSeconds: 600));
+        // Live profiling fails on Intel and is declined on AMD for their own captures too: not an artifact of cross-vendor replay.
+        Assert.Equal(vendor == "intel" ? "failed" : "declined", profile.GetProperty("state").GetString());
+        await SessionTools.Close(_session, handle);
+
+        string reverse = Handle(await GpuCaptureTools.Open(_session, capture!));
+        await AdapterOf(reverse, "nvidia");
+        JsonElement refused = Parse(await AnalysisTools.Start(_session, _jobs, reverse, adapterName: "nvidia", waitSeconds: 600));
+        Assert.Equal(PixErrors.Codes.AnalysisIncompatible, refused.GetProperty("error").GetProperty("code").GetString());
+        await SessionTools.Close(_session, reverse);
     }
 
     [SkippableTheory]
@@ -95,31 +128,37 @@ public sealed class VendorValidationTests : IDisposable
         Assert.Empty(committed.Select(c => c.Name).Where(name => !live.Contains(name)));
         await SessionTools.Close(_session, handle);
 
-        Skip.If(TestArtifacts.PerfBaseline is null, "Set PIX_TEST_PERF_BASELINE to check the Intel calibration pass");
-        string perf = await OpenOn(TestArtifacts.PerfBaseline!, "intel");
-        JsonElement stages = Expand(await CountersTools.CountersCollect(_session, _jobs, perf, preset: "perStageAlu", queueIndex: 0, kind: "marker", limit: 25, waitSeconds: 900));
-        string ps = stages.GetProperty("extra").GetProperty("counters").EnumerateArray()
-            .Single(c => c.GetProperty("name").GetString() == "XVE Inst Executed ALU0 PS Utilization").GetProperty("id").GetUInt32().ToString(System.Globalization.CultureInfo.InvariantCulture);
-        double PixelShaderUtilization(string marker) => stages.GetProperty("items").EnumerateArray().Where(r => r.GetProperty("name").GetString() == marker)
-            .Select(r => r.GetProperty("values").GetProperty(ps)).Where(v => v.ValueKind == JsonValueKind.Number).Select(v => v.GetDouble()).DefaultIfEmpty(double.NaN).Max();
-        Assert.InRange(PixelShaderUtilization("Lighting"), 40, 100);
-        Assert.InRange(PixelShaderUtilization("Shadow"), 0, 20);
+        // The calibration holds whichever GPU took the perf capture.
+        (string Capture, string Vendor)[] perfCaptures = new[] { (TestArtifacts.PerfBaseline, "nvidia"), (TestArtifacts.IntelPerfBaseline, "intel"), (TestArtifacts.AmdPerfBaseline, "amd") }
+            .Where(p => p.Item1 is not null).Select(p => (p.Item1!, p.Item2)).ToArray();
+        Skip.If(perfCaptures.Length == 0, "Set PIX_TEST_PERF_BASELINE (or PIX_TEST_INTEL_PERF_BASELINE / PIX_TEST_AMD_PERF_BASELINE) to check the Intel calibration pass");
+        foreach ((string capture, string captureVendor) in perfCaptures)
+        {
+            string perf = await OpenOn(capture, "intel", captureVendor);
+            JsonElement stages = Expand(await CountersTools.CountersCollect(_session, _jobs, perf, preset: "perStageAlu", queueIndex: 0, kind: "marker", limit: 25, waitSeconds: 900));
+            string ps = stages.GetProperty("extra").GetProperty("counters").EnumerateArray()
+                .Single(c => c.GetProperty("name").GetString() == "XVE Inst Executed ALU0 PS Utilization").GetProperty("id").GetUInt32().ToString(System.Globalization.CultureInfo.InvariantCulture);
+            double PixelShaderUtilization(string marker) => stages.GetProperty("items").EnumerateArray().Where(r => r.GetProperty("name").GetString() == marker)
+                .Select(r => r.GetProperty("values").GetProperty(ps)).Where(v => v.ValueKind == JsonValueKind.Number).Select(v => v.GetDouble()).DefaultIfEmpty(double.NaN).Max();
+            Assert.InRange(PixelShaderUtilization("Lighting"), 40, 100);
+            Assert.InRange(PixelShaderUtilization("Shadow"), 0, 20);
 
-        JsonElement bottleneck = await JobResult(await BottleneckTools.Bottleneck(_session, _jobs, perf, markerPathPrefix: "Frame/Lighting",
-            evidence: ["timing", "counters", "drpix"], waitSeconds: 1800));
-        Assert.Equal(("pixelShading", "high"), (bottleneck.GetProperty("verdict").GetProperty("limiter").GetString(), bottleneck.GetProperty("verdict").GetProperty("confidence").GetString()));
-        Assert.Contains("intel_ps_alu", bottleneck.GetProperty("rules").GetProperty("satisfiedIds").EnumerateArray().Select(id => id.GetString()));
-        Assert.True(bottleneck.GetProperty("rules").GetProperty("vendorValidated").GetBoolean());
-        await SessionTools.Close(_session, perf);
+            JsonElement bottleneck = await JobResult(await BottleneckTools.Bottleneck(_session, _jobs, perf, markerPathPrefix: "Frame/Lighting",
+                evidence: ["timing", "counters", "drpix"], waitSeconds: 1800));
+            Assert.Equal(("pixelShading", "high"), (bottleneck.GetProperty("verdict").GetProperty("limiter").GetString(), bottleneck.GetProperty("verdict").GetProperty("confidence").GetString()));
+            Assert.Contains("intel_ps_alu", bottleneck.GetProperty("rules").GetProperty("satisfiedIds").EnumerateArray().Select(id => id.GetString()));
+            Assert.True(bottleneck.GetProperty("rules").GetProperty("vendorValidated").GetBoolean());
+            await SessionTools.Close(_session, perf);
+        }
     }
 
-    /// <summary>Opens a capture and starts analysis on the vendor's adapter; the fixtures were captured on NVIDIA, so other vendors need IGNORE_INCOMPATIBILITIES.</summary>
-    private async Task<string> OpenOn(string capture, string vendor)
+    /// <summary>Opens a capture and starts analysis on the vendor's adapter, adding IGNORE_INCOMPATIBILITIES when the capture comes from another vendor.</summary>
+    private async Task<string> OpenOn(string capture, string vendor, string captureVendor = "nvidia")
     {
         string handle = Handle(await GpuCaptureTools.Open(_session, capture));
         await AdapterOf(handle, vendor);
         JsonElement started = Parse(await AnalysisTools.Start(_session, _jobs, handle, adapterName: vendor,
-            flags: vendor == "nvidia" ? null : ["IGNORE_INCOMPATIBILITIES"], waitSeconds: 600));
+            flags: vendor == captureVendor ? null : ["IGNORE_INCOMPATIBILITIES"], waitSeconds: 600));
         Assert.Equal("succeeded", started.GetProperty("status").GetString());
         return handle;
     }

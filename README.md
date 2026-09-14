@@ -1213,6 +1213,17 @@ experiment start the PIX timing recorder, which can raise a UAC prompt; approve 
 start fails with 0x800704C7 once the prompt times out. Native tests read the captures through
 `PIX_TEST_RICH_CAPTURE`, `PIX_TEST_RICH_TIMING_CAPTURE`, `PIX_TEST_PERF_BASELINE`,
 `PIX_TEST_PERF_CANDIDATE`, `PIX_TEST_SM6_CAPTURE` and `PIX_TEST_PROGRAMMATIC_CAPTURE`.
+
+`--adapter-name` makes the fixture app render on one GPU. For example, `--adapter-name B580
+--output-dir tests\artifacts\intel` or `--adapter-name Radeon --output-dir tests\artifacts\amd`
+captures on the Intel Arc or the AMD iGPU; GPU capture profiles need no UAC prompt. Set
+`PIX_TEST_VENDOR_VALIDATION=1` to run `VendorValidationTests` on every GPU present, with the NVIDIA
+captures above and, when set, `PIX_TEST_INTEL_CAPTURE`, `PIX_TEST_INTEL_PERF_BASELINE`,
+`PIX_TEST_AMD_CAPTURE` and `PIX_TEST_AMD_PERF_BASELINE`. They check:
+- captures replay on their own vendor without flags, and cross-vendor starts need `IGNORE_INCOMPATIBILITIES`;
+- occupancy and HF counters are unsupported;
+- the live-profiling and Bandwidth outcomes per vendor;
+- the Intel counter catalog and the Lighting calibration pass.
 `scripts\gpu_frame_experiment.py` records which timing capture option parts, applied through
 `PIXMCP_TIMING_EXPERIMENT_PARTS`, populate `GpuFrame`.
 
