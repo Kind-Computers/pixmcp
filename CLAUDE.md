@@ -26,6 +26,9 @@ enforces it). See README.md.
   25 rows. Preserve full managed data before response caps: `ResultStore` makes nested
   objects, arrays, and strings retrievable through `pix_result_read`. Job status carries
   `resultRef`, never an embedded result. Every truncation needs an exact continuation.
+- Resolve client-supplied paths with `ServerPaths.Full`, never `Path.GetFullPath(path)`: static shader profiling points the
+  process working directory at a private folder (`ServerPaths.CompilerWorkingDirectory`) while PIX loads and runs vendor
+  compiler plugins, which write report files there.
 - Environment variables are read only through `ServerOptions` (`src/PixMcp/Pix/ServerOptions.cs`),
   parsed once before protocol output; consumers read `ServerOptions.Current` (tests scope
   `ServerOptions.Override`). `PIX_DIR` and the PIX discovery variables stay in `PixDiscovery`.

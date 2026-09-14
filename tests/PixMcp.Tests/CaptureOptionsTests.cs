@@ -4,6 +4,9 @@ using Microsoft.PIX;
 using ModelContextProtocol;
 using PixMcp.Tools;
 using Xunit;
+using Microsoft.Extensions.Logging.Abstractions;
+using PixMcp.Pix.Handles;
+using Windows.Win32.Graphics.Dxgi.Common;
 
 namespace PixMcp.Tests;
 
@@ -60,5 +63,54 @@ public class CaptureOptionsTests
 
         Assert.Same(failure, error);
         Assert.False(captured);
+    }
+
+    [Fact]
+    public void DelimiterAndCaptureKeyAreWrittenAndResetByLaterCaptures()
+    {
+        var written = new List<PIX_GPU_CAPTURE_OPTIONS>();
+        DeviceTools.CaptureWithOptions(42, 2, written.Add, () => 0, default,
+            GpuCaptureOptionNames.ParseDelimiter("CapturableRegion"), GpuCaptureOptionNames.ParseCaptureKey("f5"));
+        DeviceTools.CaptureWithOptions(42, 1, written.Add, () => 0);
+
+        Assert.Equal((PIX_GPU_CAPTURE_DELIMITER.PIX_GPU_CAPTURE_DELIMITER_CAPTURABLE_REGION, PIX_GPU_CAPTURE_KEY.PIX_GPU_CAPTURE_KEY_F5),
+            (written[0].Delimiter, written[0].CaptureKey));
+        Assert.Equal((PIX_GPU_CAPTURE_DELIMITER.PIX_GPU_CAPTURE_DELIMITER_PRESENT, PIX_GPU_CAPTURE_KEY.PIX_GPU_CAPTURE_KEY_NONE),
+            (written[1].Delimiter, written[1].CaptureKey));
+        Assert.Equal(PIX_GPU_CAPTURE_KEY.PIX_GPU_CAPTURE_KEY_F12, GpuCaptureOptionNames.ParseCaptureKey("F12"));
+        Assert.Equal(("capturableRegion", "F5"), (GpuCaptureOptionNames.Name(written[0].Delimiter), GpuCaptureOptionNames.Name(written[0].CaptureKey)));
+        Assert.Equal("invalid_arguments", Assert.Throws<PixToolException>(() => GpuCaptureOptionNames.ParseDelimiter("vsync")).Detail.Code);
+        Assert.Equal("invalid_arguments", Assert.Throws<PixToolException>(() => GpuCaptureOptionNames.ParseCaptureKey("F13")).Detail.Code);
+    }
+
+    [Fact]
+    public void ThumbnailsAreArtifactsThatExpireWithTheirOwningHandle()
+    {
+        using var worker = new PixWorker();
+        using var session = new PixSession(worker, NullLogger<PixSession>.Instance);
+        string owner = session.Register(new DeviceStandIn()).Id;
+
+        CaptureThumbnailDto none = DeviceTools.Thumbnail(session, owner, []);
+        Assert.False(none.Available);
+        Assert.Contains("no screenshot", none.Reason);
+        Assert.False(DeviceTools.Thumbnail(session, owner, [1, 2, 3]).Available);
+
+        byte[] png = Png.Encode([10, 20, 30, 255, 40, 50, 60, 255], 2, 1, 8, DXGI_FORMAT.DXGI_FORMAT_R8G8B8A8_UNORM);
+        CaptureThumbnailDto thumbnail = DeviceTools.Thumbnail(session, owner, png);
+        Assert.True(thumbnail.Available, thumbnail.Reason);
+        Assert.Equal((2u, 1u, png.Length, owner), (thumbnail.Width!.Value, thumbnail.Height!.Value, thumbnail.PngBytes, thumbnail.Owner));
+        Assert.Equal("pix_gpu_preview_image", Assert.Single(thumbnail.NextCalls).Tool);
+        Assert.Equal(png, PreviewTools.GetArtifact(session, thumbnail.ArtifactRef!));
+
+        session.Close(owner);
+        Assert.Equal(PixErrors.Codes.ArtifactExpired,
+            Assert.Throws<PixToolException>(() => PreviewTools.GetArtifact(session, thumbnail.ArtifactRef!)).Detail.Code);
+    }
+
+    private sealed class DeviceStandIn : PixHandle
+    {
+        public DeviceStandIn() : base("device") { }
+        public override string Kind => "device";
+        public override void Close(List<string> warnings) { }
     }
 }

@@ -33,7 +33,7 @@ public static partial class DumpTools
         => Tools.Run(session, "pix_dump_info", () =>
         {
             DumpHandle h = session.Get<DumpHandle>(handle);
-            return new { handle = h.Id, path = h.Path, metadata = h.Metadata ??= Metadata(h), queues = QueueList(h) };
+            return new { handle = h.Id, path = h.Path, metadata = h.Metadata ??= Metadata(h), diagnosis = h.Diagnosis ??= Diagnosis(h), queues = QueueList(h) };
         }, cancellationToken);
 
     private static object Metadata(DumpHandle h)
@@ -224,9 +224,12 @@ public static partial class DumpTools
             return SessionTools.Envelope(Queues(h).Select((q, i) =>
             {
                 object? hw;
+                string? maxSeverity = null;
                 try
                 {
-                    hw = PixApiExtensionsPostmortemDump.GetHardwareStatuses(q).Select(s => Reflect.ToObject(s)).ToArray();
+                    var statuses = PixApiExtensionsPostmortemDump.GetHardwareStatuses(q);
+                    hw = statuses.Select(s => Reflect.ToObject(s)).ToArray();
+                    maxSeverity = TriageObservationBuilder.MaxSeverity(statuses.Select(s => s.SeverityLevel));
                 }
                 catch (Exception ex) { hw = PixErrors.Unavailable("hardwareStatus", ex); }
                 object? faults = Tools.Try(() => PixApiExtensionsPostmortemDump.GetPageFaults(q)?.GetCount() ?? 0, "pageFaultCount");
@@ -239,6 +242,7 @@ public static partial class DumpTools
                     type = q.GetType(),
                     status = q.GetStatus(),
                     hardwareStatus = hw,
+                    maxHardwareSeverity = maxSeverity,
                     pageFaultCount = faults,
                     rootEventCount = eventCount,
                 };

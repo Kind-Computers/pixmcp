@@ -88,6 +88,7 @@ public static class GpuCaptureTools
             vendor = h.CaptureVendor(),
             analysis = h.AnalysisStatus(),
             capabilities = h.CapabilitiesSnapshot(),
+            derivedFrom = h.DerivedFrom,
         };
     }
 

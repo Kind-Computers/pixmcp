@@ -295,7 +295,7 @@ internal static class Tools
     public static string PrepareOutputPath(string? outPath, bool overwrite, ResultStore? results)
     {
         if (string.IsNullOrWhiteSpace(outPath)) throw PixErrors.InvalidArguments("outPath is required.");
-        string full = Path.GetFullPath(outPath);
+        string full = ServerPaths.Full(outPath);
         if (results is not null && results.IsPrivatePath(full))
             throw PixErrors.InvalidArguments("Output cannot replace files in the server's private result storage.");
         string? directory = Path.GetDirectoryName(full);
@@ -310,7 +310,7 @@ internal static class Tools
         {
             throw PixErrors.InvalidArguments($"A {what} path is required.");
         }
-        string full = Path.GetFullPath(path);
+        string full = ServerPaths.Full(path);
         if (!File.Exists(full))
         {
             throw PixErrors.FileNotFound(what, full);

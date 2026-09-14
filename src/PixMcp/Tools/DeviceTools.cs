@@ -28,7 +28,7 @@ public static class DeviceTools
             notifications.OnDeviceCounterCollectionStarted = () => h.Note("counterCollectionStarted");
             notifications.OnDeviceCounterCollectionStopped = () => h.Note("counterCollectionStopped");
             notifications.OnDeviceCounterDescriptionsUpdated = () => h.Note("counterDescriptionsUpdated");
-            notifications.OnNewGpuCaptureCompleted = (_, filename, _) => h.Note("gpuCaptureCompleted", new { filename });
+            notifications.OnNewGpuCaptureCompleted = (_, filename, screenshot) => h.Note("gpuCaptureCompleted", new { filename, screenshotBytes = screenshot?.Length ?? 0 });
             notifications.OnNewTimingCaptureError = (hr, message) => h.Note("timingCaptureError", new { hresult = PixErrors.Hex(hr), message });
             notifications.OnNotifyGpuCaptureTargetProcessesStatus = statuses =>
             {
@@ -222,7 +222,7 @@ public static class DeviceTools
                 string exe = Tools.RequireFile(exePath!, "Executable");
                 desc.launchInfo.win32.exePath = exe;
                 desc.launchInfo.win32.commandLineArgs = arguments ?? string.Empty;
-                desc.launchInfo.win32.initialWorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory) ? (Path.GetDirectoryName(exe) ?? string.Empty) : Path.GetFullPath(workingDirectory);
+                desc.launchInfo.win32.initialWorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory) ? (Path.GetDirectoryName(exe) ?? string.Empty) : ServerPaths.Full(workingDirectory);
                 target = exe;
             }
 
@@ -327,7 +327,7 @@ public static class DeviceTools
     internal static bool IsCapturable(PIX_PROCESS_UNSUPPORTED_REASON reason)
         => reason is PIX_PROCESS_UNSUPPORTED_REASON.PIX_PROCESS_UNSUPPORTED_REASON_NONE or PIX_PROCESS_UNSUPPORTED_REASON.PIX_PROCESS_UNSUPPORTED_REASON_NOT_USING_D3D12;
 
-    [McpServerTool(Name = "pix_device_take_gpu_capture", Title = "Take GPU capture", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description("Takes a GPU capture of a process launched/attached through this connection and (by default) opens it as a GPU capture handle. Blocks until the app presents the captured frame(s); returns a job.")]
+    [McpServerTool(Name = "pix_device_take_gpu_capture", Title = "Take GPU capture", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description("Takes a GPU capture of a process launched/attached through this connection and (by default) opens it as a GPU capture handle. Blocks until the app presents the captured frame(s) (or ends the capturable region); returns a job whose result echoes captureOptions and keeps PIX's screenshot as a thumbnail artifact.")]
     public static async Task<string> TakeGpuCapture(
         PixSession session,
         JobManager jobs,
@@ -338,6 +338,9 @@ public static class DeviceTools
         [Description("Open the resulting .wpix as a GPU capture handle (default true).")] bool open = true,
         [Description(Tools.WaitSecondsDescription)] double waitSeconds = 0,
         [Description("Maximum seconds to await a capturable D3D12 device, 0 through 300 (default 30). Zero checks once.")] double readinessTimeoutSeconds = 30,
+        [Description("Frame delimiter: present (default), or capturableRegion to capture between ID3D12SharingContract BeginCapturableWork and EndCapturableWork calls (an app that never makes them never completes the capture).")] string delimiter = "present",
+        [Description("Hotkey PIX arms for key-triggered captures: none (default) or F1 through F12. Always written, so an earlier hotkey is cleared.")] string captureKey = "none",
+        [Description("Keep PIX's screenshot of the capture as a preview artifact (thumbnail.artifactRef, read it with pix_gpu_preview_image) owned by the opened capture, or by the device handle when open=false (default true).")] bool thumbnail = true,
         CancellationToken cancellationToken = default)
     {
         try
@@ -346,8 +349,10 @@ public static class DeviceTools
                 || !double.IsFinite(readinessTimeoutSeconds) || readinessTimeoutSeconds is < 0 or > 300
                 || !double.IsFinite(waitSeconds) || waitSeconds is < 0 or > 3600 || frameCount == 0)
                 throw new PixToolException(PixErrors.Codes.InvalidArguments, "frameCount must be positive; delaySeconds must be 0–60, readinessTimeoutSeconds 0–300, and waitSeconds 0–3600, all finite.");
+            PIX_GPU_CAPTURE_DELIMITER delimiterValue = GpuCaptureOptionNames.ParseDelimiter(delimiter);
+            PIX_GPU_CAPTURE_KEY captureKeyValue = GpuCaptureOptionNames.ParseCaptureKey(captureKey);
             CaptureTarget target = session.Get<ConnectionHandle>(handle).Targets.Get(processId);
-            object retry = StructuredToolResults.CurrentArguments() ?? new { handle, processId, delaySeconds, frameCount, open, waitSeconds, readinessTimeoutSeconds };
+            object retry = StructuredToolResults.CurrentArguments() ?? new { handle, processId, delaySeconds, frameCount, open, waitSeconds, readinessTimeoutSeconds, delimiter, captureKey, thumbnail };
             Job job = jobs.StartAfter("gpu-capture", $"Take GPU capture of pid {processId}", async j =>
             {
                 try
@@ -374,22 +379,40 @@ public static class DeviceTools
                         j.AddMessage("Capturing...");
                         return PixApiExtensionsDeviceConnection.TakeGpuCaptureResult(h.Connection, processId)
                             ?? throw PixErrors.PixFailure("PIX returned no GPU capture result.");
-                    }, j.Cancellation.Token);
+                    }, j.Cancellation.Token, delimiterValue, captureKeyValue);
                 string path = Interop.W(result.GetFilename());
                 if (string.IsNullOrEmpty(path))
                 {
                     throw PixErrors.PixFailure("PIX returned an empty capture filename.");
                 }
-                h.Note("gpuCaptureTaken", new { processId, path });
+                (byte[] png, string? screenshotError) = thumbnail ? ScreenshotPng(result) : (Array.Empty<byte>(), null);
+                h.Note("gpuCaptureTaken", new { processId, path, screenshotBytes = png.Length });
                 j.AddMessage("Capture saved to " + path);
 
                 object? gpu = null;
+                string owner = handle;
                 if (open && File.Exists(path))
                 {
                     IPixGpuCaptureDocument document = session.Factory.OpenGpuCaptureDocument<IPixGpuCaptureDocument>(path);
-                    gpu = session.Register(new GpuCaptureHandle(path, document)).Summary();
+                    GpuCaptureHandle capture = session.Register(new GpuCaptureHandle(path, document));
+                    gpu = capture.Summary();
+                    owner = capture.Id;
                 }
-                return new { path, gpuCapture = gpu };
+                return new
+                {
+                    path,
+                    gpuCapture = gpu,
+                    captureOptions = new
+                    {
+                        delimiter = GpuCaptureOptionNames.Name(delimiterValue),
+                        frameCount,
+                        captureKey = GpuCaptureOptionNames.Name(captureKeyValue),
+                        targetProcessId = processId,
+                    },
+                    thumbnail = thumbnail ? Thumbnail(session, owner, png, screenshotError) : null,
+                    notes = delimiterValue == PIX_GPU_CAPTURE_DELIMITER.PIX_GPU_CAPTURE_DELIMITER_CAPTURABLE_REGION
+                        ? CompatibilityNotes.Texts("gpuCapture", GpuVendor.Unknown, PixDiscovery.Version) : null,
+                };
             }, handle);
             return Json.Serialize(await jobs.WaitOrStatus(job, waitSeconds, cancellationToken).ConfigureAwait(false));
         }
@@ -404,60 +427,128 @@ public static class DeviceTools
         uint frameCount,
         Action<PIX_GPU_CAPTURE_OPTIONS> applyOptions,
         Func<T> capture,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        PIX_GPU_CAPTURE_DELIMITER delimiter = PIX_GPU_CAPTURE_DELIMITER.PIX_GPU_CAPTURE_DELIMITER_PRESENT,
+        PIX_GPU_CAPTURE_KEY captureKey = PIX_GPU_CAPTURE_KEY.PIX_GPU_CAPTURE_KEY_NONE)
     {
         if (frameCount == 0)
         {
             throw PixErrors.InvalidArguments("frameCount must be at least 1.");
         }
         cancellationToken.ThrowIfCancellationRequested();
-        // PIX retains these settings for subsequent captures, including single-frame requests.
+        // PIX retains these settings for subsequent captures, including single-frame requests, so every field is written.
         applyOptions(new PIX_GPU_CAPTURE_OPTIONS
         {
-            Delimiter = PIX_GPU_CAPTURE_DELIMITER.PIX_GPU_CAPTURE_DELIMITER_PRESENT,
+            Delimiter = delimiter,
             FrameCount = frameCount,
+            CaptureKey = captureKey,
             TargetProcessId = processId,
         });
         cancellationToken.ThrowIfCancellationRequested();
         return capture();
     }
 
-    [McpServerTool(Name = "pix_device_timing_capture_start", Title = "Start timing capture", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description("Starts a system-wide PIX timing capture (CPU samples, context switches, PIX events, GPU timing) to the given .wpix path. Stop it with pix_device_timing_capture_stop.")]
+    /// <summary>Copies the capture's screenshot PNG while the result is alive (on the worker); empty with a reason when PIX has none.</summary>
+    internal static unsafe (byte[] Png, string? Error) ScreenshotPng(IPixGpuCaptureResult result)
+    {
+        try
+        {
+            PIX_SCREENSHOT_PNG_DATA data = default;
+            result.GetScreenshotPngData(&data);
+            if (data.Data == null || data.Size == 0) return (Array.Empty<byte>(), null);
+            return (new ReadOnlySpan<byte>(data.Data, checked((int)data.Size)).ToArray(), null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (Array.Empty<byte>(), "PIX could not provide the screenshot: " + PixErrors.Describe(ex));
+        }
+    }
+
+    /// <summary>Keeps a capture screenshot as a preview artifact owned by <paramref name="owner"/>, which expires when that handle closes.</summary>
+    internal static CaptureThumbnailDto Thumbnail(PixSession session, string owner, byte[] png, string? error = null)
+    {
+        if (png.Length == 0) return new(false, null, null, null, 0, owner, error ?? "PIX returned no screenshot for this capture.", []);
+        try
+        {
+            (uint width, uint height) = PreviewTools.PngDimensions(png);
+            string artifactRef = PreviewTools.StoreArtifact(session, owner, png);
+            return new(true, artifactRef, width, height, png.Length, owner, null, [new ToolCallDto("pix_gpu_preview_image", new { artifactRef }, CostHints.Cached)]);
+        }
+        catch (PixToolException ex)
+        {
+            return new(false, null, null, null, png.Length, owner, ex.Message, []);
+        }
+    }
+
+    [McpServerTool(Name = "pix_device_timing_capture_start", Title = "Start timing capture", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description("Starts a system-wide PIX timing capture to the given .wpix path. preset (default, memory, fileIo, gpuOnly, minimal) chooses what is recorded and explicit arguments override it; memory events, page faults and stacks can produce multi-GB captures. The response echoes the effective settings and the option parts sent to PIX. Stop it with pix_device_timing_capture_stop.")]
     public static Task<string> TimingCaptureStart(
         PixSession session,
         [Description("Device handle")] string handle,
         [Description("Output .wpix path.")] string outputPath,
-        [Description("Capture CPU samples (default true).")] bool cpuSamples = true,
-        [Description("CPU samples per second (default 1000).")] uint cpuSamplesPerSecond = 1000,
-        [Description("Capture CPU sample callstacks (default true).")] bool cpuSampleStacks = true,
-        [Description("Capture context switches and ready-thread events (default true).")] bool contextSwitches = true,
-        [Description("Capture PIX events/markers (default true).")] bool pixEvents = true,
-        [Description("Capture GPU timing (default true).")] bool gpuTiming = true,
-        [Description("Capture GPU memory usage (default false).")] bool gpuMemoryUsage = false,
-        [Description("Capture file I/O events (default false).")] bool fileIo = false,
-        [Description("Maximum capture file size in MB (default 1024).")] uint maxFileSizeMb = 1024,
-        [Description("Automatic capture duration in seconds (0 = until stopped).")] uint durationSeconds = 0,
-        [Description("Record context-switch callstacks; requires contextSwitches=true (default false).")] bool contextSwitchStacks = false,
-        [Description("Record System Monitor counters such as GPU utilization and memory usage (default false).")] bool captureSysmonCounters = false,
+        [Description("Collection preset (default: default). memory adds VirtualAlloc, heap and PIX memory events plus GPU memory usage; fileIo records file I/O with stacks; gpuOnly and minimal skip CPU samples and context switches and set the gpuOnlyEvents or minimalInstrumentation part (gpuOnly also records GPU memory usage).")] string? preset = null,
+        [Description("Capture CPU samples (default true; false for gpuOnly and minimal).")] bool? cpuSamples = null,
+        [Description("CPU samples per second (default 1000).")] uint? cpuSamplesPerSecond = null,
+        [Description("Capture CPU sample callstacks (default true when cpuSamples).")] bool? cpuSampleStacks = null,
+        [Description("Capture context switches and ready-thread events (default true; false for gpuOnly and minimal).")] bool? contextSwitches = null,
+        [Description("Record context-switch callstacks; requires contextSwitches=true (default false).")] bool? contextSwitchStacks = null,
+        [Description("Capture PIX events/markers (default true).")] bool? pixEvents = null,
+        [Description("Capture GPU timing (default true).")] bool? gpuTiming = null,
+        [Description("Capture GPU memory usage (default false; true for memory and gpuOnly).")] bool? gpuMemoryUsage = null,
+        [Description("Capture file I/O events (default false; true for fileIo).")] bool? fileIo = null,
+        [Description("Record file I/O callstacks; requires fileIo=true (default false; true for fileIo).")] bool? fileIoStacks = null,
+        [Description("Maximum capture file size in MB (default 1024).")] uint? maxFileSizeMb = null,
+        [Description("Automatic capture duration in seconds (default 0 = until stopped).")] uint? durationSeconds = null,
+        [Description("Record System Monitor counters such as GPU utilization and memory usage (default false; NVIDIA and AMD only).")] bool? captureSysmonCounters = null,
+        [Description("VirtualAlloc events: none, enabled or withStacks (default none; enabled for memory). Costly.")] string? virtualAllocEvents = null,
+        [Description("Heap allocation events: none, enabled or withStacks (default none; enabled for memory). Costly.")] string? heapAllocEvents = null,
+        [Description("PIX memory allocation events: none, enabled or withStacks (default none; enabled for memory).")] string? pixMemEvents = null,
+        [Description("Page fault events: none, enabled or withStacks (default none). Costly.")] string? pageFaults = null,
+        [Description("Capture tracked functions (default false).")] bool? trackedFunctions = null,
+        [Description("Merge kernel images into the capture (default false).")] bool? mergeKernelImages = null,
+        [Description("Collect callstacks for all processes, not only the target (default false). Costly.")] bool? stacksForAllProcesses = null,
+        [Description("Capture .NET CLR data (default false; may need extra PIX components).")] bool? clrData = null,
+        [Description("Record video with the capture (default false; may need extra PIX components).")] bool? video = null,
+        [Description("Video source kind, window or monitor; requires video=true and videoSourceId (default: PIX's choice).")] string? videoSourceType = null,
+        [Description("Video source HWND or HMONITOR value, decimal or 0x hex; requires videoSourceType (default: none).")] string? videoSourceId = null,
+        [Description("Include the raw capture ETL in the capture (default false). Large.")] bool? includeCaptureEtl = null,
+        [Description("Record into a circular buffer (default false).")] bool? circular = null,
+        [Description("Force PIX's COM event path (default false).")] bool? forceComPath = null,
+        [Description("Collect only GPU events (default false; true for gpuOnly).")] bool? gpuOnlyEvents = null,
+        [Description("Use minimal instrumentation (default false; true for minimal).")] bool? minimalInstrumentation = null,
         CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_device_timing_capture_start", () =>
         {
-            var settings = new TimingCaptureSettingsDto(cpuSamples, cpuSamplesPerSecond,
-                cpuSamples && cpuSampleStacks, contextSwitches, contextSwitchStacks, pixEvents,
-                gpuTiming, gpuMemoryUsage, fileIo, maxFileSizeMb, durationSeconds, captureSysmonCounters);
+            TimingCaptureSettingsDto settings = TimingCaptureOptions.Resolve(new TimingCaptureRequest(preset, cpuSamples, cpuSamplesPerSecond,
+                cpuSampleStacks, contextSwitches, contextSwitchStacks, pixEvents, gpuTiming, gpuMemoryUsage, fileIo, fileIoStacks, maxFileSizeMb,
+                durationSeconds, captureSysmonCounters, virtualAllocEvents, heapAllocEvents, pixMemEvents, pageFaults, trackedFunctions,
+                mergeKernelImages, stacksForAllProcesses, clrData, video, videoSourceType, videoSourceId, includeCaptureEtl, circular, forceComPath,
+                gpuOnlyEvents, minimalInstrumentation));
             var (options, parts) = TimingCaptureOptions.Create(settings);
+            IReadOnlyList<TimingOptionPartDto> optionParts = TimingCaptureOptions.Describe(parts);
             ConnectionHandle h = session.Get<ConnectionHandle>(handle);
             if (h.TimingCaptureInProgress is not null)
             {
                 throw PixErrors.InvalidState($"A timing capture is already in progress: {h.TimingCaptureInProgress}",
                     [new ToolCallDto("pix_device_timing_capture_stop", new { handle }, CostHints.Job)]);
             }
-            string full = Path.GetFullPath(outputPath);
+            string full = ServerPaths.Full(outputPath);
             Directory.CreateDirectory(Path.GetDirectoryName(full) ?? ".");
-            PixApiExtensionsDeviceConnection.StartTimingCapture(h.Connection, full, options, parts);
+            try
+            {
+                PixApiExtensionsDeviceConnection.StartTimingCapture(h.Connection, full, options, parts);
+            }
+            catch (Exception ex) when (ex is not PixToolException and not OperationCanceledException)
+            {
+                ErrorDto detail = PixErrors.ToDto(ex);
+                throw new PixToolException(detail with
+                {
+                    Message = $"{detail.Message} Option parts sent: {string.Join(", ", optionParts.Select(o => $"{o.Type}={o.Value}"))}.",
+                    NextCalls = [new ToolCallDto("pix_device_timing_capture_start", new { handle, outputPath, preset = "default" }, CostHints.Job)],
+                });
+            }
             h.TimingCaptureInProgress = full;
-            h.Note("timingCaptureStarted", new { path = full, settings });
-            return new { started = true, path = full, settings };
+            h.Note("timingCaptureStarted", new { path = full, settings, optionParts });
+            return new { started = true, path = full, settings, optionParts, notes = CompatibilityNotes.Texts("timingCapture", GpuVendor.Unknown, PixDiscovery.Version) };
         }, cancellationToken);
 
     [McpServerTool(Name = "pix_device_timing_capture_stop", Title = "Stop timing capture", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description("Stops the in-progress timing capture and optionally opens the resulting file as a timing capture handle. PIX finalises the file asynchronously, so this runs as a job (waited for inline by default).")]

@@ -131,6 +131,8 @@ internal static class Playbooks
                     "Dr. PIX experiments replay the event with work disabled and report what each saves.", Optional: true),
                 new(3, "pix_gpu_shader_code", """{"shaderRef":"$shaderRef"}""",
                     "The shader source of the event."),
+                new(1, "pix_gpu_shader_static_profile", """{"shaderRef":"$shaderRef","target":"Xe2-HPG","waitSeconds":60}""",
+                    "Static profile of the same shader for an Intel Xe2 target (or an AMD family from pix_shader_targets): instruction mix, register pressure and loop hot spots.", Optional: true),
             ],
             [
                 "Fewer than 64 thread groups with EOP far above execution time usually means launch overhead, not shader cost.",

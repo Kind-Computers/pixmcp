@@ -64,6 +64,13 @@ public static class PixErrors
         public const string PreviewInvalidOutput = "preview_invalid_output";
         public const string PreviewTooLarge = "preview_too_large";
         public const string ExportMissingOutput = "export_missing_output";
+        public const string PixToolUnavailable = "pixtool_unavailable";
+        public const string PixToolStartFailed = "pixtool_start_failed";
+        public const string PixToolTimeout = "pixtool_timeout";
+        public const string PixToolFailed = "pixtool_failed";
+        public const string GlobalIdMismatch = "global_id_mismatch";
+        public const string SubcaptureMissingOutput = "subcapture_missing_output";
+        public const string SubcaptureInvalidOutput = "subcapture_invalid_output";
         public const string BlobWindowTooLarge = "blob_window_too_large";
         public const string CsvFileNotFound = "csv_file_not_found";
         public const string CsvPassNotFound = "csv_pass_not_found";
@@ -104,7 +111,7 @@ public static class PixErrors
         public const string ToolError = "tool_error";
 
         /// <summary>Codes that describe a transient condition the caller may retry after following nextCalls.</summary>
-        public static readonly IReadOnlySet<string> Retryable = new HashSet<string>(StringComparer.Ordinal) { AnalysisActive, SqlStoreBusy, PreparationUnavailable, ResultCapacityExceeded, SqlInterrupted, SqlTimeout, Timeout, TimingCaptureBusy, TimingQueryInterrupted, TimingQueryInvalidated, WorkerBusy };
+        public static readonly IReadOnlySet<string> Retryable = new HashSet<string>(StringComparer.Ordinal) { AnalysisActive, SqlStoreBusy, PixToolTimeout, PreparationUnavailable, ResultCapacityExceeded, SqlInterrupted, SqlTimeout, Timeout, TimingCaptureBusy, TimingQueryInterrupted, TimingQueryInvalidated, WorkerBusy };
 
         /// <summary>Every code, sorted; derived from the constants so nothing can be emitted that is not documented.</summary>
         public static readonly IReadOnlyList<string> All = typeof(Codes).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
@@ -297,6 +304,17 @@ public static class PixErrors
     public static bool IsUnsupportedHResult(int? hresult) => hresult is unchecked((int)0x80004001)
         or unchecked((int)0x80004002) or unchecked((int)0x80070032) or unchecked((int)0x887A0004);
 
+    /// <summary>True when an exception means the driver or PIX build does not support the feature: an unsupported HRESULT or the unsupported_feature code.</summary>
+    public static bool IsUnsupported(Exception ex)
+        => ex is PixToolException { Detail.Code: Codes.UnsupportedFeature } || IsUnsupportedHResult(HResultOf(ex)) || ToDto(ex).Code == Codes.UnsupportedFeature;
+
+    /// <summary>
+    /// True when PIX declined the operation with one of its own facility codes (other than the Developer Mode codes). That alone does not
+    /// establish that the feature is unsupported.
+    /// </summary>
+    public static bool IsDeclined(Exception ex)
+        => HResultOf(ex) is int hr && IsPixFacility(hr) && hr != E_PIX_DEVELOPER_MODE_NOT_ENABLED && hr != E_PIX_FEATURE_REQUIRES_DEVELOPER_MODE;
+
     /// <summary>PIX reports its own failures with facility 0xABC (0x8ABC0000..0x8ABCFFFF).</summary>
     public static bool IsPixFacility(int hresult) => ((uint)hresult & 0xFFFF0000) == 0x8ABC0000;
 
@@ -365,7 +383,7 @@ public static class PixErrors
         unavailable = true,
         feature,
         reason = Describe(ex),
-        state = IsUnsupportedHResult(HResultOf(ex)) ? "unsupported" : "unknown",
+        state = IsUnsupported(ex) ? "unsupported" : "unknown",
         error = ToDto(ex),
     };
 }

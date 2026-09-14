@@ -93,6 +93,12 @@ public sealed partial class GpuCaptureHandle : PixHandle
     public ulong? SelectedAdapter { get; set; }
     public uint? SelectedPowerState { get; set; }
     public PIX_ANALYSIS_FLAGS? SelectedFlags { get; set; }
+
+    /// <summary>The pixtool Global ID check, kept once verified or mismatched (first eventRef preview or subcapture); null until then.</summary>
+    internal GlobalIdMappingDto? GlobalIdMapping { get; set; }
+
+    /// <summary>Where this capture came from when pix_gpu_subcapture wrote it.</summary>
+    public SubcaptureOriginDto? DerivedFrom { get; set; }
     public DateTimeOffset? AnalysisStartedAt { get; private set; }
     /// <summary>
     /// Settings of the analysis-start job that is queued or running (set under <see cref="PixHandle.PreparationGate"/>).
@@ -410,6 +416,9 @@ public sealed partial class GpuCaptureHandle : PixHandle
         selectedAdapter = SelectedAdapter,
         selectedPowerState = SelectedPowerState,
         flags = SelectedFlags,
+        flagsDecoded = AnalysisFlags.Decode(SelectedFlags),
+        flagsSource = AnalysisFlags.Source(SelectedFlags),
+        flagNotes = CompatibilityNotes.Texts("analysisFlags", GpuVendor.Unknown, PixDiscovery.Version),
         timingCollected = Timing is not null,
         countersCollected = CollectedCounters.Keys.ToArray(),
         replayVendor = ReplayVendor(),

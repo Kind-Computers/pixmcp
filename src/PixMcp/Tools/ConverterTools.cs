@@ -14,7 +14,7 @@ public static class ConverterTools
     public static Task<string> Format(PixSession session, [Description("Path to a .wpix file.")] string path, CancellationToken cancellationToken = default)
         => Tools.Run(session, "pix_capture_format", () =>
         {
-            string full = Path.GetFullPath(path);
+            string full = ServerPaths.Full(path);
             IPixCaptureFileConverter converter = session.Factory.CreatePixCaptureFileConverter<IPixCaptureFileConverter>();
             PIX_GPU_CAPTURE_FILE_FORMAT format = _IPixCaptureFileConverter_Extensions.GetGpuCaptureFileFormat(converter, full);
             return new

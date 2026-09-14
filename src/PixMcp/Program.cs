@@ -30,5 +30,6 @@ if (ServerOptions.Current.Problems is { Count: > 0 } problems)
     return 1;
 }
 
-await ServerHost.RunAsync(args);
+// Native PIX components print to standard output; the MCP transport gets its own copy of the handle first.
+await ServerHost.RunAsync(args, ProtocolStdout.Claim(Console.Error));
 return 0;

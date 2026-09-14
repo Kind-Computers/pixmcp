@@ -28,34 +28,12 @@ public static class GpuExportTools
         return Tools.RunJob(jobs, "pix_gpu_export_cpp", () => jobs.StartForHandle<GpuCaptureHandle>("export-cpp",
             $"Export {handle} to C++", handle, (job, capture) =>
         {
-            PixToolProcess.EnsureReplayAvailable(session);
-            string executable = PixToolProcess.Executable("export", PixDiscovery.InstallDir);
             ValidateOutputDirectory(output);
-            job.ThrowIfCancellationRequested();
-            string folder = Path.Combine(Path.GetTempPath(), "pixmcp-export-" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(folder);
-            string replayCapture = Path.Combine(folder, "capture" + Path.GetExtension(capture.Path));
-            try
-            {
-                PixToolProcess.CopyCapture(capture.Path, replayCapture, job.ThrowIfCancellationRequested);
-                var start = BuildStartInfo(executable, replayCapture, output, options);
-                PixToolProcess.PrepareArguments(start);
-                job.AddMessage("Exporting with pixtool defaults; native analysis adapter and power settings do not apply.");
-                string cmake = ExportToDirectory(output,
-                    () => PixToolProcess.Run(start, TimeSpan.FromSeconds(timeoutSeconds), job.Cancellation.Token, job.AddMessage, "export"),
-                    job.ThrowIfCancellationRequested, job.AddMessage);
-                return new GpuExportResultDto(capture.Id, capture.Path, output, cmake, "pixtool", PixDiscovery.Version, options);
-            }
-            finally
-            {
-                try
-                {
-                    if (File.Exists(replayCapture)) File.Delete(replayCapture);
-                    if (!Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder);
-                }
-                catch (IOException ex) { job.AddMessage("Temporary export capture cleanup failed: " + ex.Message); }
-                catch (UnauthorizedAccessException ex) { job.AddMessage("Temporary export capture cleanup failed: " + ex.Message); }
-            }
+            using PixToolRun run = PixToolRun.Start(session, capture, job, "export");
+            string cmake = ExportToDirectory(output,
+                () => run.Execute([ExportCommand(output, options)], TimeSpan.FromSeconds(timeoutSeconds)),
+                job.ThrowIfCancellationRequested, job.AddMessage);
+            return new GpuExportResultDto(capture.Id, capture.Path, output, cmake, "pixtool", PixDiscovery.Version, options);
         }), waitSeconds, cancellationToken);
     }
 
@@ -64,7 +42,7 @@ public static class GpuExportTools
         if (string.IsNullOrWhiteSpace(outputDirectory) || outputDirectory.Any(c => c == '"' || char.IsControl(c)))
             throw new PixToolException(PixErrors.Codes.InvalidArguments, "outputDirectory must be a valid nonempty directory path without quotes or control characters.");
         string full;
-        try { full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(outputDirectory)); }
+        try { full = Path.TrimEndingDirectorySeparator(ServerPaths.Full(outputDirectory)); }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
         { throw new PixToolException(PixErrors.Codes.InvalidArguments, "Invalid outputDirectory: " + ex.Message); }
         string? parent = Path.GetDirectoryName(full);
@@ -76,12 +54,15 @@ public static class GpuExportTools
     }
 
     internal static ProcessStartInfo BuildStartInfo(string executable, string capture, string output, GpuExportOptionsDto options)
+        => PixToolRunner.StartInfo(executable, capture, [ExportCommand(output, options)]);
+
+    internal static PixToolCommand ExportCommand(string output, GpuExportOptionsDto options)
     {
-        var start = PixToolProcess.StartInfo(executable, ["--output=quiet", "--log=off", "open-capture", capture, "export-to-cpp", output]);
-        if (options.UseWinPixEventRuntime) start.ArgumentList.Add("--use-winpixeventruntime");
-        if (options.UseAgilitySdk) start.ArgumentList.Add("--use-agilitySdk");
-        if (options.UseReplayTimeExecuteIndirectBuffers) start.ArgumentList.Add("--use-replay-time-executeindirect-buffers");
-        return start;
+        var arguments = new List<string> { output };
+        if (options.UseWinPixEventRuntime) arguments.Add("--use-winpixeventruntime");
+        if (options.UseAgilitySdk) arguments.Add("--use-agilitySdk");
+        if (options.UseReplayTimeExecuteIndirectBuffers) arguments.Add("--use-replay-time-executeindirect-buffers");
+        return new("export-to-cpp", arguments);
     }
 
     internal static string ExportToDirectory(string outputDirectory, Action run, Action checkCancellation, Action<string> diagnostic)

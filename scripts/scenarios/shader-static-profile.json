@@ -1,0 +1,7 @@
+[
+ ["pix_shader_targets", {"vendor": "intel"}],
+ ["pix_gpu_shader_static_profile", {"target": "Xe2-HPG", "waitSeconds": 120, "sources": [{"target": "cs_6_0", "defines": ["HEAVY"], "hlsl": "RWStructuredBuffer<float> Output : register(u0);\n[RootSignature(\"UAV(u0)\")]\n[numthreads(8, 8, 1)]\nvoid main(uint3 id : SV_DispatchThreadID)\n{\n    float sum = 0;\n    for (int i = 0; i < 4; i++) sum += sin(id.x * i) * cos(id.y + i);\n#ifdef HEAVY\n    for (int j = 0; j < 16; j++) sum += sqrt(abs(sum) + j);\n#endif\n    Output[id.x] = sum;\n}\n"}]}, {"status": "succeeded"}],
+ ["pix_result_read", {"resultRef": "$pix_gpu_shader_static_profile.resultRef", "pointer": "/shaders/0"}, {"value.stage": "COMPUTE"}],
+ ["pix_shader_targets", {"vendor": "amd"}],
+ ["pix_gpu_shader_static_profile", {"target": "gfx1201", "waitSeconds": 120, "sources": [{"target": "vs_6_0", "hlsl": "float4 main(uint id : SV_VertexID) : SV_Position { return float4((id & 1) ? 1 : -1, 0, 0, 1); }"}, {"target": "ps_6_0", "hlsl": "float4 main(float4 pos : SV_Position) : SV_Target { float v = 0; for (int i = 0; i < 8; i++) v += sin(pos.x * i); return float4(v, 0, 0, 1); }"}]}, {"status": "succeeded"}]
+]

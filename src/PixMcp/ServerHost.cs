@@ -33,7 +33,7 @@ internal static class ServerHost
         return metadata > 0 ? version[..metadata] : version;
     }
 
-    public static async Task RunAsync(string[] args)
+    public static async Task RunAsync(string[] args, Stream? protocolOutput = null)
     {
         var builder = Host.CreateApplicationBuilder(args);
 
@@ -51,13 +51,15 @@ internal static class ServerHost
         builder.Services.AddSingleton<PixSession>();
         builder.Services.AddSingleton<JobManager>();
 
-        builder.Services
+        IMcpServerBuilder server = builder.Services
             .AddMcpServer(o =>
             {
                 o.ServerInfo = new() { Name = "pixmcp", Version = Version };
                 o.ServerInstructions = Instructions;
-            })
-            .WithStdioServerTransport()
+            });
+        // A claimed protocol stream keeps native writes to standard output out of the MCP transport (see ProtocolStdout).
+        server = protocolOutput is null ? server.WithStdioServerTransport() : server.WithStreamServerTransport(Console.OpenStandardInput(), protocolOutput);
+        server
             .WithRequestFilters(StructuredToolResults.Configure)
             .WithToolsFromAssembly()
             .WithResourcesFromAssembly()

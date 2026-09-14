@@ -56,6 +56,9 @@ public sealed class DumpHandle : PixHandle
     public List<IPixPostmortemQueueInfo>? Queues { get; set; }
     public object? Metadata { get; set; }
 
+    /// <summary>PIX's diagnosis, read once and shared by pix_dump_info and pix_dump_triage.</summary>
+    public PixMcp.Tools.DumpDiagnosisDto? Diagnosis { get; set; }
+
     public override object Summary() => new
     {
         handle = Id,

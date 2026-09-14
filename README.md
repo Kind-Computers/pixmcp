@@ -279,6 +279,7 @@ transient condition to retry after following `nextCalls`.
 | `export_missing_output` |  | pixtool completed without producing the export. |
 | `file_exists` |  | The output file exists; pass overwrite=true or another path. |
 | `file_not_found` |  | An input file does not exist. |
+| `global_id_mismatch` |  | pixtool Global IDs differ from this capture's GPU ids, so exact-event previews and subcaptures are refused; nextCalls fall back to the nearest marker. |
 | `image_too_large` |  | The image exceeds the decoding or artifact limit; retrieve the original bytes instead. |
 | `invalid_arguments` |  | An argument is missing, malformed or out of range; the message names it and nextCalls show a corrected call when one exists. |
 | `invalid_image` |  | The PNG header is malformed. |
@@ -295,6 +296,10 @@ transient condition to retry after following `nextCalls`.
 | `pixdiff_start_failed` |  | pixdiff could not be started. |
 | `pixdiff_timeout` |  | pixdiff did not finish within its timeout. |
 | `pixdiff_unavailable` |  | pixdiff.exe was not found (PIXMCP_PIXDIFF_PATH, beside the server, or PATH). |
+| `pixtool_failed` |  | pixtool exited with an error; the message names the operation and pixtool's first error line. |
+| `pixtool_start_failed` |  | pixtool could not be started. |
+| `pixtool_timeout` | yes | pixtool exceeded its timeout and was terminated (retryable). |
+| `pixtool_unavailable` |  | The PIX install has no pixtool.exe. |
 | `preparation_failed` |  | The preparation job (analysis, timing, counters, resources) failed; the message carries its error. |
 | `preparation_unavailable` | yes | The preparation finished but its data vanished (analysis stopped, handle changed); retry the call (retryable). |
 | `preview_invalid_output` |  | pixtool produced something that is not a PNG. |
@@ -317,6 +322,8 @@ transient condition to retry after following `nextCalls`.
 | `sql_capacity_exceeded` |  | Populating a family would grow the GPU SQL store past PIXMCP_GPUSQL_MAX_BYTES; the family keeps its previous rows. |
 | `sql_store_closed` |  | The GPU capture handle and its SQL store closed; reopen the capture and populate again. |
 | `sql_store_busy` | yes | A populate transaction holds the GPU SQL store; retry. |
+| `subcapture_invalid_output` |  | PIX does not read the file pixtool wrote as a current-format capture. |
+| `subcapture_missing_output` |  | pixtool completed without writing the subcapture. |
 | `timeout` | yes | A bounded wait elapsed (retryable). |
 | `timing_capture_busy` | yes | The timing capture is being saved or resolved; retry (retryable). |
 | `timing_capture_invalid` |  | The file is not a recorded timing capture. |
@@ -648,6 +655,42 @@ failure and includes source-retrieval calls when available. A PDB hash identifie
 expected symbols; it does not establish that PIX found a matching PDB. Diagnostics do
 not load source text, search local PDB directories, or scan other shaders.
 
+### Static shader profiling
+
+`pix_shader_targets` lists the AMD and Intel GPU targets that PIX can compile for with the offline
+compilers shipped in its install, whatever GPU the machine has. On 2606.18 these are Intel Xe2
+(Battlemage, Lunar Lake) and Xe3 (Panther Lake), and AMD RDNA3, RDNA3.5 and RDNA4 families. Target
+ids can change between PIX releases, so pass an architecture (`Xe2-HPG`), family (`gfx1201`) or
+adapter name; `extra.families` gives one stable spelling per family.
+
+`pix_gpu_shader_static_profile` compiles a pipeline for one target as a job. Pass `sources` to
+profile HLSL without a capture, or `shaderRef` / `shaderKey` to profile a captured shader whose
+HLSL the capture holds (analysis starts if needed, and the capture's pipeline state, root
+signature and application description are used). Each shader summary reports the instruction
+mix with fixed cycle estimates, register pressure, loops from the control flow graph, hot spots
+weighted by loop depth, HLSL source lines where the vendor maps them, compiler warnings and, for
+AMD, the compiler's resource usage. Every block and instruction is under `/detail`. A preprocess
+or compile error is data: `succeeded: false` with `phase`, `compilerOutput` and `hints`.
+
+Behaviour observed on PIX 2606.18:
+
+- Defines travel to the compiler as `-DNAME=VALUE` arguments; `coverage.definesFormat.verified`
+  reports whether the probe confirmed it.
+- Inline pipelines start from PIX's defaults, whose root signature is empty. A shader that binds
+  resources declares its root signature with `[RootSignature("...")]`, and the server then drops
+  the default. A graphics pipeline needs its vertex shader and uses a triangle topology with one
+  `R8G8B8A8_UNORM` render target unless `pipeline` says otherwise.
+- AMD reports no source mapping. Intel reports none for pixel shaders, returns a placeholder shader
+  hash and fails mesh pipelines. Weights and cycles are static estimates, not measured GPU time,
+  and the server does not estimate theoretical occupancy.
+
+`pix_gpu_shader_profile` profiles the same shaders live on the local GPU when its driver supports
+it. The result totals samples and stall samples per shader and across shaders, names each shader's
+dominant stall with a keyword heuristic (memory latency, dependencies, instruction issues, control
+flow), lists the `topN` hottest instructions by ISA byte offset with matched `shaderRef`s, and keeps
+every instruction under `/detail`. Samples are counts, not time. A driver without live profiling
+returns a cached `unavailable` marker that points at static profiling.
+
 ### Capture comparison
 
 `pix_gpu_compare` takes `baselineHandle`, `candidateHandle`, and selected sections:
@@ -686,8 +729,8 @@ Set `ignoreAlpha: true` to view stored RGB as opaque before cropping or resizing
 Render targets can contain useful scene colors with zero alpha, which otherwise
 appear transparent or black. This option defaults to false and reports the opaque
 transformation in image metadata; byte paging still returns the original PNG.
-`pix_gpu_preview` uses the installed `pixtool.exe` to replay and export an RTV slot or
-depth target. It returns an artifact reference, dimensions, and selection metadata;
+`pix_gpu_preview` uses the installed `pixtool.exe` to replay and export RTV slots or the
+depth target. It returns artifact references, dimensions, and selection metadata;
 `pix_gpu_preview_image` retrieves inline MCP image content and
 `pix_gpu_preview_bytes` pages PNG bytes.
 
@@ -697,18 +740,34 @@ the PIX worker, with a hidden process, deadline, cancellation, and temporary-fil
 Each replay uses a temporary capture copy because the native document keeps the original
 open. CLI replay uses its own defaults, independently of native analysis adapter settings.
 
-Supported selectors follow pixtool's semantics: no marker selects the last instance
-with the requested resource bound; a unique exact marker name selects its last child
-with that resource bound. Use the exact name returned by event enumeration.
-This is not a promise of an exact arbitrary-event or presentation-time image.
-The input schema exposes only selectors supported by the CLI.
-Marker names containing literal double quotes or control characters are unsupported by
-the CLI argument parser; capture-end selection remains available.
+Selection follows pixtool: `eventRef` picks that exact event through `--global-id` (the image is
+the resource's contents after the event), a unique exact `markerName` picks its last child with the
+resource bound, and neither picks the last event with it bound. The event needs a GPU id (draws,
+dispatches, clears and `SetMarker` labels have one; `BeginEvent` markers do not). The first
+`eventRef` preview or subcapture of a capture chains `save-event-list` and compares up to 64 of
+pixtool's Global IDs with the native GPU ids (pixtool lists only the first queue): `verified` needs
+at least eight matching rows and turns the `exactEventPreview` capability `supported`; a mismatch
+fails with `global_id_mismatch` (nextCalls fall back to the nearest marker) and disables exact
+selection for that capture; `inconclusive` proceeds with a `warning` and checks again next time.
+`targets` saves up to eight RTV or depth images from one replay. pixtool stops at the first command
+that fails, so one missing render target fails the whole job. Marker names containing literal
+double quotes or control characters are unsupported by the CLI argument parser.
 
 Artifacts are memory-resident, with a 50-item/64 MiB cache and a 32 MiB per-image limit.
 Inline images have a 4 MiB limit; oversized originals get a thumbnail automatically,
 while byte paging retains the original PNG. Closing the capture
 expires its artifacts.
+
+### Subcaptures
+
+`pix_gpu_subcapture(handle, scope | markerPathPrefix)` runs pixtool `recapture-region` over the
+first and last GPU ids of the selection (a prefix must match exactly one marker subtree) and writes
+a smaller `.wpix`, by default `<capture>.sub-<first>-<last>.wpix` beside the source (`outPath` and
+`overwrite` follow the usual file rules). The job checks the Global ID mapping as previews do,
+confirms that PIX reads the output as a current-format capture, and with `open: true` (the default)
+opens it as a new handle whose `pix_gpu_info.derivedFrom` names the source handle, scope and GPU
+ids. A subcapture holds the region's GPU work plus the state setup pixtool adds, and its Global IDs
+restart at 1, so its totals, rollups and frame reports describe the region, not the original frame.
 
 ### Export a capture to C++
 
@@ -751,6 +810,18 @@ follow-up calls. `GPU/Total` links to the capture overview instead of a marker.
 These are name-based candidates. CSV recordings and GPU replay measurements retain
 separate provenance and do not establish capture identity or directly comparable timing.
 
+### Replay flags
+
+`pix_gpu_analysis_start` accepts the eight `PIX_ANALYSIS_FLAGS` and `NONE` by short name
+(`IGNORE_INCOMPATIBILITIES`, `USE_REPLAY_ARGUMENT_BUFFERS`, `USE_SINGLE_COMMAND_QUEUE`,
+`ENABLE_DEBUG_LAYER`, `ENABLE_RECREATE_AT_GPUVA`, `ENABLE_APPLICATION_SPECIFIC_DRIVER_STATE`,
+`DISABLE_GPU_PLUGINS`, `FORCE_SET_APPLICATION_SPECIFIC_DRIVER_STATE`); the `PIX_ANALYSIS_FLAG_` and
+`PIX_ANALYSIS_` prefixes are optional and the input schema lists the names under `items.enum`. An
+unknown name fails with `invalid_arguments` and a retry that keeps the recognised flags.
+`pix_gpu_analysis_status` and replay provenance report `flagsDecoded` (names and meanings) and
+`flagsSource`: `explicit` when flags were passed, `pixDefault` when PIX chose, in which case the
+effective flags are not observable.
+
 ### Live and recorded timing captures
 
 GPU capture waits for launch/attach readiness callbacks for up to
@@ -763,9 +834,24 @@ Windows may request UAC approval when PIX starts its timing recorder. Complete t
 desktop prompt before recording; unattended runners need the PIX service/elevation
 configured in advance.
 
-`pix_device_timing_capture_start` accepts `contextSwitchStacks` and `captureSysmonCounters`
-(both default false). Enable both for the tutorial's CPU/GPU investigation. Switch stacks
-require `contextSwitches=true`; the start response includes effective capture settings.
+`pix_device_timing_capture_start` takes a `preset` (`default`, `memory`, `fileIo`, `gpuOnly`,
+`minimal`) and explicit arguments that override it: CPU samples and stacks, context switches and
+`contextSwitchStacks`, PIX events, GPU timing and memory usage, file I/O and `fileIoStacks`, the
+event levels `virtualAllocEvents`, `heapAllocEvents`, `pixMemEvents` and `pageFaults` (`none`,
+`enabled`, `withStacks`), tracked functions, kernel image merging, stacks for all processes, and the
+option parts `captureSysmonCounters`, `video` (with `videoSourceType` and `videoSourceId`), `clrData`,
+`includeCaptureEtl`, `circular`, `forceComPath`, `gpuOnlyEvents` and `minimalInstrumentation`.
+Enable `contextSwitchStacks` and `captureSysmonCounters` for the tutorial's CPU/GPU investigation.
+The response echoes the effective `settings`, the `optionParts` sent to PIX (the sysmon part is
+always sent, the others only when enabled) and capture notes; a failed start names the parts and
+suggests the default preset. Memory events, page faults and stacks can produce multi-GB captures.
+
+`pix_device_take_gpu_capture` takes `delimiter` (`present`, or `capturableRegion` for apps that call
+`ID3D12SharingContract::BeginCapturableWork`/`EndCapturableWork`) and `captureKey` (`none` or
+`F1`–`F12`, always written so an earlier hotkey is cleared); `captureOptions` in the result echoes
+both. With `thumbnail=true` (the default) the result carries `thumbnail { available, artifactRef,
+width, height }`: PIX's screenshot kept as a preview artifact owned by the opened capture, or by the
+device handle when `open=false`, readable with `pix_gpu_preview_image` until that handle closes.
 Launch Unreal with `-PIX -statnamedevents` for timing capture and keep GPU-capture
 injection (`-attachPIX`, or `underGpuCapture=true`) for separate GPU-capture runs.
 
@@ -963,9 +1049,20 @@ counters and Dr. PIX runs are not materialised yet.
 
 ### Dump triage
 
-`pix_dump_triage` summarizes deterministic evidence: nested incomplete events,
-page faults, resource lifetime information, breadcrumbs, and shader waves. It includes
-coverage and follow-up calls rather than claiming a definitive cause.
+`pix_dump_triage` ranks deterministic evidence: page faults with resource lifetime information,
+PIX's own diagnosis (error code, bucket, GPU status and brief summary, returned as `diagnosis` and
+labelled heuristic), D3D runtime journal failures (the last 200 entries, up to 20 recent errors),
+queue hardware status entries of WARNING severity or above, shader exceptions, in-progress and
+possibly-completed events, GPU state tables whose name or description mentions a fault, hang,
+timeout, error, status, reset or exception, and DRED breadcrumb boundaries. Event and hardware
+status observations on a queue that also has page faults or in-progress events gain 10 priority
+points (capped at 99, below page faults). The event walk visits at most `maxEvents` events
+(default 5,000, maximum 50,000); a truncated walk reports `truncated` coverage and continuation
+calls. `eventStatusCountsByQueue` splits the status counts per queue, and each section's coverage is
+`available`, `absent`, `unavailable`, `truncated` or `unsupported`. `IPixD3DState` has no managed
+projection in PIX 2606.18, so `d3dState` is always `unsupported`. Triage includes coverage and
+follow-up calls rather than claiming a definitive cause. `pix_dump_info` returns the same
+`diagnosis`, and `pix_dump_queues` rows add `maxHardwareSeverity`.
 
 Dump event references contain `handle`, `queueIndex`, and an `eventPath` of child indices.
 `pix_dump_event` follows those paths and pages direct children. Wave data, shader
@@ -986,10 +1083,10 @@ reading the preceding bytes because the native blob API only exposes prefix read
 | GPU capture | `pix_gpu_open`, `pix_gpu_info`, `pix_gpu_queues`, `pix_gpu_events`, `pix_gpu_event`, `pix_gpu_api_objects`, `pix_gpu_screenshot` |
 | Analysis | `pix_gpu_analysis_start`, `pix_gpu_analysis_status`, `pix_gpu_analysis_adapters`, `pix_gpu_analysis_stop` |
 | Timing/counters | `pix_gpu_timing_prepare`, `pix_gpu_timing_events`, `pix_gpu_timing_tree`, `pix_gpu_counters_list`, `pix_gpu_counters_prepare`, `pix_gpu_counters_read`, `pix_gpu_occupancy`, `pix_gpu_hf_counters` |
-| Pipeline/shaders | `pix_gpu_pipeline_state`, `pix_gpu_shaders`, `pix_gpu_shader_uses`, `pix_gpu_shader_code`, `pix_gpu_shader_search`, `pix_gpu_shader_diagnostics`, `pix_gpu_shader_profile` |
+| Pipeline/shaders | `pix_gpu_pipeline_state`, `pix_gpu_shaders`, `pix_gpu_shader_uses`, `pix_gpu_shader_code`, `pix_gpu_shader_search`, `pix_gpu_shader_diagnostics`, `pix_gpu_shader_profile`, `pix_shader_targets`, `pix_gpu_shader_static_profile` |
 | Resources | `pix_gpu_resources`, `pix_gpu_resource`, `pix_gpu_event_resources`, `pix_gpu_resource_uses`, `pix_gpu_resource_timeline`, `pix_gpu_heap` |
 | Preview | `pix_gpu_preview`, `pix_gpu_preview_image`, `pix_gpu_preview_bytes` |
-| C++ export | `pix_gpu_export_cpp` |
+| C++ export | `pix_gpu_export_cpp`, `pix_gpu_subcapture` |
 | Unreal CSV | `pix_csv_compare`, `pix_csv_pass_candidates` |
 | Dr. PIX | `pix_gpu_drpix_experiments`, `pix_gpu_drpix_run` |
 | Timing captures | `pix_timing_open`, `pix_timing_overview`, `pix_timing_gpu_summary`, `pix_timing_tree`, `pix_timing_verdict`, `pix_correlate`, `pix_timing_schema`, `pix_timing_sql`, `pix_timing_events`, `pix_timing_submissions`, `pix_timing_thread_switches`, `pix_timing_counters_list`, `pix_timing_counters_read`, `pix_timing_hotspots`, `pix_timing_calltree`, `pix_timing_resolve_symbols`, `pix_timing_save` |

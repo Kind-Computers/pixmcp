@@ -12,7 +12,7 @@ public class PreviewAndTriageTests
     {
         const string capture = "C:\\captures with spaces\\$(secret)`capture.wpix";
         const string marker = "Lighting; $(not-a-command)";
-        ProcessStartInfo start = PreviewTools.BuildStartInfo("pixtool.exe", capture, "C:\\out folder\\preview.png", marker, PreviewTarget.RenderTarget, 3);
+        ProcessStartInfo start = PixToolRunner.StartInfo("pixtool.exe", capture, [PixToolCommand.SaveResource("C:\\out folder\\preview.png", false, 3, markerName: marker)]);
         Assert.False(start.UseShellExecute);
         Assert.True(start.CreateNoWindow);
         Assert.Equal(ProcessWindowStyle.Hidden, start.WindowStyle);
@@ -33,7 +33,7 @@ public class PreviewAndTriageTests
         PreviewTools.ValidateMarker(["Lighting", "Shadows"], "Lighting");
         Assert.Equal("ambiguous_marker", Assert.Throws<PixToolException>(() => PreviewTools.ValidateMarker(["Lighting", "Lighting"], "Lighting")).Detail.Code);
         Assert.Throws<PixToolException>(() => PreviewTools.ValidateMarker(["lighting"], "Lighting"));
-        Assert.DoesNotContain(typeof(PreviewTools).GetMethod(nameof(PreviewTools.Preview))!.GetParameters(), p => p.Name == "eventRef");
+        Assert.Contains(typeof(PreviewTools).GetMethod(nameof(PreviewTools.Preview))!.GetParameters(), p => p.Name == "eventRef");
         Assert.Throws<PixToolException>(() => PreviewTools.ValidateSelection(null, PreviewTarget.Depth, 1, 120));
         Assert.Throws<PixToolException>(() => PreviewTools.ValidateSelection(null, PreviewTarget.RenderTarget, 0, 0));
         Assert.Equal("unsupported_selection", Assert.Throws<PixToolException>(() => PreviewTools.ValidateSelection("quoted \"marker\"", PreviewTarget.RenderTarget, 0, 120)).Detail.Code);
@@ -92,14 +92,14 @@ public class PreviewAndTriageTests
         PreviewTools.RunProcess(Shell("[Console]::Out.Write(('x' * 100000)); [Console]::Error.Write(('y' * 100000))"), TimeSpan.FromSeconds(20), default, messages.Add);
         Assert.Equal(2, messages.Count);
         Assert.All(messages, message => Assert.Equal(4096, message.Length));
-        Assert.Equal("preview_failed", Assert.Throws<PixToolException>(() => PreviewTools.RunProcess(Shell("exit 3"), TimeSpan.FromSeconds(20), default, _ => { })).Detail.Code);
+        Assert.Equal("pixtool_failed", Assert.Throws<PixToolException>(() => PreviewTools.RunProcess(Shell("exit 3"), TimeSpan.FromSeconds(20), default, _ => { })).Detail.Code);
     }
 
     [Fact]
     public void ProcessTimeoutAndCancellationTerminateTheHelper()
     {
         Stopwatch elapsed = Stopwatch.StartNew();
-        Assert.Equal("preview_timeout", Assert.Throws<PixToolException>(() => PreviewTools.RunProcess(Shell("Start-Sleep -Seconds 30"), TimeSpan.FromMilliseconds(200), default, _ => { })).Detail.Code);
+        Assert.Equal("pixtool_timeout", Assert.Throws<PixToolException>(() => PreviewTools.RunProcess(Shell("Start-Sleep -Seconds 30"), TimeSpan.FromMilliseconds(200), default, _ => { })).Detail.Code);
         using var cancellation = new CancellationTokenSource(200);
         Assert.ThrowsAny<OperationCanceledException>(() => PreviewTools.RunProcess(Shell("Start-Sleep -Seconds 30"), TimeSpan.FromSeconds(20), cancellation.Token, _ => { }));
         Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(10));

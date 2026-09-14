@@ -80,11 +80,13 @@ internal static class LegacyResultSchemas
     private sealed record AdapterPowerStates(ulong Id, string Name, string Vendor, object? PowerStates);
     private sealed record Analysis(string Handle, bool Connected, bool Started, DateTimeOffset? StartedAt,
         IReadOnlyList<Adapter>? Adapters, ulong? SelectedAdapter, uint? SelectedPowerState, string? Flags,
+        AnalysisFlagsDto? FlagsDecoded, string FlagsSource, IReadOnlyList<string> FlagNotes,
         bool TimingCollected, IReadOnlyList<string> CountersCollected, VendorIdentity ReplayVendor, VendorIdentity CaptureVendor);
     private sealed record AnalysisAdapters(IReadOnlyList<AdapterPowerStates> Adapters, ulong? SelectedAdapter, uint? SelectedPowerState);
     private sealed record AnalysisStopped(bool Stopped, IReadOnlyList<string>? Warnings, Analysis Analysis);
     private sealed record GpuCaptureInfo(string Handle, string Path, object? FileInfo, object? Application,
-        IReadOnlyList<Queue> Queues, long TotalEvents, VendorIdentity Vendor, Analysis Analysis, IReadOnlyDictionary<string, CapabilityDto> Capabilities);
+        IReadOnlyList<Queue> Queues, long TotalEvents, VendorIdentity Vendor, Analysis Analysis, IReadOnlyDictionary<string, CapabilityDto> Capabilities,
+        SubcaptureOriginDto? DerivedFrom);
     private sealed record GpuEvent(EventDto Event, IReadOnlyList<EventDto> Parents, bool ParentsTruncated,
         int ChildCount, IReadOnlyList<EventDto> Children, bool ChildrenTruncated, IReadOnlyList<ToolCallDto> NextCalls);
     private sealed record ApiObject(ulong Index, string ApiObjectId, string Type, string Name);
@@ -121,13 +123,14 @@ internal static class LegacyResultSchemas
     private sealed record SystemCounter(uint Id, string Name, string? InternalName, string Group, string? Units,
         string? Description, double Min, double Max, bool IsDefault, string ProcessType);
     private sealed record PackagedApp(string PackageFullName, string ApplicationId, string? FriendlyName, string Architecture, string UnsupportedReason);
-    private sealed record CaptureStarted(bool Started, string Path, TimingCaptureSettingsDto Settings);
+    private sealed record CaptureStarted(bool Started, string Path, TimingCaptureSettingsDto Settings, IReadOnlyList<TimingOptionPartDto> OptionParts,
+        IReadOnlyList<string> Notes);
     private sealed record DetachedResult(bool Detached, bool Terminated);
     private sealed record D3dSettings(IReadOnlyList<object?> DebugLayer, IReadOnlyList<object?> Dred, IReadOnlyList<object?> Device);
     private sealed record SettingChanged(bool Changed, string Category, object Result);
-    private sealed record DumpInfo(string Handle, string Path, object Metadata, IReadOnlyList<object> Queues);
+    private sealed record DumpInfo(string Handle, string Path, object Metadata, IReadOnlyList<object> Queues, Tools.DumpDiagnosisDto? Diagnosis = null);
     private sealed record DumpQueue(int QueueIndex, ulong Id, string Name, string Type, string Status,
-        object? HardwareStatus, object? PageFaultCount, object? RootEventCount);
+        object? HardwareStatus, object? PageFaultCount, object? RootEventCount, string? MaxHardwareSeverity);
     private sealed record DumpEvent(Tools.DumpEventRef EventRef, ulong Id, string Kind, string Name, string Type,
         string Status, bool IsGpuWork, object? CorrelatedShaders, object? CorrelatedResources,
         object? ChildCount, object? Children, bool? ChildrenTruncated, IReadOnlyList<ToolCallDto>? NextCalls);

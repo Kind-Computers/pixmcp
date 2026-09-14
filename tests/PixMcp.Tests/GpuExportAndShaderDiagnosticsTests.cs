@@ -79,7 +79,7 @@ public sealed class GpuExportTests : IDisposable
     {
         string output = Path.Combine(_root, "partial");
         var messages = new List<string>();
-        Exception expected = cancel ? new OperationCanceledException() : new PixToolException("export_failed", "Compiler backend failed");
+        Exception expected = cancel ? new OperationCanceledException() : new PixToolException("pixtool_failed", "Compiler backend failed");
         Exception? actual = Record.Exception(() => GpuExportTools.ExportToDirectory(output, () =>
         {
             Directory.CreateDirectory(output);
@@ -105,11 +105,11 @@ public sealed class GpuExportTests : IDisposable
     [Fact]
     public void SharedProcessReportsExportSpecificErrors()
     {
-        Assert.Equal("export_unavailable", Assert.Throws<PixToolException>(() => PixToolProcess.Executable("export", _root)).Detail.Code);
+        Assert.Equal("pixtool_unavailable", Assert.Throws<PixToolException>(() => PixToolProcess.Executable("export", _root)).Detail.Code);
         var missing = PixToolProcess.StartInfo(Path.Combine(_root, "missing.exe"), []);
-        Assert.Equal("export_start_failed", Assert.Throws<PixToolException>(() => PixToolProcess.Run(missing, TimeSpan.FromSeconds(20), default, _ => { }, "export")).Detail.Code);
-        Assert.Equal("export_failed", Assert.Throws<PixToolException>(() => PixToolProcess.Run(Shell("exit 7"), TimeSpan.FromSeconds(20), default, _ => { }, "export")).Detail.Code);
-        Assert.Equal("export_timeout", Assert.Throws<PixToolException>(() => PixToolProcess.Run(Shell("Start-Sleep -Seconds 30"), TimeSpan.FromMilliseconds(200), default, _ => { }, "export")).Detail.Code);
+        Assert.Equal("pixtool_start_failed", Assert.Throws<PixToolException>(() => PixToolProcess.Run(missing, TimeSpan.FromSeconds(20), default, _ => { }, "export")).Detail.Code);
+        Assert.Equal("pixtool_failed", Assert.Throws<PixToolException>(() => PixToolProcess.Run(Shell("exit 7"), TimeSpan.FromSeconds(20), default, _ => { }, "export")).Detail.Code);
+        Assert.Equal("pixtool_timeout", Assert.Throws<PixToolException>(() => PixToolProcess.Run(Shell("Start-Sleep -Seconds 30"), TimeSpan.FromMilliseconds(200), default, _ => { }, "export")).Detail.Code);
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
         Assert.ThrowsAny<OperationCanceledException>(() => PixToolProcess.Run(Shell("exit 0"), TimeSpan.FromSeconds(20), cancellation.Token, _ => { }, "export"));

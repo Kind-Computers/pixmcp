@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using PixMcp.Pix;
+using PixMcp.Pix.Handles;
 using PixMcp.Tools;
 using Xunit;
 
@@ -246,6 +247,102 @@ public class IntegrationTests : IDisposable
             Assert.Equal("available", inspectedOccupancy.GetProperty("state").GetString());
         }
 
+        await SessionTools.Close(_session, handle);
+    }
+
+    [SkippableFact]
+    public async Task PixtoolPreviewsExactEventsAndCutsASubcapture()
+    {
+        Skip.IfNot(Available && TestArtifacts.AnalysisEnabled, "Set PIX_TEST_CAPTURE and PIX_TEST_ANALYSIS=1 to replay on the GPU");
+        string handle = Parse(await GpuCaptureTools.Open(_session, CapturePath!)).GetProperty("handle").GetString()!;
+        JsonElement[] items = Parse(await GpuCaptureTools.Events(_session, handle, queueIndex: 0, limit: 100)).GetProperty("items").EnumerateArray().ToArray();
+        EventRef RefOf(Func<string, bool> name) => JsonSerializer.Deserialize<EventRef>(
+            items.First(e => name(e.GetProperty("name").GetString()!)).GetProperty("eventRef").GetRawText(), Json.Options)!;
+
+        JsonElement draw = await PreviewResult(handle, RefOf(n => n == "DrawInstanced"));
+        Assert.Equal("verified", draw.GetProperty("selection").GetProperty("globalIdMapping").GetString());
+        Assert.False(draw.TryGetProperty("warning", out _));
+        Assert.Equal((640u, 480u), (draw.GetProperty("width").GetUInt32(), draw.GetProperty("height").GetUInt32()));
+        JsonElement clear = await PreviewResult(handle, RefOf(n => n == "ClearRenderTargetView"));
+        Assert.NotEqual(PreviewTools.GetArtifact(_session, draw.GetProperty("artifactRef").GetString()!),
+            PreviewTools.GetArtifact(_session, clear.GetProperty("artifactRef").GetString()!));
+        Assert.Equal("supported", Parse(await GpuCaptureTools.GetInfo(_session, handle)).GetProperty("capabilities").GetProperty("exactEventPreview").GetProperty("state").GetString());
+
+        string folder = Directory.CreateTempSubdirectory("pixmcp-subcapture-").FullName;
+        string? derived = null;
+        try
+        {
+            JsonElement job = Parse(await SubcaptureTools.Subcapture(_session, _jobs, handle, scope: RefOf(n => n.EndsWith("Triangle pass", StringComparison.Ordinal)),
+                outPath: Path.Combine(folder, "triangle pass.wpix"), waitSeconds: 300));
+            Assert.True(job.GetProperty("status").GetString() == "succeeded", job.GetRawText());
+            JsonElement result = _session.Results.ReadElement(job.GetProperty("resultRef").GetString()!, "", 16 * 1024 * 1024);
+            JsonElement origin = result.GetProperty("derivedFrom");
+            Assert.True(origin.GetProperty("firstGpuId").GetUInt32() <= origin.GetProperty("lastGpuId").GetUInt32());
+            derived = result.GetProperty("gpuCapture").GetProperty("handle").GetString()!;
+            Assert.Equal(handle, Parse(await GpuCaptureTools.GetInfo(_session, derived)).GetProperty("derivedFrom").GetProperty("sourceHandle").GetString());
+            Assert.Equal(3, Parse(await GpuCaptureTools.Events(_session, derived, queueIndex: 0, kind: "draw", mode: "count")).GetProperty("total").GetInt32());
+        }
+        finally
+        {
+            if (derived is not null) await SessionTools.Close(_session, derived);
+            try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
+        }
+        await SessionTools.Close(_session, handle);
+    }
+
+    private async Task<JsonElement> PreviewResult(string handle, EventRef eventRef)
+    {
+        JsonElement job = Parse(await PreviewTools.Preview(_session, _jobs, handle, eventRef: eventRef, waitSeconds: 300));
+        Assert.True(job.GetProperty("status").GetString() == "succeeded", job.GetRawText());
+        return _session.Results.ReadElement(job.GetProperty("resultRef").GetString()!, "", 16 * 1024 * 1024);
+    }
+
+    [SkippableFact]
+    public async Task ExplicitAnalysisFlagsAreDecodedInStatusAndProvenance()
+    {
+        Skip.IfNot(Available && TestArtifacts.AnalysisEnabled, "Set PIX_TEST_CAPTURE and PIX_TEST_ANALYSIS=1 to replay on the GPU");
+        string handle = Parse(await GpuCaptureTools.Open(_session, CapturePath!)).GetProperty("handle").GetString()!;
+        JsonElement start = Parse(await AnalysisTools.Start(_session, _jobs, handle, flags: ["ignore_incompatibilities", "PIX_ANALYSIS_FLAG_DISABLE_GPU_PLUGINS"], waitSeconds: 600));
+        Assert.True(start.GetProperty("status").GetString() == "succeeded", start.GetRawText());
+
+        GpuCaptureHandle capture = _session.Get<GpuCaptureHandle>(handle);
+        JsonElement status = Parse(Json.Serialize(capture.AnalysisStatus()));
+        string[] expected = ["IGNORE_INCOMPATIBILITIES", "DISABLE_GPU_PLUGINS"];
+        Assert.Equal("explicit", status.GetProperty("flagsSource").GetString());
+        Assert.Equal(expected, status.GetProperty("flagsDecoded").GetProperty("names").EnumerateArray().Select(n => n.GetString()));
+        Assert.Equal(expected, capture.Provenance().FlagsDecoded!.Names);
+        await SessionTools.Close(_session, handle);
+    }
+
+    [SkippableFact]
+    public async Task LiveShaderProfileSummarisesOrCachesAnUnsupportedMarker()
+    {
+        Skip.IfNot(Available && TestArtifacts.AnalysisEnabled, "Set PIX_TEST_CAPTURE and PIX_TEST_ANALYSIS=1 to replay on the GPU");
+        string handle = Parse(await GpuCaptureTools.Open(_session, CapturePath!)).GetProperty("handle").GetString()!;
+        JsonElement work = Parse(await GpuCaptureTools.Events(_session, handle, kind: "work", limit: 1));
+        EventRef scope = JsonSerializer.Deserialize<EventRef>(work.GetProperty("items")[0].GetProperty("eventRef").GetRawText(), Json.Options)!;
+        JsonElement first = Parse(await ShaderProfilingTools.Profile(_session, _jobs, handle, scope: scope, waitSeconds: 600));
+        Assert.True(first.GetProperty("status").GetString() == "succeeded", first.GetRawText());
+        JsonElement result = _session.Results.ReadElement(first.GetProperty("resultRef").GetString()!, "", 64 * 1024 * 1024);
+        if (result.TryGetProperty("unavailable", out JsonElement unavailable) && unavailable.GetBoolean())
+        {
+            Assert.Contains(result.GetProperty("state").GetString(), new[] { "unsupported", "declined" });
+            Assert.False(string.IsNullOrEmpty(result.GetProperty("vendor").GetString()));
+            Assert.Contains(result.GetProperty("nextCalls").EnumerateArray(), c => c.GetProperty("tool").GetString() == "pix_shader_targets");
+        }
+        else
+        {
+            JsonElement totals = result.GetProperty("totals");
+            Assert.True(totals.GetProperty("stalledSamples").GetUInt64() <= totals.GetProperty("totalSamples").GetUInt64());
+            foreach (JsonElement shader in result.GetProperty("shaders").EnumerateArray())
+            {
+                JsonElement samples = shader.GetProperty("samples");
+                Assert.Equal(samples.GetProperty("total").GetUInt64() - samples.GetProperty("stalled").GetUInt64(), samples.GetProperty("issuing").GetUInt64());
+            }
+        }
+        // An identical request joins the retained job instead of replaying again.
+        JsonElement second = Parse(await ShaderProfilingTools.Profile(_session, _jobs, handle, scope: scope, waitSeconds: 600));
+        Assert.Equal(first.GetProperty("jobId").GetString(), second.GetProperty("jobId").GetString());
         await SessionTools.Close(_session, handle);
     }
 

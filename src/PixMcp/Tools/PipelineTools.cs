@@ -402,13 +402,13 @@ public static class PipelineTools
         if (offset < 0 || limit is < 1 or > Paging.MaxLimit) throw PixErrors.InvalidArguments("offset must be nonnegative and limit must be between 1 and 1000.");
     }
 
-    private static IPixCollection ReadNodes(IPixShader shader, PIX_SHADER_CODE_TYPE type)
+    internal static IPixCollection ReadNodes(IPixShader shader, PIX_SHADER_CODE_TYPE type)
     {
         IPixCollection? nodes = PixApiExtensionsShaders.TryGetNodes(shader, type, out Exception ex);
         return nodes ?? throw PixErrors.UnavailableShaderData($"No {Json.EnumName(type)} code is available: {(ex is null ? "PIX returned no nodes" : PixErrors.Describe(ex))}");
     }
 
-    private static string ReadCode(IPixCollection nodes, ulong nodeIndex)
+    internal static string ReadCode(IPixCollection nodes, ulong nodeIndex)
     {
         IPixShaderNode? node = PixApiExtensionsShaders.TryGetNode(nodes, nodeIndex, out Exception nodeError);
         if (node is null) throw PixErrors.UnavailableShaderData(nodeError is null ? "Shader node is unavailable." : PixErrors.Describe(nodeError));

@@ -128,7 +128,8 @@ public sealed class OutputSchemaTests
         Validate("pix_csv_pass_candidates", new CsvPassCandidatesDto("result-1", pass.Name, "gpu-1", "BasePass",
             "name-based candidates", false, pass, 0, 0, 0, null, [], null, calls));
         Validate("pix_device_timing_capture_start", new { started = true, path = "capture.wpix",
-            settings = new TimingCaptureSettingsDto(true, 1000, true, true, true, true, true, false, false, 1024, 0, true) });
+            settings = new TimingCaptureSettingsDto(true, 1000, true, true, true, true, true, false, false, 1024, 0, true),
+            optionParts = new[] { new TimingOptionPartDto("captureSysmonCounters", "true") }, notes = new[] { "note" } });
         var job = new Job("job-1", "export-cpp", "Export frame").ToDto();
         Validate("pix_gpu_export_cpp", job);
         Validate("pix_csv_compare", job);
@@ -161,6 +162,21 @@ public sealed class OutputSchemaTests
             range, 42, new(4, 6, false, 5, 7, false, 3, 2, 1, 1, 2), new(1, 0, 1, null, [correlation], null),
             [new("GpuOnly", 1, 0.0, new EventRef("gpu-1", 1, 2), null)], [new("Frame", 2, 0.0, null, "cpu")],
             [new(0, "Graphics", "GRAPHICS", "1", "Graphics", "Direct", "typeAndName", "medium")], TimingDatabase.CorrelationSemantics, [], []));
+    }
+
+    [Fact]
+    public void DumpTriageSectionsMatchTheAdvertisedSchema()
+    {
+        var observation = new global::PixMcp.Tools.DumpTriageObservation("journal-3", 70, "runtimeError", "summary", new { code = "0x887A0006" },
+            [new ToolCallDto("pix_dump_journal", new { handle = "dump-1", offset = 3, limit = 1 })]);
+        Validate("pix_dump_triage", new global::PixMcp.Tools.DumpTriageDto("dump-1", new { }, "interpretation",
+            new global::PixMcp.Tools.DumpDiagnosisDto("D3D12_DEVICE_ERROR_CODE_HANG", "bucket", "status", "brief", true, null),
+            new Dictionary<string, global::PixMcp.Tools.DumpTriageCoverage> { ["events"] = new("truncated", 1, "maxEvents"), ["d3dState"] = new("unsupported", Reason: "note") },
+            new Dictionary<string, int> { ["IN_PROGRESS"] = 1 },
+            new Dictionary<string, IReadOnlyDictionary<string, int>> { ["0"] = new Dictionary<string, int> { ["IN_PROGRESS"] = 1 } },
+            new global::PixMcp.Tools.DumpJournalSummaryDto(4, 4, 1, 3),
+            Paging.Page(new[] { observation }, 1, 0, 10),
+            [new ToolCallDto("pix_dump_triage", new { handle = "dump-1", maxEvents = 20000 })]));
     }
 
     private static void Validate(string tool, object value)

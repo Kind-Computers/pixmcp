@@ -20,7 +20,7 @@ public static class PixDiffDiscovery
             if (string.IsNullOrWhiteSpace(configured) || !Path.IsPathFullyQualified(configured) || !File.Exists(configured)
                 || !Path.GetExtension(configured).Equals(".exe", StringComparison.OrdinalIgnoreCase))
                 return new(false, null, "PIXMCP_PIXDIFF_PATH", "PIXMCP_PIXDIFF_PATH must name an existing absolute path to pixdiff.exe. Correct or unset the override.");
-            return new(true, Path.GetFullPath(configured), "PIXMCP_PIXDIFF_PATH", null);
+            return new(true, ServerPaths.Full(configured), "PIXMCP_PIXDIFF_PATH", null);
         }
         string adjacent = Path.Combine(baseDirectory, "pixdiff.exe");
         if (File.Exists(adjacent)) return new(true, Path.GetFullPath(adjacent), "server directory", null);
@@ -72,7 +72,7 @@ internal static class CsvComparison
         if (string.IsNullOrWhiteSpace(path)) throw new PixToolException(PixErrors.Codes.InvalidArguments, "CSV paths must not be empty.");
         try
         {
-            string fullPath = Path.GetFullPath(path);
+            string fullPath = ServerPaths.Full(path);
             if (!File.Exists(fullPath)) throw new PixToolException(PixErrors.Codes.CsvFileNotFound, $"CSV file does not exist: {fullPath}");
             return fullPath;
         }

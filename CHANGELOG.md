@@ -294,6 +294,14 @@ add to this section until the release is tagged.
   tools that expose it arrive with R11.
 - `scripts/check_versions.py` (hosted CI) keeps README, CLAUDE.md and the sources on the
   verified PIX version; `.github/pull_request_template.md` asks for a CHANGELOG entry.
+- Static shader profiling for AMD and Intel targets (R25): `pix_shader_targets` lists the
+  offline-compiler targets of the PIX install, and `pix_gpu_shader_static_profile` compiles inline
+  HLSL or a captured shader (with its pipeline state and root signature) as a job whose result
+  summarises instruction mix, register pressure, loops, loop-weighted hot spots, source lines and
+  compiler resource usage, with every instruction under `/detail`. Compile errors are data. The
+  `staticShaderProfiling` capability reports `supported` whenever the API is present. Intel's offline compiler plugin writes `ASD_CompilationReport_*.md` files into the working
+  directory, so the server points it at `%TEMP%/pixmcp-compiler-reports` while PIX loads and runs vendor
+  compilers and resolves client paths against the directory it started in.
 - Ten playbook prompts (`pix_frame_budget`, `pix_regression`, `pix_dispatch_slow`,
   `pix_cpu_vs_gpu`, `pix_crash_triage`, `pix_async_overlap`, `pix_bandwidth_hogs`,
   `pix_fill_vs_vertex`, `pix_sql_investigation`, `pix_gpu_bottleneck`) with exact JSON calls,
@@ -306,6 +314,25 @@ add to this section until the release is tagged.
   and `pix_info.toolsets` reports the configuration.
 - `PIXMCP_TEXT_CONTENT=summary` sends a text block of at most 512 bytes with each successful
   result while `structuredContent` stays complete; `pix_info.textContent` reports the mode.
+- Capture and replay options (R27). `pix_gpu_analysis_start` documents and validates the eight
+  `PIX_ANALYSIS_FLAGS` plus `NONE` (short or prefixed names, `items.enum` in the input schema), and
+  analysis status and replay provenance decode them (`flagsDecoded`, `flagsSource`).
+  `pix_device_timing_capture_start` gains `preset`, the allocation event levels, page faults, file
+  I/O stacks, tracked functions, kernel image merging, all-process stacks and the remaining option
+  parts (video and its source, CLR data, capture ETL, circular, COM path, GPU-only events, minimal
+  instrumentation), and returns `optionParts` and notes. `pix_device_take_gpu_capture` gains
+  `delimiter`, `captureKey` and a screenshot `thumbnail` preview artifact.
+- pixtool integration (R28): `pix_gpu_preview` selects an exact event with `eventRef` (pixtool
+  `--global-id`, checked against the capture's GPU ids on first use and reported as
+  `selection.globalIdMapping`) and saves up to eight `targets` from one replay. The new
+  `pix_gpu_subcapture` cuts a scope into a smaller `.wpix` with `recapture-region` and opens it with
+  `derivedFrom`. pixtool jobs share one runner that copies the capture once and chains every command
+  after a single `open-capture`.
+- Dump triage completeness (R29): `pix_dump_triage` adds PIX's diagnosis, D3D runtime journal
+  failures, queue hardware status, fault and hang GPU state tables, per-queue event status counts, a
+  `maxEvents` walk budget with truncated coverage and continuations, a correlation bonus for queues
+  with page faults or in-progress events, and `d3dState` coverage (unsupported). `pix_dump_info`
+  returns the shared `diagnosis`, and `pix_dump_queues` rows add `maxHardwareSeverity`.
 
 ### Changed
 
@@ -436,6 +463,26 @@ add to this section until the release is tagged.
 - The server instructions shrank from about 5 KB to under 800 characters; the detail moved into
   tool descriptions, nextCalls and the playbook prompts. `pix_info` gains `toolsets` and
   `textContent`, and `pix_info.options` reports `PIXMCP_TOOLSETS` and `PIXMCP_TEXT_CONTENT`.
+- `pix_gpu_shader_profile` returns a summary tier (R26): totals and per-shader sample breakdowns
+  (stalled and issuing samples), stall totals, a heuristic keyword classification of the dominant
+  stall, the `topN` hottest instructions with matched shaderRefs and ISA and static-profile
+  nextCalls, and every instruction under `/detail` (previously `/shaders/N/instructions`). It gains
+  `topN`, `shaderKey`, `shaderRef`, `stage`, `hash` and `includeProvenance`; identical calls join one
+  job, and an unsupported driver yields a cached marker with the vendor, notes and static profiling
+  nextCalls; a call PIX declines (0x8ABC0007 on this server's NVIDIA driver) yields a `declined`
+  marker that is not cached on the handle.
+- `pix_device_timing_capture_start` arguments are nullable so a preset can supply their defaults.
+  Preview artifacts may be owned by any open handle (the device handle owns thumbnails of captures
+  taken with `open=false`). An array argument with advertised choices now rejects unknown elements
+  with `invalid_arguments` and a retry that keeps the recognised ones.
+- pixtool process failures are `pixtool_unavailable`, `pixtool_start_failed`, `pixtool_timeout`
+  (retryable) and `pixtool_failed` (naming the operation and pixtool's first error line) instead of
+  the `preview_*` and `export_*` variants. `pix_gpu_preview` results add `images`,
+  `selection.eventRef`, `selection.globalId`, `warning` and `replay.pixBuild`, and the
+  `exactEventPreview` capability reports `unknown` until a capture's Global IDs are checked.
+- Dump triage coverage for unreadable child events is keyed by the stable event path
+  (`eventChildren:<queue>:<path>`) instead of native event ids, which repeat; invalid dump event
+  references carry listing nextCalls.
 
 ### Removed
 

@@ -19,6 +19,7 @@ public sealed class PixSession : IDisposable
     private readonly ConcurrentDictionary<string, PixHandle> _handles = new();
     private readonly Dictionary<string, int> _counters = new();
     private IPixFactoryExperimental? _factory;
+    private ShaderProfilingSession? _shaderProfiling;
 
     public PixSession(PixWorker worker, ILogger<PixSession> logger, ResultStore? results = null)
     {
@@ -31,6 +32,8 @@ public sealed class PixSession : IDisposable
     public PixWorker Worker => _worker;
     public ResultStore Results { get; }
     public PixLog Log { get; }
+    /// <summary>Static shader profiling state (profiling document, targets, inline job cache); its PIX calls run on the worker.</summary>
+    internal ShaderProfilingSession ShaderProfiling => LazyInitializer.EnsureInitialized(ref _shaderProfiling, () => new ShaderProfilingSession(this));
     public bool FactoryCreated => _factory is not null;
     /// <summary>Whether IPixFactory.SetLogger succeeded (null until the factory exists); pix_info reports it with loggerError.</summary>
     public bool? LoggerAttached { get; private set; }

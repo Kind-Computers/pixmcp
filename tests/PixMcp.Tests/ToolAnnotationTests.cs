@@ -30,6 +30,7 @@ public sealed class ToolAnnotationTests
     [InlineData("pix_gpu_preview", false, false)]
     [InlineData("pix_gpu_screenshot", false, false)]
     [InlineData("pix_gpu_export_cpp", false, false)]
+    [InlineData("pix_gpu_subcapture", false, false)]
     [InlineData("pix_gpu_overview", true, false)]
     [InlineData("pix_gpu_events", true, false)]
     [InlineData("pix_close", false, true)]
@@ -60,6 +61,7 @@ public sealed class ToolAnnotationTests
             "pix_gpu_drpix_experiments", "pix_gpu_pipeline_state", "pix_gpu_shader_code", "pix_gpu_shader_search", "pix_gpu_shader_diagnostics",
             "pix_gpu_inspect_event", "pix_gpu_overview", "pix_gpu_event_resources", "pix_gpu_resource_uses", "pix_gpu_shaders", "pix_gpu_shader_uses",
             "pix_correlate", "pix_gpu_rollup", "pix_gpu_pipelines", "pix_gpu_queue_overlap", "pix_gpu_bubbles", "pix_gpu_resources", "pix_gpu_resource_timeline",
+            "pix_gpu_shader_static_profile",
         ];
         foreach (string tool in replaying)
         {

@@ -21,7 +21,8 @@ internal static class PixToolProcess
     {
         string executable = Path.Combine(installDirectory ?? string.Empty, "pixtool.exe");
         if (!File.Exists(executable))
-            throw new PixToolException(operation + "_unavailable", "The installed PIX runtime does not contain pixtool.exe.");
+            throw new PixToolException(PixErrors.Codes.PixToolUnavailable, $"{operation}: the installed PIX runtime does not contain pixtool.exe.", false,
+                [new ToolCallDto("pix_info", new { probe = true }, CostHints.Query)]);
         return executable;
     }
 
@@ -89,14 +90,15 @@ internal static class PixToolProcess
         cancellation.ThrowIfCancellationRequested();
         try
         {
-            if (!process.Start()) throw new PixToolException(operation + "_start_failed", "Could not start pixtool.");
+            if (!process.Start()) throw new PixToolException(PixErrors.Codes.PixToolStartFailed, $"{operation}: could not start pixtool.");
         }
         catch (Win32Exception ex)
         {
-            throw new PixToolException(operation + "_start_failed", "Could not start pixtool: " + ex.Message);
+            throw new PixToolException(PixErrors.Codes.PixToolStartFailed, $"{operation}: could not start pixtool: {ex.Message}");
         }
         Task<string> stdout = Drain(process.StandardOutput);
         Task<string> stderr = Drain(process.StandardError);
+        string output = "", errors = "";
         try
         {
             process.WaitForExitAsync(deadline.Token).GetAwaiter().GetResult();
@@ -106,15 +108,25 @@ internal static class PixToolProcess
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
             finally { process.WaitForExit(); }
             if (cancellation.IsCancellationRequested) throw new OperationCanceledException(cancellation);
-            throw new PixToolException(operation + "_timeout", $"pixtool exceeded the {operation} timeout and was terminated.", true);
+            throw new PixToolException(PixErrors.Codes.PixToolTimeout, $"{operation}: pixtool exceeded the timeout and was terminated.", true);
         }
         finally
         {
-            diagnostic(stdout.GetAwaiter().GetResult());
-            diagnostic(stderr.GetAwaiter().GetResult());
+            output = stdout.GetAwaiter().GetResult();
+            errors = stderr.GetAwaiter().GetResult();
+            diagnostic(output);
+            diagnostic(errors);
         }
         if (process.ExitCode != 0)
-            throw new PixToolException(operation + "_failed", $"pixtool exited with code {process.ExitCode}; see bounded job diagnostics.");
+            throw new PixToolException(PixErrors.Codes.PixToolFailed, $"{operation}: pixtool exited with code {process.ExitCode}{FirstError(output, errors)}; see bounded job diagnostics.");
+    }
+
+    /// <summary>pixtool's own error line (": ... pixtool error: PIXTOOL9 - ..."), else the first nonblank output line, bounded to 300 characters.</summary>
+    internal static string FirstError(params string[] streams)
+    {
+        string[] lines = streams.SelectMany(s => s.Split((char)13, (char)10)).Select(l => l.Trim()).Where(l => l.Length > 0).ToArray();
+        string? line = lines.FirstOrDefault(l => l.Contains("pixtool error", StringComparison.OrdinalIgnoreCase)) ?? lines.FirstOrDefault();
+        return line is null ? "" : ": " + (line.Length > 300 ? line[..300] : line);
     }
 
     private static async Task<string> Drain(StreamReader reader)

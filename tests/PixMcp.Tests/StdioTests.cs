@@ -171,6 +171,9 @@ public class StdioTests
         Assert.Equal("default", infoText.RootElement.GetProperty("options").GetProperty("inlineResultBytes").GetProperty("source").GetString());
         Assert.True(JsonElement.DeepEquals(infoText.RootElement, info.GetProperty("result").GetProperty("structuredContent")), info.GetRawText());
         OutputSchemaTests.AssertMatches(infoText.RootElement, tools.EnumerateArray().Single(t => t.GetProperty("name").GetString() == "pix_info").GetProperty("outputSchema"));
+        // The shader profiling document makes native PIX code print to standard output; the protocol stream must stay valid JSON.
+        JsonElement targets = (await server.Send("tools/call", new { name = "pix_shader_targets", arguments = new { vendor = "intel" } }, TimeSpan.FromSeconds(120))).GetProperty("result");
+        Assert.False(targets.TryGetProperty("isError", out JsonElement targetsError) && targetsError.GetBoolean(), targets.GetRawText());
 
         JsonElement jobs = (await server.Send("tools/call", new { name = "pix_jobs", arguments = new { } })).GetProperty("result");
         Assert.Equal("{\"total\":0,\"offset\":0,\"count\":0,\"items\":[]}", jobs.GetProperty("content")[0].GetProperty("text").GetString());

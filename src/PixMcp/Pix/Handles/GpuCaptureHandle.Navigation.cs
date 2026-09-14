@@ -12,7 +12,8 @@ public sealed record CapabilityDto(string State, string? Reason = null, IReadOnl
 /// </summary>
 public sealed record ReplayProvenance(string Source, string PixVersion, string? Adapter,
     uint? PowerState, string? Flags, string TimingSemantics,
-    string? AdapterName = null, string? Vendor = null, string? CaptureVendor = null, bool VendorMismatch = false, string? PixBuild = null);
+    string? AdapterName = null, string? Vendor = null, string? CaptureVendor = null, bool VendorMismatch = false, string? PixBuild = null,
+    AnalysisFlagsDto? FlagsDecoded = null, string? FlagsSource = null);
 public sealed record OccupancyCache(IPixGpuCaptureOccupancyData Data,
     IPixGpuCaptureOccupancyType[] Types, IPixGpuCaptureOccupancyStage[] Stages, string Source = "standaloneReplay");
 
@@ -117,9 +118,17 @@ public sealed partial class GpuCaptureHandle
             ["resourceContents"] = ProbedCapability("resourceContents", "a general resource readback interface"),
             ["pixelHistory"] = ProbedCapability("pixelHistory", "pixel history"),
             ["captureShaderStepping"] = ProbedCapability("captureShaderStepping", "capture shader stepping"),
+            ["staticShaderProfiling"] = PixApiSurface.Has("staticShaderProfiling") == true
+                ? new("supported", "Compiles shaders for AMD and Intel targets with the offline compilers in the PIX install, whatever GPU replays this capture (pix_shader_targets, pix_gpu_shader_static_profile).")
+                : ProbedCapability("staticShaderProfiling", "static shader profiling"),
             ["preview"] = new(File.Exists(System.IO.Path.Combine(PixDiscovery.InstallDir ?? "", "pixtool.exe"))
                 ? "supported" : "unsupported", "RTV/depth through pixtool; native analyses must be stopped first."),
-            ["exactEventPreview"] = new("unsupported", "Native event to pixtool Global ID mapping has not been verified."),
+            ["exactEventPreview"] = GlobalIdMapping switch
+            {
+                { State: GlobalIdProbe.Verified } verified => new("supported", $"pixtool Global IDs matched native GPU ids on {verified.Compared} events."),
+                { State: GlobalIdProbe.Mismatch } mismatch => new("unsupported", "pixtool Global IDs differ from native GPU ids: " + mismatch.FirstMismatch),
+                _ => new("unknown", "Checked on this capture's first eventRef preview or subcapture."),
+            },
         };
         foreach (string feature in new[] { "occupancy", "highFrequencyCounters", "shaderProfiling", "accessedResources", "systemMonitorHardwareCounters", "staticShaderProfiling", "drPixVendorExperiments" })
         {
@@ -144,6 +153,7 @@ public sealed partial class GpuCaptureHandle
             SelectedFlags is null ? null : Json.EnumName(SelectedFlags.Value),
             "EOP duration is the interval between successive completion timestamps (includes idle before the event). Execution duration is TOP-to-EOP and overlaps neighbours. derivedSum values are serialized sums of child EOP durations; mixed values add measured spans to derived sums and can over- or understate; compare percentOfQueueSpan. Replay queue spans and nested event sums are not application frame latency."
                 + (mismatch ? " The capture was taken on a different GPU vendor than the replay adapter; these numbers describe the replay GPU." : ""),
-            replay.AdapterName, GpuVendors.Name(replay.Vendor), GpuVendors.Name(capture.Vendor), mismatch, PixDiscovery.AssemblyFileVersion);
+            replay.AdapterName, GpuVendors.Name(replay.Vendor), GpuVendors.Name(capture.Vendor), mismatch, PixDiscovery.AssemblyFileVersion,
+            AnalysisFlags.Decode(SelectedFlags), AnalysisFlags.Source(SelectedFlags));
     }
 }

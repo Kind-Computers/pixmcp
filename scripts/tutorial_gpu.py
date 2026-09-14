@@ -83,11 +83,11 @@ def _snapshot_job(ctx, name, tool, **arguments):
         result.update(unavailable=True, reason=value.get("reason", "Native feature is unavailable."))
     elif tool == "pix_gpu_shader_profile":
         shader_count = ctx.call("pix_result_read", resultRef=reference,
-                                pointer="/shaderCount", limit=1)["value"]
+                                pointer="/totals/shaderCount", limit=1)["value"]
         if shader_count:
             result["shaders"] = ctx.call("pix_result_read", resultRef=reference,
                                          pointer="/shaders", limit=1)
-            args = {"resultRef": reference, "pointer": "/shaders/0/instructions", "limit": 5}
+            args = {"resultRef": reference, "pointer": "/detail/0/instructions", "limit": 5}
             instructions = ctx.call("pix_result_read", **args)
             result["instructions"] = instructions
             if instructions.get("nextOffset") is not None:

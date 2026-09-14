@@ -314,8 +314,8 @@ internal static class StructuredToolResults
     {
         "pix_gpu_analysis_start" or "pix_gpu_timing_prepare" or "pix_gpu_counters_prepare"
             or "pix_gpu_drpix_run" or "pix_gpu_bottleneck" or "pix_timing_resolve_symbols" or "pix_device_take_gpu_capture"
-            or "pix_device_timing_capture_stop" or "pix_capture_upgrade" or "pix_gpu_shader_profile" or "pix_gpu_compare" or "pix_gpu_preview"
-            or "pix_gpu_export_cpp" or "pix_csv_compare" or "pix_gpu_sql_populate" or "pix_gpu_sql_export" or "pix_job_status" or "pix_job_wait" or "pix_job_cancel" => JobSchema,
+            or "pix_device_timing_capture_stop" or "pix_capture_upgrade" or "pix_gpu_shader_profile" or "pix_gpu_shader_static_profile" or "pix_gpu_compare" or "pix_gpu_preview"
+            or "pix_gpu_export_cpp" or "pix_gpu_subcapture" or "pix_csv_compare" or "pix_gpu_sql_populate" or "pix_gpu_sql_export" or "pix_job_status" or "pix_job_wait" or "pix_job_cancel" => JobSchema,
         "pix_result_read" => ResultReadSchema,
         "pix_result_export" => Export<ResultExportDto>(),
         "pix_gpu_compare_changes" => Export<ComparisonChangesDto>(),
@@ -337,6 +337,7 @@ internal static class StructuredToolResults
         "pix_gpu_sql_tables" => Export<Sql.GpuSqlTablesDto>(),
         "pix_timing_schema" => AnyOf(Export<TimingSchemaDto>(), PendingSchema),
         "pix_jobs" => JobsSchema,
+        "pix_shader_targets" => Export<PageResult<StaticProfiling.ShaderTargetDto>>("nextOffset", "extra"),
         "pix_gpu_events" => EventPageSchema,
         "pix_gpu_resources" => AnyOf(Export<PageResult<ResourceSummaryDto>>(), PendingSchema),
         "pix_gpu_resource_timeline" => AnyOf(Export<ResourceTimelineDto>(), PendingSchema),
@@ -465,6 +466,13 @@ internal static class StructuredToolResults
 
     private static string[]? Choices(string tool, string name) => (tool, name) switch
     {
+        ("pix_shader_targets", "vendor") => StaticProfiling.StaticTargets.Vendors,
+        ("pix_gpu_analysis_start", "flags") => AnalysisFlags.Names,
+        ("pix_device_take_gpu_capture", "delimiter") => GpuCaptureOptionNames.Delimiters,
+        ("pix_device_take_gpu_capture", "captureKey") => GpuCaptureOptionNames.CaptureKeys,
+        ("pix_device_timing_capture_start", "preset") => TimingCaptureOptions.Presets,
+        ("pix_device_timing_capture_start", "virtualAllocEvents" or "heapAllocEvents" or "pixMemEvents" or "pageFaults") => TimingCaptureOptions.Levels,
+        ("pix_device_timing_capture_start", "videoSourceType") => TimingCaptureOptions.VideoSourceTypes,
         (_, "codeType") => ["HLSL", "IL", "ISA"],
         ("pix_result_read", "mode") => ["values", "outline"],
         (_, "preset") => CounterPresets.Names.ToArray(),
@@ -513,8 +521,11 @@ internal static class StructuredToolResults
 
     private static (double? min, double? max) Bounds(string tool, string name) => (tool, name) switch
     {
+        ("pix_dump_triage", "maxEvents") => (1, 50000),
+        ("pix_gpu_shader_static_profile", "topN") => (1, 200),
+        ("pix_gpu_shader_profile", "topN") => (1, 1000),
         ("pix_gpu_preview_bytes", "limit") => (1, Tools.PreviewTools.MaxBytesPerPage),
-        ("pix_gpu_preview" or "pix_gpu_export_cpp" or "pix_csv_compare", "timeoutSeconds") => (1, 3600),
+        ("pix_gpu_preview" or "pix_gpu_export_cpp" or "pix_gpu_subcapture" or "pix_csv_compare", "timeoutSeconds") => (1, 3600),
         ("pix_gpu_shader_search", "nodeIndex") => (0, null),
         ("pix_gpu_shader_search", "contextLines") => (0, 20),
         ("pix_timing_sql" or "pix_gpu_sql", "maxRows") => (1, Sql.SqlRequest.MaxMaxRows),
@@ -560,7 +571,13 @@ internal static class StructuredToolResults
                 foreach ((string name, JsonNode? property) in properties)
                 {
                     if (property is not JsonObject p) continue;
-                    if (Choices(tool, name) is string[] values) p["enum"] = new JsonArray(values.Select(v => (JsonNode?)JsonValue.Create(v)).ToArray());
+                    if (Choices(tool, name) is string[] values)
+                    {
+                        var choices = new JsonArray(values.Select(v => (JsonNode?)JsonValue.Create(v)).ToArray());
+                        // An array parameter constrains its elements.
+                        if (p["items"] is JsonObject items) items["enum"] = choices;
+                        else p["enum"] = choices;
+                    }
                     (double? min, double? max) = Bounds(tool, name);
                     if (min.HasValue) p["minimum"] = min.Value;
                     if (max.HasValue) p["maximum"] = max.Value;
@@ -601,9 +618,29 @@ internal static class StructuredToolResults
         foreach ((string name, JsonElement value) in arguments)
         {
             if (value.ValueKind == JsonValueKind.Null) continue;
-            if (Choices(tool, name) is string[] choices && value.ValueKind == JsonValueKind.String &&
-                !choices.Contains(value.GetString(), StringComparer.OrdinalIgnoreCase))
-                throw new PixToolException(PixErrors.Codes.InvalidArguments, $"{name} must be one of: {string.Join(", ", choices)}.");
+            if (Choices(tool, name) is string[] choices)
+            {
+                if (value.ValueKind == JsonValueKind.String && !IsChoice(tool, name, value.GetString()!, choices))
+                    throw new PixToolException(PixErrors.Codes.InvalidArguments, $"{name} must be one of: {string.Join(", ", choices)}.");
+                if (value.ValueKind == JsonValueKind.Array)
+                {
+                    string[] invalid = value.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String && !IsChoice(tool, name, e.GetString()!, choices))
+                        .Select(e => e.GetString()!).ToArray();
+                    if (invalid.Length > 0)
+                    {
+                        // The retry keeps every other argument and the recognised elements.
+                        var retry = new JsonObject();
+                        foreach ((string key, JsonElement argument) in arguments)
+                        {
+                            retry[key] = key != name ? JsonNode.Parse(argument.GetRawText())
+                                : new JsonArray(argument.EnumerateArray().Where(e => e.ValueKind != JsonValueKind.String || !invalid.Contains(e.GetString()))
+                                    .Select(e => JsonNode.Parse(e.GetRawText())).ToArray());
+                        }
+                        throw new PixToolException(PixErrors.Codes.InvalidArguments,
+                            $"{name} elements must be one of: {string.Join(", ", choices)}; not recognised: {string.Join(", ", invalid)}.", false, [new ToolCallDto(tool, retry)]);
+                    }
+                }
+            }
             (double? min, double? max) = Bounds(tool, name);
             if ((min.HasValue || max.HasValue) && value.ValueKind == JsonValueKind.Number)
             {
@@ -615,6 +652,10 @@ internal static class StructuredToolResults
                 ValidateArguments(tool, value.EnumerateObject().ToDictionary(p => p.Name, p => p.Value));
         }
     }
+
+    /// <summary>Choice membership, case-insensitive; analysis flags also accept their PIX_ANALYSIS_FLAG_/PIX_ANALYSIS_ spellings.</summary>
+    private static bool IsChoice(string tool, string name, string value, string[] choices)
+        => choices.Contains((tool, name) == ("pix_gpu_analysis_start", "flags") ? AnalysisFlags.ShortName(value) : value, StringComparer.OrdinalIgnoreCase);
 
     private static JsonElement CreateEventPageSchema()
     {
