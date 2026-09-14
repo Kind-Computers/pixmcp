@@ -54,7 +54,6 @@ jobs:
       PIX_TEST_CAPTURE: ${{ github.workspace }}\tests\artifacts\baseline.wpix
       PIX_TEST_ANALYSIS: "1"
       PIX_TEST_TIMING_CAPTURE: ${{ github.workspace }}\tests\artifacts\timing.wpix
-      PIX_TEST_CPP_OUTPUT: ${{ runner.temp }}\pixmcp-cpp-export-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -87,6 +86,8 @@ jobs:
       - name: Run every smoke scenario whose environment is available
         if: success() || failure()
         timeout-minutes: 45
+        env:
+          PIX_TEST_CPP_OUTPUT: ${{ runner.temp }}\pixmcp-cpp-export-${{ github.run_id }}-${{ github.run_attempt }}
         run: python scripts/smoke.py --max 2000 --all scripts/scenarios --skip-missing-env ${{ env.SERVER }}
       - name: Benchmark investigations against budgets and preserve partial failures
         if: success() || failure()
